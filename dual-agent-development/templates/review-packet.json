@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.0",
+  "packetId": "review-template",
+  "packetVersion": 1,
+  "kind": "review",
+  "capabilities": ["read_repository", "review_diff"],
+  "status": "PASS",
+  "provenance": {
+    "source": "agent_proposal",
+    "evidence": []
+  },
+  "findings": []
+}

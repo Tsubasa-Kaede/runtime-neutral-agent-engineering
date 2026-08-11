@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local orchestration runs and secrets
+.agent/runs/
+.dual-agent/runs/
+.env
+.env.*
+
+# Build and editor output
+dist/
+build/
+.vscode/
+.idea/

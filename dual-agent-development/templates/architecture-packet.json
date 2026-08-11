@@ -1,0 +1,14 @@
+{
+  "protocolVersion": "1.0",
+  "packetId": "architecture-template",
+  "packetVersion": 1,
+  "kind": "architecture",
+  "capabilities": ["read_repository", "propose_commands"],
+  "provenance": {
+    "source": "agent_proposal",
+    "evidence": []
+  },
+  "constraints": [],
+  "acceptanceEvidence": [],
+  "openRisks": []
+}
