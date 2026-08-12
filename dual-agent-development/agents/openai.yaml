@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dual-Agent Development"
+  short_description: "Run architecture, coder, and reviewer roles with evidence-based handoffs."
+  default_prompt: "Use $dual-agent-development to plan, implement, and review work in separate read-only architecture, coder, and reviewer roles with explicit evidence-based handoffs."
