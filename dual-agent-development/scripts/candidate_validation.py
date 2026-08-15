@@ -146,7 +146,10 @@ class CandidateValidationRunner:
         clock: Callable[[], float] = lambda: None,
         experiment_id: str | None = None,
         provenance: str = "OFFLINE",
+        real_invocation: bool = False,
     ) -> CandidateValidationResult:
+        if provenance == "REAL" and not real_invocation:
+            raise ValueError("REAL provenance requires real invocation evidence")
         executed_at = clock()
         passed: list = []
         results: list = []

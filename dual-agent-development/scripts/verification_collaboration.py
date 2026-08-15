@@ -12,7 +12,7 @@ success-wrapped, and never silently downgrade to single-agent.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import Enum
 
 from collaboration_handoff import handoff_input_for
@@ -21,12 +21,11 @@ from collaboration_packet import (
     CollaborationPayloadType,
     new_correlation_id,
 )
+from content_safety import packet_has_unsafe_content, sanitize_trace
 from external_runtime import ExternalAgentRequest, InvocationStatus
 from handoff_context import HandoffError
 from structured_packets import ReviewPacket, TestPacket, serialize_packet
 from task_budget import BudgetExceeded
-
-_SECRET_MARKERS = ("token", "secret", "api_key", "authorization", "bearer", "stdout", "stderr")
 
 TESTER_INSTRUCTION = (
     "You are the tester for one small, read-only task. "
@@ -60,24 +59,6 @@ class VerificationStatus(str, Enum):
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     LOOP_GUARD_REJECTED = "LOOP_GUARD_REJECTED"
     MISSING_HANDOFF = "MISSING_HANDOFF"
-
-
-def _unsafe(value) -> bool:
-    if isinstance(value, str):
-        lowered = value.lower()
-        return any(marker in lowered for marker in _SECRET_MARKERS)
-    if isinstance(value, dict):
-        return any(_unsafe(key) or _unsafe(item) for key, item in value.items())
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return any(_unsafe(item) for item in value)
-    return False
-
-
-def _packet_has_unsafe_content(packet) -> bool:
-    # Whole-packet recursive scan; the open dict fields (failures/findings)
-    # are the known carrier of raw stdout/stderr that the structured_packets
-    # cleaner does not reject.
-    return _unsafe(asdict(packet))
 
 
 @dataclass(frozen=True)
@@ -131,14 +112,14 @@ class VerificationCollaboration:
             agent_id=tester_address, role="tester",
             timeout_seconds=self.budget.timeout_seconds or 120))
         if tester_result.trace is not None:
-            traces.append(tester_result.trace)
+            traces.append(sanitize_trace(tester_result.trace))
         if tester_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "test", tester_address,
                                            "tester_invoke_failed")
             self.state = self.state.append_failure(task_id, status="TESTER_INVOKE_FAILED")
             return outcome(VerificationStatus.TESTER_INVOKE_FAILED)
         test_packet = _parse_packet(tester_result.output, TestPacket, task_id)
-        if test_packet is None or _packet_has_unsafe_content(test_packet):
+        if test_packet is None or packet_has_unsafe_content(test_packet):
             self.state = self.state.append_failure(task_id, status="TESTER_PACKET_INVALID")
             return outcome(VerificationStatus.TESTER_PACKET_INVALID)
         test_envelope = self._envelope(
@@ -168,14 +149,14 @@ class VerificationCollaboration:
             agent_id=reviewer_address, role="reviewer",
             timeout_seconds=self.budget.timeout_seconds or 120))
         if reviewer_result.trace is not None:
-            traces.append(reviewer_result.trace)
+            traces.append(sanitize_trace(reviewer_result.trace))
         if reviewer_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "review", reviewer_address,
                                            "reviewer_invoke_failed")
             self.state = self.state.append_failure(task_id, status="REVIEWER_INVOKE_FAILED")
             return outcome(VerificationStatus.REVIEWER_INVOKE_FAILED, test_envelope)
         review_packet = _parse_packet(reviewer_result.output, ReviewPacket, task_id)
-        if review_packet is None or _packet_has_unsafe_content(review_packet):
+        if review_packet is None or packet_has_unsafe_content(review_packet):
             self.state = self.state.append_failure(task_id, status="REVIEWER_PACKET_INVALID")
             return outcome(VerificationStatus.REVIEWER_PACKET_INVALID, test_envelope)
         review_envelope = self._envelope(

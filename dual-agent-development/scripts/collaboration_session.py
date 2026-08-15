@@ -21,13 +21,12 @@ from collaboration_packet import (
     new_correlation_id,
     serialize_packet,
 )
+from content_safety import SECRET_MARKERS, packet_has_unsafe_content, sanitize_trace
 from external_runtime import ExternalAgentRequest, InvocationStatus
 from remote_transport import RemoteDeliveryStatus
 from structured_packets import ArchitecturePacket, ImplementationPacket
 from task_budget import BudgetExceeded
 from verified_selection_bridge import agent_id_for
-
-_SECRET_MARKERS = ("token", "secret", "api_key", "authorization", "bearer", "stdout", "stderr")
 
 ARCHITECT_INSTRUCTION = (
     "You are the architect for one small, read-only design task. "
@@ -79,7 +78,7 @@ def _assert_outcome_text_clean(value, field_name: str) -> None:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a string")
     lowered = value.lower()
-    for marker in _SECRET_MARKERS:
+    for marker in SECRET_MARKERS:
         if marker in lowered:
             raise ValueError(f"{field_name} must not contain secret-shaped content")
 
@@ -141,9 +140,14 @@ def _packet_from_output(output, packet_class, task_id):
     # the packet belongs to this task by construction.
     data["task_id"] = task_id
     try:
-        return packet_class.from_dict(_normalize(data))
+        packet = packet_class.from_dict(_normalize(data))
     except (PacketValidationError, TypeError, KeyError, ValueError):
         return None
+    # Whole-packet unsafe-content scan (same contract as the verification
+    # layer): raw stdout/stderr/secret markers must never enter a packet.
+    if packet_has_unsafe_content(packet):
+        return None
+    return packet
 
 
 class CollaborationSession:
@@ -184,7 +188,7 @@ class CollaborationSession:
             timeout_seconds=self.budget.timeout_seconds or 120,
         ))
         if architect_result.trace is not None:
-            traces.append(architect_result.trace)
+            traces.append(sanitize_trace(architect_result.trace))
         if architect_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "architect", architect_address,
                                             "architect_invoke_failed")
@@ -229,7 +233,7 @@ class CollaborationSession:
             timeout_seconds=self.budget.timeout_seconds or 120,
         ))
         if coder_result.trace is not None:
-            traces.append(coder_result.trace)
+            traces.append(sanitize_trace(coder_result.trace))
         if coder_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "coder", coder_address,
                                            "coder_invoke_failed")

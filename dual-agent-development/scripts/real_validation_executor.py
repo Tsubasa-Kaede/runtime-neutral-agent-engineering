@@ -296,12 +296,11 @@ def run_real_validation(
         adapter, agent_id=agent_id, timeout_seconds=timeout_seconds,
         protected_paths=protected_paths, identity=instance.identity, env=source,
     )
-    provenance = "OFFLINE"
-    if source.get(GATE_ENV_NAME, "") == "1":
-        provenance = "REAL"
+    gate_open = source.get(GATE_ENV_NAME, "") == "1"
+    provenance = "REAL" if gate_open else "OFFLINE"
     executor.note_executed_at(clock())
     result = CandidateValidationRunner().run(
         instance, executor, clock=clock, experiment_id=experiment_id,
-        provenance=provenance,
+        provenance=provenance, real_invocation=gate_open,
     )
     return result, executor

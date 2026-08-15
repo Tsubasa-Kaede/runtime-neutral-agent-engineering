@@ -269,11 +269,11 @@ class CandidateValidationSkeletonTests(unittest.TestCase):
     def test_explicit_offline_equals_default(self):
         self.assertEqual(bare_result(), bare_result(provenance="OFFLINE"))
 
-    # 29. REAL 经 Runner 透传
+    # 29. REAL 经 Runner 透传（需真实调用证据，10H-J 收紧）
     def test_real_provenance_passes_through_runner(self):
         result = CandidateValidationRunner().run(
             instance(), pass_all, clock=lambda: 1.0,
-            experiment_id="exp-real", provenance="REAL",
+            experiment_id="exp-real", provenance="REAL", real_invocation=True,
         )
         self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
         self.assertEqual(result.provenance, "REAL")
