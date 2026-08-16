@@ -244,5 +244,66 @@ class QualificationSemanticsTests(unittest.TestCase):
             self.assertNotIn("RealGateExecutor", source)
 
 
+class CoderFailureContractTests(unittest.TestCase):
+    """G14-C Task B: coder-specific failure paths, full observability."""
+
+    def g14_of(self, adapter):
+        result, _, g14 = run_open(adapter)
+        return result, g14
+
+    def test_coder_invalid_packet_records_role(self):
+        result, g14 = self.g14_of(RoleAdapter(bad_roles=("coder",)))
+        self.assertEqual(result.status, CandidateValidationStatus.FAILED)
+        self.assertEqual(g14.evidence.get("failure_role"), "coder")
+        self.assertEqual(g14.evidence.get("failure_category"), "PACKET_INVALID")
+        self.assertEqual(result.validated_capabilities, ())
+        # No fabrication: never VERIFIED-with-capabilities on a failure.
+        self.assertFalse(result.status is CandidateValidationStatus.VERIFIED
+                         and result.validated_capabilities)
+
+    def test_coder_type_error_is_categorized(self):
+        adapter = RoleAdapter(bad_roles=("coder",))
+        result, g14 = self.g14_of(adapter)
+        shape = g14.evidence.get("shape") or {}
+        detail = g14.evidence.get("failure_detail")
+        self.assertIn(detail, ("SCHEMA", "RAW_PARSE", "CONTENT_SAFETY"))
+
+    def test_coder_content_safety(self):
+        result, g14 = self.g14_of(RoleAdapter(unsafe_roles=("coder",)))
+        self.assertEqual(g14.evidence.get("failure_role"), "coder")
+        self.assertEqual(g14.evidence.get("failure_category"), "PACKET_INVALID")
+        self.assertEqual(g14.evidence.get("failure_detail"), "CONTENT_SAFETY")
+        self.assertTrue((g14.evidence.get("shape") or {}).get("content_safety_hit"))
+
+    def test_coder_adapter_exception_type_only(self):
+        result, g14 = self.g14_of(RoleAdapter(raising_roles=("coder",)))
+        self.assertEqual(g14.evidence.get("failure_role"), "coder")
+        self.assertEqual(g14.evidence.get("failure_category"), "ADAPTER_EXCEPTION")
+        self.assertEqual(g14.evidence.get("exception_type"), "TimeoutError")
+        self.assertNotIn("secret in message", repr(g14).lower())
+
+    def test_coder_timeout(self):
+        result, g14 = self.g14_of(RoleAdapter(timeout_roles=("coder",)))
+        self.assertEqual(g14.evidence.get("failure_role"), "coder")
+        self.assertEqual(g14.evidence.get("failure_category"), "INVOCATION_FAILED")
+        self.assertEqual(g14.evidence.get("failure_detail"), "TIMEOUT")
+
+    def test_coder_failure_evidence_has_no_raw_output(self):
+        _, g14 = self.g14_of(RoleAdapter(bad_roles=("coder",)))
+        surface = repr(g14.evidence).lower()
+        for marker in SECRET_MARKERS + ("capability-evidence",):
+            self.assertNotIn(marker, surface)
+
+    def test_qualification_failure_does_not_fabricate_real(self):
+        result, _ = self.g14_of(RoleAdapter(bad_roles=("coder",)))
+        self.assertNotEqual(result.status, CandidateValidationStatus.VERIFIED)
+        self.assertEqual(result.validated_capabilities, ())
+        # provenance may honestly say REAL (the gated run happened), but a
+        # failure never yields the VERIFIED+REAL+capabilities triple.
+        self.assertFalse(result.status is CandidateValidationStatus.VERIFIED
+                         and result.provenance == "REAL"
+                         and result.validated_capabilities == CAPS_ALL)
+
+
 if __name__ == "__main__":
     unittest.main()
