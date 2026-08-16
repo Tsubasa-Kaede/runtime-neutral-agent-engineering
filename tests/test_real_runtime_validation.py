@@ -8,6 +8,7 @@ REAL label. The single real smoke test runs only under
 RUN_REAL_PROVIDER_TESTS=1 with the real Claude Code adapter.
 """
 import os
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -72,10 +73,40 @@ class FakeAdapter:
 
     def invoke(self, request):
         self.invoke_calls.append(request)
+        # G14 capability experiments ask per-role; answer with a valid packet
+        # for that role (offline fake of the real experiments).
+        role_output = _ROLE_PACKETS.get(request.agent_id)
+        if role_output is not None:
+            return InvocationResult(
+                InvocationStatus.SUCCESS, output=json.dumps(role_output), trace=_trace())
         return self.invocation_result
 
     def cancel(self, invocation_id):
         return InvocationResult(InvocationStatus.CANCELLED)
+
+
+_ROLE_PACKETS = {
+    "architect": {
+        "task_id": "capability-evidence", "role": "architect", "goal": ["g"],
+        "constraints": ["c"], "architecture": ["a"], "interfaces": [{}],
+        "implementation_steps": [{}], "acceptance_criteria": ["ac"], "risks": [{}],
+    },
+    "coder": {
+        "task_id": "capability-evidence", "role": "coder", "changed_files": ["f.py"],
+        "implementation_summary": "s", "implementation_details": ["d"],
+        "assumptions": [], "unresolved_items": [], "test_requirements": ["tr"],
+    },
+    "tester": {
+        "task_id": "capability-evidence", "role": "tester", "tests_run": ["t"],
+        "tests_passed": ["t"], "tests_failed": [], "failures": [],
+        "coverage_or_validation": [], "remaining_risks": [],
+    },
+    "reviewer": {
+        "task_id": "capability-evidence", "role": "reviewer", "status": "PASS",
+        "findings": [], "severity": [], "affected_files": [],
+        "required_changes": [], "acceptance_criteria_status": [],
+    },
+}
 
 
 def _trace(status=InvocationStatus.SUCCESS, exit_code=0, duration_ms=800):
@@ -212,15 +243,21 @@ class Phase10GBOfflineVerifiedTests(unittest.TestCase):
     def test_fake_executor_verified_stays_offline(self):
         # Gate flag is injected into the executor only (no os.environ patch):
         # the helper's REAL branch is deliberately NOT exercised offline.
+        # G14 (capability evidence gate) adds 4 role experiments to the one
+        # minimal invocation: 5 total, provenance stays OFFLINE via the
+        # direct runner call.
         executor = RealGateExecutor(FakeAdapter(), env={"RUN_REAL_PROVIDER_TESTS": "1"})
         result = CandidateValidationRunner().run(
             instance(), executor, clock=lambda: 1.0,
             experiment_id="exp-mock", provenance="OFFLINE")
         self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
         self.assertEqual(result.provenance, "OFFLINE")
-        self.assertEqual(executor.invocation_count, 1)
-        self.assertEqual(len(executor.adapter.invoke_calls), 1)
+        self.assertEqual(executor.invocation_count, 5)
+        self.assertEqual(len(executor.adapter.invoke_calls), 5)
         self.assertEqual(executor.adapter.invoke_calls[0].prompt, MINIMAL_PROMPT)
+        self.assertEqual(
+            sorted(call.agent_id for call in executor.adapter.invoke_calls[1:]),
+            ["architect", "coder", "reviewer", "tester"])
 
     def test_real_provenance_literal_appears_only_in_gated_helper(self):
         import real_validation_executor as module

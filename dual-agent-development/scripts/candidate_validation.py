@@ -45,6 +45,7 @@ class ValidationGate(IntEnum):
     G11_STRUCTURED_PACKET = 11
     G12_SECURITY = 12
     G13_CONFIGURATION_INTEGRITY = 13
+    G14_CAPABILITY_EVIDENCE = 14
 
 
 class GateVerdict(str, Enum):

@@ -65,10 +65,10 @@ class ScenarioAVerified(unittest.TestCase):
         )
         self.assertIsInstance(result, CandidateValidationResult)
         self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
-        self.assertEqual({int(g) for g in result.gates_passed}, set(range(1, 14)))
+        self.assertEqual({int(g) for g in result.gates_passed}, set(range(1, 15)))
         self.assertIsNone(result.block_reason)
         self.assertIsNone(result.failure_point)
-        self.assertEqual(called, list(range(1, 14)))
+        self.assertEqual(called, list(range(1, 15)))
         self.assertEqual(result.identity,
                          ("runtime-a", "provider-a", "model-a", "fingerprint-a"))
 
@@ -249,7 +249,7 @@ class ScenarioKNoRuntimeInvocation(unittest.TestCase):
         )
         self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
         self.assertEqual(probe.mock_calls, [])  # runtime invocation count == 0
-        self.assertEqual(called, list(range(1, 14)))
+        self.assertEqual(called, list(range(1, 15)))
 
 
 class ScenarioLNoBudgetOrGuardMutation(unittest.TestCase):

@@ -1,13 +1,17 @@
 """Real Runtime Validation executor — opt-in, adapter-injected, neutral.
 
-Coordinates the 13 validation gates against an injected adapter. G1-G4 use
+Coordinates the 14 validation gates against an injected adapter. G1-G4 use
 read-only probes only. G5 performs the single real minimal invocation and is
 double-gated on RUN_REAL_PROVIDER_TESTS=="1" (helper-level and executor-
 level); without the gate the run BLOCKS with zero invocations. G6-G11 derive
 their evidence from that one invocation's trace and result. G12 scans only
 safe summary surfaces for secret shapes. G13 compares an injected protected-
-path snapshot. The executor expresses evidence; it never fabricates success:
-provenance="REAL" is passed by the helper solely when the real gate is open,
+path snapshot. G14 runs four minimal real role experiments (architect, coder,
+tester, reviewer) under the same gate; capabilities are emitted ONLY when
+each experiment's real output parses into the role's packet through the
+existing normalization and content-safety boundaries. The executor expresses
+evidence; it never fabricates success: provenance="REAL" is passed by the
+helper solely when the real gate is open (with real invocation evidence),
 and any gate failure keeps the result at BLOCKED/FAILED.
 """
 from __future__ import annotations
@@ -24,9 +28,46 @@ from candidate_validation import (
     GateVerdict,
     ValidationGate,
 )
+from collaboration_session import (
+    ARCHITECT_INSTRUCTION,
+    CODER_INSTRUCTION,
+    _packet_from_output,
+)
 from external_runtime import ExternalAgentRequest, InvocationStatus
+from structured_packets import (
+    ArchitecturePacket,
+    ImplementationPacket,
+    ReviewPacket,
+    TestPacket,
+    serialize_packet,
+)
+from verification_collaboration import (
+    REVIEWER_INSTRUCTION,
+    TESTER_INSTRUCTION,
+)
 
 MINIMAL_PROMPT = "Return exactly OK and nothing else."
+
+CAPABILITY_TASK_ID = "capability-evidence"
+
+# Minimal valid upstream packets embedded as experiment inputs: each role's
+# contract is exercised against a fixed, deterministic input, independent of
+# any other experiment (chain proof belongs to the four-stage smoke).
+_CAP_ARCH = {
+    "task_id": CAPABILITY_TASK_ID, "role": "architect", "goal": ["g"],
+    "constraints": ["c"], "architecture": ["a"], "interfaces": [{}],
+    "implementation_steps": [{}], "acceptance_criteria": ["ac"], "risks": [{}],
+}
+_CAP_IMPL = {
+    "task_id": CAPABILITY_TASK_ID, "role": "coder", "changed_files": ["f.py"],
+    "implementation_summary": "s", "implementation_details": ["d"],
+    "assumptions": [], "unresolved_items": [], "test_requirements": ["tr"],
+}
+_CAP_TEST = {
+    "task_id": CAPABILITY_TASK_ID, "role": "tester", "tests_run": ["t"],
+    "tests_passed": ["t"], "tests_failed": [], "failures": [],
+    "coverage_or_validation": [], "remaining_risks": [],
+}
 
 _SECRET_MARKERS = ("token", "secret", "api_key", "authorization", "bearer", "stdout", "stderr")
 
@@ -90,6 +131,7 @@ class RealGateExecutor:
             ValidationGate.G11_STRUCTURED_PACKET: self._gate_structured_output,
             ValidationGate.G12_SECURITY: self._gate_security,
             ValidationGate.G13_CONFIGURATION_INTEGRITY: self._gate_config_integrity,
+            ValidationGate.G14_CAPABILITY_EVIDENCE: self._gate_capability_evidence,
         }
         return handlers[gate](gate)
 
@@ -229,6 +271,78 @@ class RealGateExecutor:
                               evidence={"protected_files": len(before), "changed": 0})
         return self._failed(gate, "VALIDATION_FAILED: protected configuration mutated",
                             evidence={"config_mutated": True, "changed": len(changed)})
+
+    # -- G14: real capability evidence experiments ---------------------------
+
+    def _capability_prompts(self):
+        """Role -> (prompt, packet_class) for the four experiments."""
+        arch_wire = serialize_packet(ArchitecturePacket.from_dict(_CAP_ARCH))
+        impl_wire = serialize_packet(ImplementationPacket.from_dict(_CAP_IMPL))
+        test_wire = serialize_packet(TestPacket.from_dict(_CAP_TEST))
+        # The tester/reviewer instructions list keys but not value types; a
+        # real run answered "tests_run": 0 (number) and a bare string for a
+        # list field. Pin the types explicitly for the experiments.
+        tester_types = (
+            "\n\nType rules: tests_run, tests_passed, tests_failed, failures, "
+            "coverage_or_validation and remaining_risks must each be a JSON "
+            "array (use [] when empty); never a number or a bare string. "
+            "You may report zero tests honestly with empty arrays.")
+        reviewer_types = (
+            "\n\nType rules: findings, severity, affected_files, "
+            "required_changes and acceptance_criteria_status must each be a "
+            "JSON array (use [] when empty); never a number or a bare string.")
+        return (
+            ("architect", "architecture", ArchitecturePacket,
+             ARCHITECT_INSTRUCTION + f'task_id must be exactly "{CAPABILITY_TASK_ID}".\n\nTask: '
+             + "Design a minimal slug helper."),
+            ("coder", "coding", ImplementationPacket,
+             CODER_INSTRUCTION + arch_wire),
+            ("tester", "testing", TestPacket,
+             TESTER_INSTRUCTION + impl_wire + tester_types),
+            ("reviewer", "review", ReviewPacket,
+             REVIEWER_INSTRUCTION + impl_wire + "\n\nTest packet:\n" + test_wire
+             + reviewer_types),
+        )
+
+    def _gate_capability_evidence(self, gate) -> GateResult:
+        if not self._gate_enabled:
+            # Unreachable in practice (G5 blocks first); kept as defense.
+            return self._blocked(gate, "REAL_RUNTIME_GATE_NOT_ENABLED: capability "
+                                      "evidence requires the open gate")
+        invocation_ids = []
+        verified_roles = []
+        capabilities = []
+        for role, capability, packet_class, prompt in self._capability_prompts():
+            request = ExternalAgentRequest(
+                task_id=CAPABILITY_TASK_ID, prompt=prompt,
+                agent_id=role, role=role,
+                timeout_seconds=self._timeout_seconds,
+            )
+            try:
+                result = self.adapter.invoke(request)
+            except Exception:
+                return self._failed(
+                    gate, f"CAPABILITY_EXPERIMENT_FAILED: {role} raised")
+            self.invocation_count += 1
+            trace = getattr(result, "trace", None)
+            invocation_ids.append(str(getattr(trace, "invocation_id", "")))
+            status = getattr(result, "status", None)
+            if status is not InvocationStatus.SUCCESS:
+                return self._failed(
+                    gate, f"CAPABILITY_EXPERIMENT_FAILED: {role} invocation failed")
+            # Parse through the existing boundary: fence strip, normalization,
+            # task identity, from_dict and whole-packet content safety.
+            packet = _packet_from_output(result.output, packet_class, CAPABILITY_TASK_ID)
+            if packet is None:
+                return self._failed(
+                    gate, f"CAPABILITY_EXPERIMENT_FAILED: {role} packet invalid")
+            verified_roles.append(role)
+            capabilities.append(capability)
+        return GateResult(
+            gate, GateVerdict.PASS,
+            evidence={"roles": tuple(verified_roles),
+                      "invocation_ids": tuple(invocation_ids)},
+            capabilities=tuple(sorted(set(capabilities))))
 
     # -- helpers ---------------------------------------------------------------
 

@@ -96,7 +96,7 @@ class CandidateValidationSkeletonTests(unittest.TestCase):
     # 4. Gate 顺序固定
     def test_gate_order_is_fixed(self):
         order = [g.value for g in ValidationGate]
-        self.assertEqual(order, list(range(1, 14)))
+        self.assertEqual(order, list(range(1, 15)))
 
     # 5. Gate 1–4 外部阻塞 → BLOCKED
     def test_external_blockage_in_first_four_gates_blocks(self):
@@ -133,7 +133,7 @@ class CandidateValidationSkeletonTests(unittest.TestCase):
     def test_all_pass_yields_verified(self):
         result = self.run_with(pass_all)
         self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
-        self.assertEqual(len(result.gates_passed), 13)
+        self.assertEqual(len(result.gates_passed), 14)
         self.assertIsNone(result.block_reason)
         self.assertIsNone(result.failure_point)
 
@@ -171,7 +171,7 @@ class CandidateValidationSkeletonTests(unittest.TestCase):
         shuffled.reverse()
         seen = []
         self.run_with(lambda gate: (seen.append(int(gate)), pass_all(gate))[1])
-        self.assertEqual(seen, list(range(1, 14)))
+        self.assertEqual(seen, list(range(1, 15)))
 
     # 12. deterministic
     def test_deterministic_with_fixed_clock(self):
