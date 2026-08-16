@@ -34,7 +34,11 @@ TESTER_INSTRUCTION = (
     "task_id, role, tests_run, tests_passed, tests_failed, failures, "
     "coverage_or_validation, remaining_risks. "
     'task_id must equal the packet task_id and role must be "tester". '
-    "No prose, no markdown fences. Do not modify files or run commands.\n\n"
+    "No prose, no markdown fences. Do not modify files or run commands. "
+    "Type rules: tests_run, tests_passed, tests_failed, failures, "
+    "coverage_or_validation and remaining_risks must each be a JSON "
+    "array (use [] when empty); never a number or a bare string. "
+    "You may report zero tests honestly with empty arrays.\n\n"
     "Implementation packet:\n"
 )
 
@@ -45,7 +49,10 @@ REVIEWER_INSTRUCTION = (
     "task_id, role, status, findings, severity, affected_files, "
     "required_changes, acceptance_criteria_status. "
     'task_id must equal the packet task_id and role must be "reviewer". '
-    "No prose, no markdown fences. Do not modify files or run commands.\n\n"
+    "No prose, no markdown fences. Do not modify files or run commands. "
+    "Type rules: findings, severity, affected_files, "
+    "required_changes and acceptance_criteria_status must each be a "
+    "JSON array (use [] when empty); never a number or a bare string.\n\n"
     "Implementation packet:\n"
 )
 
