@@ -1,13 +1,12 @@
 {
-  "protocolVersion": "1.0",
-  "packetId": "review-template",
-  "packetVersion": 1,
-  "kind": "review",
-  "capabilities": ["read_repository", "review_diff"],
+  "task_id": "example-task",
+  "role": "reviewer",
   "status": "PASS",
-  "provenance": {
-    "source": "agent_proposal",
-    "evidence": []
-  },
-  "findings": []
+  "findings": [
+    {"finding": "What the review observed", "location": "src/example.py"}
+  ],
+  "severity": ["info"],
+  "affected_files": ["src/example.py"],
+  "required_changes": ["Changes required before acceptance, if any"],
+  "acceptance_criteria_status": ["criterion 1: satisfied with evidence"]
 }

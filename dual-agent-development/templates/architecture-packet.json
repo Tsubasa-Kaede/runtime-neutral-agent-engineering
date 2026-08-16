@@ -1,14 +1,17 @@
 {
-  "protocolVersion": "1.0",
-  "packetId": "architecture-template",
-  "packetVersion": 1,
-  "kind": "architecture",
-  "capabilities": ["read_repository", "propose_commands"],
-  "provenance": {
-    "source": "agent_proposal",
-    "evidence": []
-  },
-  "constraints": [],
-  "acceptanceEvidence": [],
-  "openRisks": []
+  "task_id": "example-task",
+  "role": "architect",
+  "goal": ["Describe what the task must achieve"],
+  "constraints": ["Constraints the implementation must respect"],
+  "architecture": ["Structural decisions and module layout"],
+  "interfaces": [
+    {"name": "example_function", "params": ["text"], "returns": "str"}
+  ],
+  "implementation_steps": [
+    {"step": 1, "action": "First implementation step"}
+  ],
+  "acceptance_criteria": ["Observable criteria a reviewer can verify"],
+  "risks": [
+    {"risk": "Known risk", "mitigation": "How it is addressed"}
+  ]
 }

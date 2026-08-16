@@ -1,0 +1,10 @@
+{
+  "task_id": "example-task",
+  "role": "coder",
+  "changed_files": ["src/example.py"],
+  "implementation_summary": "One-paragraph summary of what was implemented",
+  "implementation_details": ["What each change does and why"],
+  "assumptions": ["Assumptions made while implementing"],
+  "unresolved_items": ["Anything intentionally left open"],
+  "test_requirements": ["Tests that must exist or be run"]
+}

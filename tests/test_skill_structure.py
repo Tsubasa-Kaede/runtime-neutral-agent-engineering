@@ -44,13 +44,20 @@ class ProtocolTests(unittest.TestCase):
                     yield from forbidden_keys(nested)
 
         base = ROOT / "dual-agent-development" / "templates"
-        for name in ("architecture-packet.json", "review-packet.json"):
+        # V2 (10H-L): templates follow the V2 packet schema; the V1 protocol
+        # fields (protocolVersion/packetId/packetVersion) are retired. Guard
+        # that no template carries V1 residue and none authorizes commands.
+        for name in ("architecture-packet.json", "implementation-packet.json",
+                     "test-packet.json", "review-packet.json"):
             payload = json.loads((base / name).read_text(encoding="utf-8"))
-            self.assertEqual(payload["protocolVersion"], "1.0")
-            self.assertIn("provenance", payload)
+            for v1_field in ("protocolVersion", "packetId", "packetVersion", "kind"):
+                self.assertNotIn(v1_field, payload, name)
             self.assertEqual(list(forbidden_keys(payload)), [])
 
     def test_architecture_template_is_accepted(self):
+        # V2 (10H-L): the architecture template follows the V2 packet schema,
+        # so the legacy V1 protocol validator must reject it — asserting the
+        # absence of V1 residue rather than the retired protocol's acceptance.
         from scripts.validate_skill import validate_packet
 
         path = (
@@ -60,7 +67,7 @@ class ProtocolTests(unittest.TestCase):
             / "architecture-packet.json"
         )
         packet = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(validate_packet(packet, "architecture"), [])
+        self.assertNotEqual(validate_packet(packet, "architecture"), [])
 
     def test_validator_rejects_unknown_terminal_status(self):
         from scripts.validate_skill import validate_packet

@@ -7,13 +7,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ProtocolValidatorTests(unittest.TestCase):
     def test_valid_review_packet_is_accepted(self):
+        # V2 (10H-L): the review template follows the V2 packet schema; the
+        # legacy V1 protocol validator must reject it (V1 residue guard).
         from scripts.validate_skill import validate_packet
 
         packet = json.loads(
             (ROOT / "dual-agent-development" / "templates" / "review-packet.json")
             .read_text(encoding="utf-8")
         )
-        self.assertEqual(validate_packet(packet, "review"), [])
+        self.assertNotEqual(validate_packet(packet, "review"), [])
 
     def test_packet_identity_capabilities_and_finding_ids_are_validated(self):
         from scripts.validate_skill import validate_packet

@@ -1,0 +1,12 @@
+{
+  "task_id": "example-task",
+  "role": "tester",
+  "tests_run": ["tests/test_example.py"],
+  "tests_passed": ["tests/test_example.py::test_basic"],
+  "tests_failed": [],
+  "failures": [
+    {"test": "tests/test_example.py::test_edge", "reason": "observed vs expected"}
+  ],
+  "coverage_or_validation": ["What the executed tests actually verified"],
+  "remaining_risks": ["What remains untested and why"]
+}

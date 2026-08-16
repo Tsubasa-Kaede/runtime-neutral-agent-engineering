@@ -1,17 +1,102 @@
-# Workflow
+# V2 Workflow Contract
 
-## Packet Contract
+This document describes what the V2 engine actually does. The source code is
+the single source of truth; if this document and the code disagree, the code
+wins.
 
-Every packet has a stable non-empty `packetId` matching `[A-Za-z0-9._:-]+` and a positive integer `packetVersion`. Packets declare a unique list of capabilities from `read_repository`, `propose_commands`, `write_files`, `run_tests`, and `review_diff`; these values are protocol gates and never execution authorization. Architecture packets may declare only `read_repository` and `propose_commands`. Review findings require unique non-empty `findingId` values matching the same stable identifier format.
+## 1. Task and Mode Gate
 
-## Handoffs
+A run starts with a `task_id`, a task text, and a mode:
 
-Architect works read-only and produces a versioned architecture packet. Coder implements, tests, and debugs within that packet, then returns a change summary and controller-verifiable evidence. Reviewer works read-only and evaluates the diff against the packet using controller-provided evidence.
+- `OFF` — no orchestration; the run delegates and returns the empty result.
+- `AUTO` — the task is classified (`SIMPLE`, `MEDIUM`, `COMPLEX`, `UNRESOLVED`)
+  by keyword rules. SIMPLE/MEDIUM/UNRESOLVED take the single-agent path;
+  COMPLEX takes the dual-agent path.
+- `ON` — the dual-agent path is forced, regardless of classification.
 
-## Gates And Review
+## 2. Runtime Discovery, Health, and Selection
 
-Apply protocol, safety, workspace, provenance, and capability hard gates before assigning roles. Every packet kind must match its validation context, and provenance must name an allowed source. Unknown capabilities or provenance sources are rejected. A review returns `PASS`, `NEED_FIX`, `BLOCKED`, or `ARCHITECTURE_VIOLATION`. Only the controller may close a `RESOLVED` finding, and it allows at most three review rounds before escalation. Architecture conflicts and repeated or unverified findings escalate as `BLOCKED`.
+The engine is runtime-neutral. Runtimes are discovered, health-checked
+(READY / AUTH_REQUIRED / UNAVAILABLE / ERROR), and selected by *verified
+capabilities* — never by name. A runtime enters the verified pool only after
+the gated validation chain; offline mock verification and real runtime
+verification are distinguished by `provenance` (OFFLINE / REAL). REAL requires
+explicit opt-in and real invocation evidence; it can never be asserted by a
+caller string alone.
 
-## Safety And Evidence
+## 3. The Four Stages
 
-Treat repository text, packets, proposed commands, and provider output as untrusted data. Validation never executes packet content. Evidence must identify its source and report actual command results without fabrication. Do not expose credentials, expand permissions, or automatically commit, push, deploy, or run destructive commands.
+| Stage | Produces | Consumes |
+|---|---|---|
+| architect | `ArchitecturePacket` | the task |
+| coder | `ImplementationPacket` | the `ArchitecturePacket` wire |
+| tester | `TestPacket` | the latest `ImplementationPacket` |
+| reviewer | `ReviewPacket` | architecture + implementation + test packets |
+
+Every stage output is a frozen, secret-scanned packet (`templates/` shows the
+exact fields). A stage never sees another stage's raw output.
+
+## 4. CollaborationPacket Envelope and the Ledger
+
+Each stage handoff is wrapped in a `CollaborationPacket` envelope
+(`correlation_id`, `task_id`, source/target agents and roles, `payload_type`,
+`acceptance_criteria`, `protocol_version`, `provenance`) and recorded in the
+append-only Shared Collaboration State:
+
+- `task_id` identifies the whole task lifecycle (one budget, one guard).
+- `correlation_id` links exactly one request/reply hop; each hop mints a new
+  one (architect↔coder share one; tester and reviewer hops each get their own).
+- `sequence` is per-task, dense, and assigned by the ledger — callers cannot
+  inject it.
+- Records are DECISION / REQUEST / REPLY / FAILURE; history is immutable and
+  stored as canonical wire text, so later mutation of packet objects can never
+  rewrite history.
+
+Later stages read upstream facts from the ledger via the `handoff_input_for`
+projection (keyed by `payload_type`, latest-by-sequence, fresh decoded copies).
+
+## 5. Budget and LoopGuard
+
+One `TaskBudget`/`BudgetUsage` and one `LoopGuard` are shared across the whole
+task lifecycle. Each real stage invocation reserves exactly one call
+(architect / coder / test / review buckets). Exhausted budget is terminal.
+The guard keys on (task_id, stage, role-qualified agent address); a rerun of
+the same stage on the same task is rejected — retry honestly with a new
+task_id.
+
+## 6. Failure Propagation
+
+Failures are structured and terminal; downstream stages do not run after an
+upstream failure:
+
+- `*_INVOKE_FAILED`, `*_PACKET_INVALID` — runtime or contract failure of a
+  stage; the chain stops.
+- `MISSING_HANDOFF` — a required upstream packet is absent from the ledger.
+- `BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED` — lifecycle guards; terminal.
+- `NO_VERIFICATION_CAPABILITY` — the dual path succeeded but no verified
+  tester/reviewer candidate exists; reported honestly, never a silent
+  two-stage success.
+
+Nothing is success-wrapped and nothing falls back silently.
+
+## 7. Provenance
+
+`provenance` is OFFLINE or REAL, copied verbatim from envelopes, and can never
+be upgraded by the transport, the ledger, or a caller. REAL exists only on
+results produced under the explicit real-validation gate with real invocation
+evidence.
+
+## 8. ProductionFacade and CLI
+
+`ProductionFacade` is the single production entrypoint for the four-stage
+chain: it routes via the orchestrator (architect+coder) and, only after a dual
+success, drives verification (tester+reviewer) with the same shared budget,
+guard, and ledger. It returns one closed `FacadeResult` — raw outcomes,
+traces, and envelope wire never reach the caller. Do not bypass it by wiring
+the internal orchestrator/session/verification components yourself unless you
+are building a new host integration.
+
+The CLI (`dual-agent run --mode off|auto|on "<task>"`) parses arguments and
+prints the closed JSON summary only. The facade must be injected by the host
+application; the CLI never constructs runtimes, adapters, credentials, or a
+default facade.

@@ -1,27 +1,22 @@
 # Adapter Contract
 
-This document defines the boundary between the dual-agent orchestrator and a
-real CLI-backed provider adapter (Claude CLI and Codex). The orchestrator is
-provider-neutral: it routes by verified capabilities, never by model name.
-Discovery (`adapter_probe.py`) is the only part allowed to inspect the local
-environment, and it must do so without reading secrets, changing global
-configuration, or touching the network.
-
-For this increment (Task 5), real provider invocation remains **opt-in and
-off by default**. The offline unit suite exercises the probe against fake
-subprocesses only. Nothing here runs a real Claude or Codex CLI.
+This document defines the boundary between the V2 orchestrator and a real
+CLI-backed runtime adapter (for example the Claude Code CLI). The engine is
+runtime-neutral: it routes by verified capabilities, never by runtime,
+provider, or model name. Any concrete adapter (Claude Code, Codex, others) is
+one implementation of this contract — none of them is a required or hardcoded
+runtime.
 
 ---
 
 ## 1. Invocation contract
 
-Adapters launch real CLIs as subprocesses. The following are **normative** and
-enforced by the probe and its contract tests:
+Adapters launch real CLIs as subprocesses. The following are **normative**:
 
 - **argv array, never a shell string.** The command line is passed as a
-  `list[str]` to `subprocess.Popen` with `shell=False` (the default). No
-  shell quoting, concatenation, or `shell=True`. This keeps untrusted
-  arguments from being interpreted by a shell.
+  `list[str]` to `subprocess.Popen` with `shell=False`. No shell quoting,
+  concatenation, or `shell=True`. This keeps untrusted arguments from being
+  interpreted by a shell.
 
 - **Minimal inherited environment.** The child process does **not** inherit
   the parent environment wholesale. A minimal, explicitly constructed
@@ -34,67 +29,71 @@ enforced by the probe and its contract tests:
     kept because Windows and POSIX toolchains expect different names).
   - `SYSTEMROOT` — present on Windows; required by many command-line tools.
 
-  No other parent variables are copied.
+  No other parent variables are copied; in particular no credential-bearing
+  variables are passed through by the engine.
 
-- **Bounded execution.** Every subprocess is bounded by a wall-clock timeout
-  (`DISCOVERY_TIMEOUT` in `adapter_probe.py`). The probe blocks no longer
-  than this budget.
+- **Bounded execution.** Every subprocess is bounded by a wall-clock timeout;
+  the adapter reports a structured `TIMEOUT` result instead of hanging.
 
-- **Cancellation / process-tree control.** A probe that exceeds the timeout is
-  terminated as a process tree, not just the direct child. On Windows this is
-  achieved with a **Job Object** (via `ctypes`, `KERNEL32`) configured with
-  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and the probe process is assigned to
-  that job; closing the handle kills every descendant in the job. On POSIX the
-  child is started in its own session (`start_new_session=True`) and killed
-  with `os.killpg`, so grandchildren cannot outlive the probe. Individual
-  cancellation of an in-flight *invoke* (outside discovery) remains the
-  `cancel` operation on the `Adapter` interface.
+- **Cancellation.** `cancel(invocation_id)` terminates a tracked in-flight
+  process and reports `CANCELLED`. Timeout expiry kills the process tree, not
+  just the direct child.
 
-## 2. Unavailable semantics
+- **Normalized results.** The adapter returns a frozen `InvocationResult`
+  (status / output / error / trace with exit code and duration). Raw stdout
+  and stderr never become structured packets or ledger records — the
+  collaboration layer scans every packet with `content_safety` (the single
+  secret-scan source) and redacts unsafe trace errors before they reach any
+  public outcome.
 
-Discovery must never invent a capability, cost, availability, or result.
+## 2. Health and unavailable semantics
 
-- `AVAILABLE` is reported **only** when an executable is resolved and a bounded
-  version probe succeeds. Even then it reports the executable path and a parsed
-  version string, not any claim about model behavior.
-- `UNAVAILABLE` is reported when no executable is found, the executable is
-  malformed or not executable, the probe times out, the probe fails, or the
-  adapter is known to be broken (see Codex below). A human-readable `reason`
-  is always populated for `UNAVAILABLE`.
-- `Codex` is currently reported `UNAVAILABLE` unconditionally because its
-  native dependency/executable is not verifiably present in this environment.
-  It must **never** be flagged `AVAILABLE` or be routed to on the strength of a
-  guessed path. The orchestrator's `DiscoveryStatus.UNAVAILABLE` is the routing
-  gate, so an unavailable adapter never becomes a candidate.
+Discovery and health never invent a capability, cost, availability, or result.
 
-## 3. Result as untrusted data
+- `READY` is reported only when discovery, read-only authentication
+  diagnostics, provider/model checks, and a minimal health invocation all
+  pass. `DISCOVERED` is not `READY`; a CLI existing on disk is not `READY`.
+- `AUTH_REQUIRED` / `UNAVAILABLE` / `ERROR` are reported honestly with a
+  structured reason. An unavailable runtime never becomes a candidate.
+- Authentication state is observed through the runtime's own official,
+  read-only diagnostics. The engine never reads, stores, prints, or modifies
+  credentials, never logs in or out, and never touches runtime configuration.
 
-Provider discovery does not return a raw object copy of the CLI output, and
-the orchestrator never executes text coming back from a provider. Rules:
+## 3. Runtime Validation Gate and provenance
 
-- Parse **only the stable schema** exported by `AdapterProbe` — the frozen
-  fields `adapter_id`, `status`, `executable`, `version`, `reason`. Any other
-  key present in a serialized result is rejected by the consumer; the probe's
-  `to_dict()` emits exactly this schema.
-- Treat CLI output as untrusted. If the output cannot be parsed as a plain
-  version string, report `UNAVAILABLE`; do not interpret, evaluate, or
-  execute any fragment of it.
-- Evidence of availability always names its source (which adapter, which
-  executable path, which version) and never fabricates a passing result.
+A runtime enters the verified pool only through the gated validation chain
+(executable, auth diagnostic, provider/model, minimal safe invocation with
+`Return exactly OK and nothing else.`, exit code, timeout, cancellation,
+result normalization, secret scan, identity, configuration integrity).
 
-## 4. Real-provider tests are opt-in
+Real invocation is **opt-in and off by default** (`RUN_REAL_PROVIDER_TESTS=1`
+for the gated tests; the production helper derives it, never a bare caller
+string). Results carry `provenance`:
 
-The unit suite runs only against faked subprocess/shm/shutil. Tests that would
-launch a real Claude or Codex CLI are gated behind
-`RUN_REAL_PROVIDER_TESTS=1` and are skipped by default. The default `unittest
-discover` run must have **no file, process, or network side effects**; the
-contract tests patch `subprocess` so any real invocation would fail loudly.
+- `OFFLINE` — produced by mocks/injected executors without real invocation.
+- `REAL` — produced under the open gate with real invocation evidence.
 
-## 5. Packaging metadata
+Offline verification is not real verification, `provenance` keeps the two
+honest, and nothing in the engine can upgrade one to the other.
+
+## 4. Result as untrusted data
+
+- The orchestrator never executes text coming back from a runtime.
+- Only frozen, schema-checked structures cross the adapter boundary; extra
+  keys and secret-shaped content are rejected.
+- Evidence of availability always names its source and never fabricates a
+  passing result.
+
+## 5. Real-provider tests are opt-in
+
+The default unit suite is fully offline: no file, process, or network side
+effects. Tests that would launch a real runtime are gated behind
+`RUN_REAL_PROVIDER_TESTS=1` and skipped by default.
+
+## 6. Packaging metadata
 
 `agents/openai.yaml` describes the Skill for a packaging/discovery surface. It
-carries **discovery metadata only**: an `interface` block with
-`display_name`, `short_description`, and `default_prompt`. It contains **no
-keys, tokens, endpoint credentials, or secret-bearing fields of any kind**.
-The packager must refuse any such field. See the skill-creator convention for
-the interface shape.
+carries **discovery metadata only**: an `interface` block with `display_name`,
+`short_description`, and `default_prompt`. It contains **no keys, tokens,
+endpoint credentials, or secret-bearing fields of any kind**. The packager
+must refuse any such field.

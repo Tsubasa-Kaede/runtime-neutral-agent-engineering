@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dual-agent-development"
+version = "2.0.0"
+description = "Runtime-neutral dual-agent collaboration orchestrator: architect, coder, tester, reviewer with structured packets and an append-only ledger."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+# cli.main requires a host-injected facade and reports a clear error without
+# one; it never constructs runtimes, adapters, or credentials by itself.
+dual-agent = "dual_agent.cli:main"
+
+[tool.setuptools]
+packages = ["dual_agent"]
+
+[tool.setuptools.package-dir]
+dual_agent = "dual-agent-development/scripts"
+
+[tool.setuptools.data-files]
+"share/dual-agent/skill" = ["dual-agent-development/SKILL.md"]
+"share/dual-agent/skill/references" = [
+  "dual-agent-development/references/workflow.md",
+  "dual-agent-development/references/adapter-contract.md",
+]
+"share/dual-agent/skill/templates" = [
+  "dual-agent-development/templates/architecture-packet.json",
+  "dual-agent-development/templates/implementation-packet.json",
+  "dual-agent-development/templates/test-packet.json",
+  "dual-agent-development/templates/review-packet.json",
+]
+"share/dual-agent/skill/agents" = [
+  "dual-agent-development/agents/architect.md",
+  "dual-agent-development/agents/coder.md",
+  "dual-agent-development/agents/tester.md",
+  "dual-agent-development/agents/reviewer.md",
+  "dual-agent-development/agents/openai.yaml",
+]
+"share/dual-agent/examples" = ["examples/offline_mock_run.py"]
