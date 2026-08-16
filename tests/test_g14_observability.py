@@ -91,7 +91,8 @@ class RoleAdapter:
             return InvocationResult(InvocationStatus.SUCCESS, output="OK", trace=trace())
         role = request.agent_id
         if role in self.raising_roles:
-            raise TimeoutError(f"secret in message {role} should never leak")
+            exc_type = getattr(self, "_raise", TimeoutError)
+            raise exc_type(f"secret in message {role} should never leak")
         if role in self.timeout_roles:
             return InvocationResult(InvocationStatus.TIMEOUT, error="t",
                                     trace=trace(InvocationStatus.TIMEOUT, None))
@@ -281,6 +282,29 @@ class CoderFailureContractTests(unittest.TestCase):
         self.assertEqual(g14.evidence.get("failure_category"), "ADAPTER_EXCEPTION")
         self.assertEqual(g14.evidence.get("exception_type"), "TimeoutError")
         self.assertNotIn("secret in message", repr(g14).lower())
+
+    def test_architect_runtime_error_exception_type_only(self):
+        # architect is the historically observed failing role; the adapter
+        # raises a RuntimeError whose message carries a fake secret — only
+        # the type name may surface.
+        adapter = RoleAdapter(raising_roles=("architect",))
+        adapter._raise = RuntimeError  # make the raise a RuntimeError
+        result, g14 = self.g14_of(adapter)
+        self.assertEqual(g14.evidence.get("failure_role"), "architect")
+        self.assertEqual(g14.evidence.get("failure_category"), "ADAPTER_EXCEPTION")
+        self.assertEqual(g14.evidence.get("exception_type"), "RuntimeError")
+        surface = repr(g14.evidence).lower()
+        self.assertNotIn("secret in message", surface)
+
+    def test_exception_args_never_enter_evidence(self):
+        result, g14 = self.g14_of(RoleAdapter(raising_roles=("reviewer",)))
+        self.assertNotIn("args", g14.evidence)
+        self.assertNotIn("message", g14.evidence)
+        # evidence keys stay within the finite observability vocabulary
+        self.assertTrue(set(g14.evidence.keys()) <= {
+            "failure_role", "failure_category", "failure_detail",
+            "exception_type", "shape", "invocation_count", "roles",
+            "invocation_ids"})
 
     def test_coder_timeout(self):
         result, g14 = self.g14_of(RoleAdapter(timeout_roles=("coder",)))
