@@ -16,6 +16,7 @@ and any gate failure keeps the result at BLOCKED/FAILED.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ from candidate_validation import (
 from collaboration_session import (
     ARCHITECT_INSTRUCTION,
     CODER_INSTRUCTION,
+    _normalize,
     _packet_from_output,
 )
 from external_runtime import ExternalAgentRequest, InvocationStatus
@@ -304,6 +306,55 @@ class RealGateExecutor:
              + reviewer_types),
         )
 
+    def _g14_shape_diagnosis(self, output, packet_class):
+        """Categorical-only shape facts (field names and booleans, never
+        values) plus a finite boundary detail for a failed experiment."""
+        shape = {"parseable_json": False, "missing_fields": [],
+                 "type_mismatch_fields": [], "content_safety_hit": False}
+        text = output if isinstance(output, str) else ""
+        text = text.strip()
+        if text.startswith("```"):
+            first_newline = text.find("\n")
+            text = text[first_newline + 1:] if first_newline != -1 else ""
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return shape, "RAW_PARSE"
+        shape["parseable_json"] = True
+        if not isinstance(data, dict):
+            return shape, "RAW_PARSE"
+        data["task_id"] = CAPABILITY_TASK_ID
+        shape["missing_fields"] = [
+            field for field in packet_class.REQUIRED_FIELDS if field not in data]
+        if shape["missing_fields"]:
+            return shape, "SCHEMA"
+        for field in packet_class.REQUIRED_FIELDS:
+            if field in ("task_id", "role", "status", "implementation_summary"):
+                continue
+            if not isinstance(data[field], (list, tuple)):
+                shape["type_mismatch_fields"].append(field)
+        try:
+            packet_class.from_dict(_normalize(data))
+        except (ValueError, TypeError, KeyError):
+            return shape, "SCHEMA"
+        # Construction succeeded, so the outer rejection was content safety.
+        shape["content_safety_hit"] = True
+        return shape, "CONTENT_SAFETY"
+
+    def _g14_failure(self, gate, role, category, detail, reason, evidence_base,
+                     exception_type=None, shape=None):
+        evidence = dict(evidence_base)
+        evidence.update({
+            "failure_role": role,
+            "failure_category": category,
+            "failure_detail": detail,
+            "exception_type": exception_type,
+            "shape": shape,
+        })
+        return self._failed(gate, reason, evidence)
+
     def _gate_capability_evidence(self, gate) -> GateResult:
         if not self._gate_enabled:
             # Unreachable in practice (G5 blocks first); kept as defense.
@@ -312,7 +363,13 @@ class RealGateExecutor:
         invocation_ids = []
         verified_roles = []
         capabilities = []
-        for role, capability, packet_class, prompt in self._capability_prompts():
+        experiments = self._capability_prompts()
+        for index, (role, capability, packet_class, prompt) in enumerate(experiments):
+            base_evidence = {
+                "roles": tuple(verified_roles),
+                "invocation_ids": tuple(invocation_ids),
+                "invocation_count": index,
+            }
             request = ExternalAgentRequest(
                 task_id=CAPABILITY_TASK_ID, prompt=prompt,
                 agent_id=role, role=role,
@@ -320,22 +377,35 @@ class RealGateExecutor:
             )
             try:
                 result = self.adapter.invoke(request)
-            except Exception:
-                return self._failed(
-                    gate, f"CAPABILITY_EXPERIMENT_FAILED: {role} raised")
+            except Exception as exc:
+                # Record the exception TYPE only — messages may carry
+                # secrets, prompts or raw output and must never surface.
+                return self._g14_failure(
+                    gate, role, "ADAPTER_EXCEPTION", None,
+                    f"CAPABILITY_EXPERIMENT_FAILED: {role} adapter raised "
+                    f"{type(exc).__name__}",
+                    base_evidence, exception_type=type(exc).__name__,
+                    shape={"adapter_raised": True})
             self.invocation_count += 1
+            base_evidence["invocation_count"] = index + 1
             trace = getattr(result, "trace", None)
             invocation_ids.append(str(getattr(trace, "invocation_id", "")))
             status = getattr(result, "status", None)
             if status is not InvocationStatus.SUCCESS:
-                return self._failed(
-                    gate, f"CAPABILITY_EXPERIMENT_FAILED: {role} invocation failed")
+                return self._g14_failure(
+                    gate, role, "INVOCATION_FAILED",
+                    getattr(status, "value", None),
+                    f"CAPABILITY_EXPERIMENT_FAILED: {role} invocation failed",
+                    base_evidence)
             # Parse through the existing boundary: fence strip, normalization,
             # task identity, from_dict and whole-packet content safety.
             packet = _packet_from_output(result.output, packet_class, CAPABILITY_TASK_ID)
             if packet is None:
-                return self._failed(
-                    gate, f"CAPABILITY_EXPERIMENT_FAILED: {role} packet invalid")
+                shape, detail = self._g14_shape_diagnosis(result.output, packet_class)
+                return self._g14_failure(
+                    gate, role, "PACKET_INVALID", detail,
+                    f"CAPABILITY_EXPERIMENT_FAILED: {role} packet invalid",
+                    base_evidence, shape=shape)
             verified_roles.append(role)
             capabilities.append(capability)
         return GateResult(
