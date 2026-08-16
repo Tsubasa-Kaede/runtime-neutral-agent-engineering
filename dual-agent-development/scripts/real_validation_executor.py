@@ -293,10 +293,24 @@ class RealGateExecutor:
             "\n\nType rules: findings, severity, affected_files, "
             "required_changes and acceptance_criteria_status must each be a "
             "JSON array (use [] when empty); never a number or a bare string.")
+        # Architect experiments have historically failed RAW_PARSE (prose /
+        # fences despite the base instruction) and CONTENT_SAFETY (legitimate
+        # prose using marker words). Strengthen the experiment-local output
+        # contract — the base instruction, the packet schema and the scan
+        # itself stay untouched and fully strict.
+        architect_format = (
+            "\n\nFormat rules: your entire reply must be a single JSON object "
+            "that starts with { and ends with } — no markdown fences, no "
+            "text before or after it. goal, constraints, architecture and "
+            "acceptance_criteria must each be a JSON array (use [] when "
+            "empty); never a number or a bare string. interfaces, "
+            "implementation_steps and risks must be arrays of objects. Keep "
+            "every item short. Do not use the words token, secret, api_key, "
+            "authorization, bearer, stdout or stderr anywhere in the JSON.")
         return (
             ("architect", "architecture", ArchitecturePacket,
              ARCHITECT_INSTRUCTION + f'task_id must be exactly "{CAPABILITY_TASK_ID}".\n\nTask: '
-             + "Design a minimal slug helper."),
+             + "Design a minimal slug helper." + architect_format),
             ("coder", "coding", ImplementationPacket,
              CODER_INSTRUCTION + arch_wire),
             ("tester", "testing", TestPacket,
