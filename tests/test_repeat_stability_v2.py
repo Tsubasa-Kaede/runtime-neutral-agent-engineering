@@ -41,7 +41,7 @@ CAPS_ALL = ("architecture", "coding", "review", "testing")
 STAGES = ("architect", "coder", "tester", "reviewer")
 SECRET_MARKERS = ("token", "secret", "api_key", "authorization", "bearer",
                   "stdout", "stderr")
-N_RUNS = 5
+N_RUNS = 10
 TIMEOUT_SECONDS = 300.0
 
 
@@ -111,7 +111,7 @@ class StabilitySession:
 
     def run_four_stage(self, index):
         """One pure FOUR_STAGE run: shared pool, fresh lifecycle objects."""
-        task_id = f"stability-v2-r{index}"
+        task_id = f"repeat-stability-v2b-r{index}"
         identity = self.identity
         arch = collab_agent_address(identity, "architect")
         coder = collab_agent_address(identity, "coder")
