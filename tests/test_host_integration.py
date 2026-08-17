@@ -34,6 +34,7 @@ from runtime_status import (
     RuntimeStatus,
 )
 from task_budget import BudgetUsage
+from verified_selection_bridge import agent_id_for
 
 IDENTITY = ("rt-host", "provider-h", None, "fp-host")
 CAPS_ALL = ("architecture", "coding", "review", "testing")
@@ -51,6 +52,9 @@ TEST_P = {"task_id": "t", "role": "tester", "tests_run": ["x"], "tests_passed": 
 REVIEW_P = {"task_id": "t", "role": "reviewer", "status": "PASS", "findings": [],
             "severity": [], "affected_files": [], "required_changes": [],
             "acceptance_criteria_status": []}
+
+
+IDENTITY_BARE = agent_id_for(IDENTITY)
 
 
 def trace():
@@ -186,6 +190,54 @@ class HostContractTests(unittest.TestCase):
                           "reserve_call", "loop_guard.check"):
             import re
             self.assertIsNone(re.search(forbidden, source), forbidden)
+
+
+class StringOutputAdapter(HostAdapter):
+    """Mimics the REAL adapter: successful output is a JSON *string*, and
+    routing is by prompt semantics (not by agent_id format) — the bare
+    identity agent id (SINGLE path) is a coder invocation."""
+
+    @staticmethod
+    def _ok(output):
+        return InvocationResult(InvocationStatus.SUCCESS, output=output, trace=trace())
+
+    def invoke(self, request):
+        self.invocations += 1
+        if request.prompt.startswith("Return exactly OK"):
+            return self._ok("OK")
+        if request.agent_id == IDENTITY_BARE:
+            return self._ok(json.dumps(IMPL_P))
+        for role, packet in (("architect", ARCH_P), ("coder", IMPL_P),
+                             ("tester", TEST_P), ("reviewer", REVIEW_P)):
+            if request.agent_id == role or request.agent_id.endswith(f',"{role}"]'):
+                return self._ok(json.dumps(packet))
+        return self._ok(json.dumps(IMPL_P))
+
+
+class SingleRealFormatTests(unittest.TestCase):
+    """RED for RC-2B: the SINGLE executor consumes dict packets while the
+    collaboration stack parses JSON text — the host seam must convert the
+    real adapter's string output for the SINGLE path only (phase-9 E2E
+    precedent: controller-side parsing), without touching the dual path."""
+
+    def test_single_path_succeeds_with_string_output_adapter(self):
+        adapter = StringOutputAdapter()
+        facade = build_facade(adapter, validation_result(), health())
+        result = facade.run(task_id="fmt-1", task="fix one simple bug",
+                            prompt="fix one simple bug", mode=Mode.AUTO)
+        self.assertEqual(result.path, "SINGLE")
+        self.assertEqual(result.status, "SUCCESS", result.failure_category)
+        self.assertEqual(adapter.invocations, 1)
+
+    def test_dual_path_still_receives_wire_text(self):
+        adapter = StringOutputAdapter()
+        facade = build_facade(adapter, validation_result(), health())
+        result = facade.run(task_id="fmt-2",
+                            task="redesign architecture across modules",
+                            prompt="redesign architecture across modules",
+                            mode=Mode.ON)
+        self.assertEqual(result.path, "FOUR_STAGE")
+        self.assertEqual(result.status, "SUCCESS")
 
 
 class CliHostIntegrationTests(unittest.TestCase):

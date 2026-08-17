@@ -9,10 +9,13 @@ packet routing, no qualification logic, no retry, no fallback.
 """
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from typing import Any, Mapping
 
 from collaboration_orchestrator import CollaborationOrchestrator
 from collaboration_session import CollaborationSession, collab_agent_address
+from external_runtime import InvocationStatus
 from mode_gate import Mode
 from production_facade import ProductionFacade
 from remote_transport import LoopbackRemoteTransport
@@ -24,6 +27,52 @@ from verified_selection_bridge import agent_id_for
 from verified_runtime_pool import VerifiedRuntimePool
 
 _CAPS_ALL = ("architecture", "coding", "review", "testing")
+
+
+class _ParsedPacketAdapter:
+    """Composition seam for the SINGLE executor (phase-9 E2E precedent).
+
+    The single-path engine consumes dict packets directly, while the
+    collaboration stack parses JSON text itself — so only the SINGLE
+    executor's adapter view converts a successful JSON-string output into
+    the parsed dict. Failures and non-string outputs pass through
+    untouched; nothing is fabricated (unparseable text stays as-is and the
+    engine reports it honestly)."""
+
+    def __init__(self, inner: Any):
+        self._inner = inner
+
+    def discover(self):
+        return self._inner.discover()
+
+    def check_authentication(self):
+        return self._inner.check_authentication()
+
+    def check_provider_model(self):
+        return self._inner.check_provider_model()
+
+    def cancel(self, invocation_id):
+        return self._inner.cancel(invocation_id)
+
+    def invoke(self, request):
+        result = self._inner.invoke(request)
+        output = getattr(result, "output", None)
+        status = getattr(result, "status", None)
+        if status is not InvocationStatus.SUCCESS or not isinstance(output, str):
+            return result
+        text = output.strip()
+        if text.startswith("```"):
+            first_newline = text.find("\n")
+            text = text[first_newline + 1:] if first_newline != -1 else ""
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return result
+        if isinstance(parsed, dict):
+            return replace(result, output=parsed)
+        return result
 
 
 class HostFacade(ProductionFacade):
@@ -69,10 +118,12 @@ def build_facade(
     pool.admit(validation, _CAPS_ALL, health_now="READY")
 
     # SINGLE/OFF route: a REAL VerifiedOrchestrator over the same pool —
-    # the host never stubs the engine it hands to the user.
+    # the host never stubs the engine it hands to the user. The executor's
+    # adapter view goes through the parsing seam (dict packets); the
+    # collaboration stack below keeps the raw wire-text adapter.
     verified_orchestrator = VerifiedOrchestrator(
         pool, current_health,
-        {agent_id_for(identity): adapter},
+        {agent_id_for(identity): _ParsedPacketAdapter(adapter)},
         budget, usage, guard)
 
     def session_factory():
