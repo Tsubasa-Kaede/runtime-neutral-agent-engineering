@@ -99,7 +99,7 @@ class RoleAdapter:
         if role in self.bad_roles:
             payload["goal"] = "not-an-array"
         if role in self.unsafe_roles:
-            payload["constraints"] = ["must not write to stdout"]
+            payload["constraints"] = ["leaked api_key=abc123 in logs"]
         return InvocationResult(InvocationStatus.SUCCESS,
                                 output=json.dumps(payload), trace=trace())
 
@@ -176,8 +176,15 @@ class ContentSafetyContractTests(unittest.TestCase):
         result, g14 = run_open(RoleAdapter(unsafe_roles=("architect",)))
         self.assertEqual(result.status, CandidateValidationStatus.FAILED)
         self.assertEqual(g14.evidence.get("failure_role"), "architect")
-        self.assertEqual(g14.evidence.get("failure_detail"), "CONTENT_SAFETY")
-        self.assertTrue((g14.evidence.get("shape") or {}).get("content_safety_hit"))
+        self.assertEqual(g14.evidence.get("failure_category"), "PACKET_INVALID")
+        # A credential shape may be intercepted by the schema layer
+        # (SCHEMA, structured_packets assignment pattern) or the
+        # collaboration safety layer (CONTENT_SAFETY) — both rejections
+        # are correct; the category must be PACKET_INVALID either way.
+        self.assertIn(g14.evidence.get("failure_detail"),
+                      ("SCHEMA", "CONTENT_SAFETY"))
+        self.assertTrue((g14.evidence.get("shape") or {}).get("content_safety_hit")
+                        or g14.evidence.get("failure_detail") == "SCHEMA")
         self.assertEqual(result.validated_capabilities, ())
 
     def test_safety_failure_evidence_is_structured_only(self):
@@ -196,16 +203,22 @@ class ContentSafetyContractTests(unittest.TestCase):
                          ("token", "secret", "api_key", "authorization",
                           "bearer", "stdout", "stderr"))
 
-    def test_semantic_gap_is_documented_not_fixed(self):
-        # A legitimate technical constraint ("must not write to stdout") is
-        # rejected by the whole-packet scan. Distinguishing "genuinely unsafe
-        # content" from "legitimate prose containing a marker word" is not
-        # possible with the current binary scan — recorded as a semantic gap
-        # for a future design decision; the scan stays strict.
-        result, _ = run_open(RoleAdapter(unsafe_roles=("architect",)))
-        self.assertEqual(result.status, CandidateValidationStatus.FAILED)
-        # CONTENT_SAFETY_SEMANTIC_GAP: no code change here, this test pins
-        # the current honest behavior.
+    def test_semantic_gap_is_resolved_not_documented(self):
+        # G15 RESOLVED the CONTENT_SAFETY_SEMANTIC_GAP with a two-tier
+        # split: credential SHAPES in prose values and marker words in
+        # structural keys are rejected; legitimate technical prose that
+        # merely MENTIONS a marker word ("must not write to stdout") is
+        # accepted. This test pins the fixed semantics; the true-positive
+        # side is covered by test_unsafe_architect_output_fails_with_safety_detail.
+        import json as _json
+        from collaboration_session import _packet_from_output
+        from structured_packets import ArchitecturePacket
+        payload = dict(ARCH)
+        payload["constraints"] = ["must not write to stdout during tests"]
+        packet = _packet_from_output(_json.dumps(payload), ArchitecturePacket,
+                                     "capability-evidence")
+        self.assertIsNotNone(packet)
+        self.assertIn("must not write to stdout during tests", packet.constraints)
 
 
 class G5IndependenceTests(unittest.TestCase):

@@ -96,18 +96,33 @@ def run_session(arch_result, coder_result=None):
 
 
 class Gap1SecurityAsymmetryTests(unittest.TestCase):
-    def test_architect_packet_with_raw_stdout_is_rejected(self):
-        # A bare "stdout" substring in a free string field passes the
-        # structured_packets cleaner (its pattern has no stdout/stderr marker),
-        # so this proves the whole-packet scan is required.
-        bad = arch_dict(goal=("stdout dump leaked",))
+    def test_architect_packet_with_credential_shape_is_rejected(self):
+        # G15 two-tier semantics: prose mentioning a marker word is fine, a
+        # credential assignment in a value is what the whole-packet scan
+        # exists to reject (the structured_packets cleaner pattern requires
+        # an assignment shape for exactly these words).
+        bad = arch_dict(goal=("leaked api_key=abc123 here",))
         _, outcome = run_session(ok(bad))
         self.assertEqual(outcome.status, CollaborationStatus.ARCHITECT_PACKET_INVALID)
         self.assertIsNone(outcome.request_envelope)
 
-    def test_coder_packet_with_raw_stderr_is_rejected(self):
+    def test_architect_packet_with_structural_dump_key_is_rejected(self):
+        # A raw-dump carrier as an interface object key is still rejected.
+        bad = arch_dict()
+        bad["interfaces"] = [{"stdout": "raw process dump"}]
+        _, outcome = run_session(ok(bad))
+        self.assertEqual(outcome.status, CollaborationStatus.ARCHITECT_PACKET_INVALID)
+
+    def test_architect_prose_mentioning_marker_word_is_accepted(self):
+        # The historical false positive (G14-D run 2): a constraint that
+        # merely says "must not write to stdout" is legitimate prose.
+        clean = arch_dict(goal=("must not write to stdout during tests",))
+        _, outcome = run_session(ok(clean))
+        self.assertEqual(outcome.status, CollaborationStatus.SUCCESS)
+
+    def test_coder_packet_with_credential_shape_is_rejected(self):
         bad_impl = impl_dict()
-        bad_impl["implementation_summary"] = "stderr trace leaked"
+        bad_impl["implementation_summary"] = "leaked token=deadbeef to logs"
         _, outcome = run_session(ok(arch_dict()), ok(bad_impl))
         self.assertEqual(outcome.status, CollaborationStatus.CODER_PACKET_INVALID)
         self.assertIsNone(outcome.reply_envelope)

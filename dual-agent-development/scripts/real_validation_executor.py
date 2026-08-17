@@ -182,8 +182,12 @@ class RealGateExecutor:
         )
         try:
             result = self.adapter.invoke(request)
-        except Exception:
-            return self._failed(gate, "INVOCATION_FAILED: executor raised during invocation")
+        except Exception as exc:
+            # Exception TYPE only: messages/args may contain paths, prompts,
+            # raw runtime output or secrets and must never enter evidence.
+            return self._failed(
+                gate, "INVOCATION_FAILED: executor raised during invocation",
+                evidence={"exception_type": type(exc).__name__})
         self.invocation_count += 1
         self._last_result = result
         self._trace = getattr(result, "trace", None)
