@@ -29,7 +29,7 @@ from runtime_status import (
     RuntimeStatus,
 )
 
-IDENTITY = ("claude-cli", "anthropic", None, "fp-rc2-host-4")
+IDENTITY = ("claude-cli", "anthropic", None, "fp-rc2b-single-1")
 CAPS_ALL = ("architecture", "coding", "review", "testing")
 DUAL_TASK = ("Produce a minimal implementation plan for adding a pure function "
              "that converts Celsius to Fahrenheit. Do not modify files.")

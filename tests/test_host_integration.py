@@ -193,9 +193,11 @@ class HostContractTests(unittest.TestCase):
 
 
 class StringOutputAdapter(HostAdapter):
-    """Mimics the REAL adapter: successful output is a JSON *string*, and
-    routing is by prompt semantics (not by agent_id format) — the bare
-    identity agent id (SINGLE path) is a coder invocation."""
+    """Mimics the REAL adapter: (a) output is a JSON *string*; (b) routing
+    by prompt semantics — bare identity (SINGLE) is a coder invocation;
+    (c) PROMPT-SENSITIVE: without a packet-contract instruction in the
+    prompt it answers free text (like a real model asked nothing about
+    JSON), so the host seam must supply the contract."""
 
     @staticmethod
     def _ok(output):
@@ -205,7 +207,10 @@ class StringOutputAdapter(HostAdapter):
         self.invocations += 1
         if request.prompt.startswith("Return exactly OK"):
             return self._ok("OK")
+        has_contract = "Return ONLY a JSON object" in request.prompt
         if request.agent_id == IDENTITY_BARE:
+            if not has_contract:
+                return self._ok("I would fix the bug by editing the file.")
             return self._ok(json.dumps(IMPL_P))
         for role, packet in (("architect", ARCH_P), ("coder", IMPL_P),
                              ("tester", TEST_P), ("reviewer", REVIEW_P)):
@@ -228,6 +233,16 @@ class SingleRealFormatTests(unittest.TestCase):
         self.assertEqual(result.path, "SINGLE")
         self.assertEqual(result.status, "SUCCESS", result.failure_category)
         self.assertEqual(adapter.invocations, 1)
+
+    def test_single_prompt_gets_packet_contract_at_host_seam(self):
+        """RED for the REAL finding: the single engine forwards the raw
+        prompt; without a packet contract the real model answers free text
+        and the packet parse fails. The host seam must embed the contract."""
+        adapter = StringOutputAdapter()
+        facade = build_facade(adapter, validation_result(), health())
+        result = facade.run(task_id="fmt-3", task="fix one simple bug",
+                            prompt="fix one simple bug", mode=Mode.AUTO)
+        self.assertEqual(result.status, "SUCCESS", result.failure_category)
 
     def test_dual_path_still_receives_wire_text(self):
         adapter = StringOutputAdapter()

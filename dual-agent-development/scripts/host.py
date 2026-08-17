@@ -29,17 +29,32 @@ from verified_runtime_pool import VerifiedRuntimePool
 _CAPS_ALL = ("architecture", "coding", "review", "testing")
 
 
+_SINGLE_CODER_INSTRUCTION = (
+    "You are the coder for one small, read-only task. "
+    "Return ONLY a JSON object with exactly these keys: "
+    "task_id, role, changed_files, implementation_summary, "
+    "implementation_details, assumptions, unresolved_items, "
+    "test_requirements. role must be \"coder\". changed_files, "
+    "implementation_details, assumptions, unresolved_items and "
+    "test_requirements must each be a JSON array (use [] when empty); "
+    "never a number or a bare string. No prose, no markdown fences. "
+    "Do not modify files or run commands.\n\nTask: "
+)
+
+
 class _ParsedPacketAdapter:
     """Composition seam for the SINGLE executor (phase-9 E2E precedent).
 
-    The single-path engine consumes dict packets directly, while the
-    collaboration stack parses JSON text itself — so only the SINGLE
-    executor's adapter view converts a successful JSON-string output into
-    the parsed dict. Failures and non-string outputs pass through
-    untouched; nothing is fabricated (unparseable text stays as-is and the
-    engine reports it honestly)."""
+    The single-path engine forwards the caller's prompt verbatim and
+    consumes dict packets directly, while the collaboration stack builds
+    packet-contract prompts itself and parses JSON text — so this seam,
+    applied ONLY to the single executor's adapter view, (a) embeds a
+    packet-contract instruction around the raw task and (b) converts a
+    successful JSON-string output into the parsed dict. Failures and
+    non-string outputs pass through untouched; nothing is fabricated
+    (unparseable text stays as-is and the engine reports it honestly)."""
 
-    def __init__(self, inner: Any):
+    def __init__(self, inner: Any, task_id_getter=None):
         self._inner = inner
 
     def discover(self):
@@ -55,6 +70,9 @@ class _ParsedPacketAdapter:
         return self._inner.cancel(invocation_id)
 
     def invoke(self, request):
+        prompt = request.prompt
+        if "Return ONLY a JSON object" not in prompt:
+            request = replace(request, prompt=_SINGLE_CODER_INSTRUCTION + prompt)
         result = self._inner.invoke(request)
         output = getattr(result, "output", None)
         status = getattr(result, "status", None)
@@ -71,6 +89,8 @@ class _ParsedPacketAdapter:
         except (TypeError, ValueError):
             return result
         if isinstance(parsed, dict):
+            parsed = dict(parsed)
+            parsed["task_id"] = request.task_id
             return replace(result, output=parsed)
         return result
 
