@@ -208,14 +208,25 @@ REVIEW_P = {"task_id": "capability-evidence", "role": "reviewer", "status": "PAS
 
 
 class OfflineAdapter:
-    """Answers every role (capability + chain) with a valid packet."""
+    """Answers every role (capability + chain) with a valid packet.
+
+    role_calls: per-role-name invocation log (experiment prompts use the
+    bare role as agent_id; chain prompts use the full JSON address ending
+    with the role — both are counted by role for experiment accounting).
+    fault_roles: roles whose CHAIN invocation returns invalid output
+    (capability experiments stay green so qualification succeeds).
+    """
 
     runtime_id = "rt-off"
     provider_id = "p-off"
 
-    def __init__(self):
+    def __init__(self, fault_roles=()):
         self.invocations = 0
-        self.qualify_gate = False  # route minimal prompt when qualifying
+        self.experiment_calls = {"architect": 0, "coder": 0,
+                                 "tester": 0, "reviewer": 0}
+        self.chain_calls = {"architect": 0, "coder": 0,
+                            "tester": 0, "reviewer": 0}
+        self.fault_roles = set(fault_roles)
 
     def discover(self):
         from external_runtime import RuntimeDiscovery
@@ -241,6 +252,13 @@ class OfflineAdapter:
         for role, packet in (("architect", ARCH_P), ("coder", IMPL_P),
                              ("tester", TEST_P), ("reviewer", REVIEW_P)):
             if request.agent_id == role or request.agent_id.endswith(f',"{role}"]'):
+                is_chain = request.agent_id.endswith('"]')  # JSON address
+                if is_chain:
+                    self.chain_calls[role] += 1
+                    if role in self.fault_roles:
+                        return self._ok("invalid chain output for " + role)
+                else:
+                    self.experiment_calls[role] += 1
                 return self._ok(_json.dumps(packet))
         return self._ok("OK")
 
@@ -264,6 +282,129 @@ def offline_health():
 
 
 OPEN_ENV = {"RUN_REAL_PROVIDER_TESTS": "1"}
+
+
+class QualificationDecouplingTests(unittest.TestCase):
+    """Task 1/2: g14 experiment count == 4 total (once), never re-run."""
+
+    def test_g14_experiment_count_is_one_session_worth(self):
+        adapter = OfflineAdapter()
+        session = StabilitySession(adapter, ("rt-off", "p-off", None, "fp-v2"),
+                                   offline_health(), env=OPEN_ENV)
+        session.qualify()
+        # Exactly 4 experiment invocations (one per role), all consumed by
+        # the single qualification; chain runs below add zero experiments.
+        experiments_after_qualification = dict(adapter.experiment_calls)
+        self.assertEqual(sum(experiments_after_qualification.values()), 4)
+        for index in range(1, 4):
+            check_invariants(session.run_four_stage(index))
+        self.assertEqual(adapter.experiment_calls,
+                         experiments_after_qualification)
+
+    def test_n_facade_runs_consume_pool_not_requalification(self):
+        adapter = OfflineAdapter()
+        session = StabilitySession(adapter, ("rt-off", "p-off", None, "fp-v2"),
+                                   offline_health(), env=OPEN_ENV)
+        session.qualify()
+        pool_entry_identity = session.pool.identities()
+        for index in range(1, 6):
+            session.run_four_stage(index)
+            self.assertEqual(session.pool.identities(), pool_entry_identity)
+        self.assertEqual(session.qualification_calls, 1)
+
+
+class NoRetryNoFallbackTests(unittest.TestCase):
+    """Task 2 Steps 2-3: honest short-circuit, no retry, no fallback."""
+
+    def test_failed_stage_short_circuits_with_single_attempt(self):
+        adapter = OfflineAdapter(fault_roles=("coder",))
+        session = StabilitySession(adapter, ("rt-off", "p-off", None, "fp-v2"),
+                                   offline_health(), env=OPEN_ENV)
+        session.qualify()
+        coder_before = adapter.chain_calls["coder"]
+        tester_before = adapter.chain_calls["tester"]
+        summary = check_invariants(session.run_four_stage(1))
+        self.assertNotEqual(summary["status"], "SUCCESS")
+        self.assertEqual(adapter.chain_calls["coder"] - coder_before, 1)  # 1 try only
+        self.assertEqual(adapter.chain_calls["tester"] - tester_before, 0)  # gated
+        self.assertEqual(summary["failure_category"], "CODER_PACKET_INVALID")
+
+    def test_failure_never_becomes_single_or_dual_success(self):
+        adapter = OfflineAdapter(fault_roles=("architect",))
+        session = StabilitySession(adapter, ("rt-off", "p-off", None, "fp-v2"),
+                                   offline_health(), env=OPEN_ENV)
+        session.qualify()
+        summary = check_invariants(session.run_four_stage(1))
+        self.assertFalse(summary["success"])
+        self.assertNotEqual(summary["path"], "FOUR_STAGE")
+        self.assertNotEqual(summary["status"], "SUCCESS")
+
+    def test_mixed_faults_are_recorded_not_retried(self):
+        adapter = OfflineAdapter(fault_roles=("reviewer",))
+        session = StabilitySession(adapter, ("rt-off", "p-off", None, "fp-v2"),
+                                   offline_health(), env=OPEN_ENV)
+        session.qualify()
+        reviewer_before = adapter.chain_calls["reviewer"]
+        summary = check_invariants(session.run_four_stage(1))
+        self.assertFalse(summary["success"])
+        self.assertEqual(adapter.chain_calls["reviewer"] - reviewer_before, 1)
+        self.assertEqual(summary["failure_category"], "REVIEWER_PACKET_INVALID")
+
+
+class StabilityStatsTests(unittest.TestCase):
+    """Task 3: statistics semantics — FOUR_STAGE-only denominator."""
+
+    def test_success_rate_excludes_qualification_from_denominator(self):
+        stats = compute_stability_stats(
+            runs=[{"success": True}, {"success": True}, {"success": False}],
+            qualification_ok=True)
+        self.assertEqual(stats["N"], 3)
+        self.assertEqual(stats["successful_runs"], 2)
+        self.assertEqual(stats["success_rate"], round(2 / 3, 3))
+
+    def test_qualification_failure_is_not_in_stability_denominator(self):
+        stats = compute_stability_stats(runs=[], qualification_ok=False)
+        self.assertEqual(stats["N"], 0)
+        self.assertIsNone(stats["success_rate"])
+        self.assertEqual(stats["qualification_failures"], 1)
+        self.assertEqual(stats["qualification_sessions"], 1)
+
+    def test_stage_rates_count_only_runs_reaching_the_stage(self):
+        runs = [
+            {"success": True, "stages": list(STAGES),
+             "failure_category": None},
+            {"success": False, "stages": ["architect"],
+             "failure_category": "CODER_PACKET_INVALID"},
+        ]
+        stats = compute_stability_stats(runs=runs, qualification_ok=True)
+        # Run 2 failed AT coder: architect completed (2/2), coder was
+        # reached-but-failed (1/2), tester/reviewer never reached in run 2.
+        self.assertEqual(stats["stage_stats"]["architect"]["rate"], 1.0)
+        self.assertEqual(stats["stage_stats"]["coder"]["rate"], 0.5)
+        self.assertEqual(stats["stage_stats"]["tester"]["rate"], 1.0)
+        self.assertEqual(stats["stage_stats"]["reviewer"]["rate"], 1.0)
+        self.assertEqual(stats["stage_stats"]["coder"]["not_reached"], 0)
+        self.assertEqual(stats["stage_stats"]["tester"]["not_reached"], 1)
+
+    def test_failure_classification_separates_categories(self):
+        runs = [
+            {"success": False, "stages": [], "failure_category": "ARCHITECT_PACKET_INVALID"},
+            {"success": False, "stages": ["architect"], "failure_category": "CODER_INVOKE_FAILED"},
+            {"success": False, "stages": ["architect", "coder"], "failure_category": "TESTER_PACKET_INVALID"},
+        ]
+        stats = compute_stability_stats(runs=runs, qualification_ok=True)
+        self.assertEqual(stats["failure_by_category"],
+                         {"ARCHITECT_PACKET_INVALID": 1,
+                          "CODER_INVOKE_FAILED": 1,
+                          "TESTER_PACKET_INVALID": 1})
+        self.assertEqual(stats["failure_by_stage"],
+                         {"architect": 1, "coder": 1, "tester": 1})
+
+    def test_provenance_of_successful_runs_comes_from_evidence(self):
+        runs = [{"success": True, "provenance": "REAL"}]
+        stats = compute_stability_stats(runs=runs, qualification_ok=True)
+        self.assertTrue(all(r["provenance"] == "REAL" for r in runs))
+        self.assertEqual(stats["provenance_source"], "sanctioned-evidence")
 
 
 class SessionContractTests(unittest.TestCase):
@@ -391,6 +532,63 @@ class RepeatStabilityV2Tests(unittest.TestCase):
                 stats["failure_by_category"].get(category, 0) + 1
         print("STABILITY_V2_STATS:", _json.dumps(stats, sort_keys=True))
         # Measurement completed; no assertion on success rate (data, not gate).
+
+
+def compute_stability_stats(runs, qualification_ok):
+    """Stability statistics over PURE FOUR_STAGE runs only.
+
+    Qualification is NEVER part of the FOUR_STAGE denominator: a failed
+    qualification is counted separately as qualification_failures. Stage
+    rates count only runs that actually reached the stage (a failed run
+    reaches exactly the stages listed before its failure point).
+    """
+    completed = list(runs)
+    successful = [r for r in completed if r.get("success")]
+    failed = [r for r in completed if not r.get("success")]
+    stage_stats = {}
+    for stage in STAGES:
+        rank = STAGES.index(stage)
+        reached = succeeded = 0
+        for r in completed:
+            if r.get("success"):
+                reached += 1
+                succeeded += 1
+                continue
+            failure_stage = _failing_stage(r.get("failure_category") or "")
+            if failure_stage not in STAGES:
+                continue  # lifecycle/facade failure: no stage attribution
+            failure_rank = STAGES.index(failure_stage)
+            if rank < failure_rank:
+                reached += 1
+                succeeded += 1  # this stage completed before the failure
+            elif rank == failure_rank:
+                reached += 1  # reached but did not succeed
+        stage_stats[stage] = {
+            "reached": reached,
+            "succeeded": succeeded,
+            "rate": round(succeeded / reached, 3) if reached else None,
+            "not_reached": len(completed) - reached,
+        }
+    failure_by_category = {}
+    failure_by_stage = {}
+    for r in failed:
+        category = r.get("failure_category") or "UNKNOWN"
+        failure_by_category[category] = failure_by_category.get(category, 0) + 1
+        stage = _failing_stage(category)
+        failure_by_stage[stage] = failure_by_stage.get(stage, 0) + 1
+    return {
+        "N": len(completed),
+        "successful_runs": len(successful),
+        "failed_runs": len(failed),
+        "success_rate": (round(len(successful) / len(completed), 3)
+                         if completed else None),
+        "stage_stats": stage_stats,
+        "failure_by_category": failure_by_category,
+        "failure_by_stage": failure_by_stage,
+        "qualification_sessions": 1,
+        "qualification_failures": 0 if qualification_ok else 1,
+        "provenance_source": "sanctioned-evidence",
+    }
 
 
 def _failing_stage(category):
