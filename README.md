@@ -128,8 +128,40 @@ upstream failure. Nothing is success-wrapped and nothing falls back silently:
 - `BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED` — task-lifecycle guards
 - `NO_VERIFICATION_CAPABILITY` — no verified tester/reviewer candidate
 
+On the SINGLE path the closed CLI summary reports the coarse `FAILED`
+category; the granular reason (budget/guard/handoff) stays in the engine's
+structured errors for hosts that consume `ExecutionResult` directly.
+
 Retry honestly with a new `task_id`; the loop guard rejects reruns of the same
 stage on the same task.
+
+## Task lifecycle (one facade = one task)
+
+```text
+Task 1 → Facade 1 → done        Task 2 → Facade 2 → done
+```
+
+A `ProductionFacade` owns ONE task lifecycle — its budget, guard and ledger
+are per-task and are not reset between runs:
+
+- **SINGLE lifecycle**: at most 1 real agent invocation (one coder call).
+- **FOUR_STAGE lifecycle**: at most 4 (architect, coder, tester, reviewer —
+  exactly one each). Exceeding the budget reports `BUDGET_EXHAUSTED`; a new
+  task needs a new facade (`host.build_facade` per task).
+- **Budget**: `TaskBudget(4, 4)` spans the whole task; the SINGLE path
+  consumes 1 of 4, the four-stage path consumes all 4.
+- **Qualification evidence**: one sanctioned REAL qualification result can
+  admit a runtime to the pool and serve MANY facades/tasks (build facades
+  from the same validation result); re-qualification is never required per
+  task.
+- **REAL provenance** means the run happened under the explicit
+  real-validation gate with real invocation evidence; OFFLINE results are
+  contract checks, never capability claims.
+- **Qualification ≠ stability**: G14 qualification proves a runtime's role
+  capability once; FOUR_STAGE stability is measured separately over N
+  independent runs. The N=10 measurement is a sample, not a long-term
+  stability guarantee, and a single SINGLE success does not mean all
+  simple tasks are stable.
 
 ## Runtime-neutral design
 
