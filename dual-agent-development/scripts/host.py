@@ -161,3 +161,38 @@ def build_facade(
         pool, dict(current_health), budget, usage, guard)
     facade._evidence_provenance = validation.provenance
     return facade
+
+
+def build_facade_from_bootstrap(
+    registry,
+    *,
+    evidence=None,
+    qualifier=None,
+    current_health,
+    timeout_seconds: float = 300.0,
+):
+    """Automatic entry: Registry -> Discovery -> Health -> evidence
+    reuse / one qualification -> Verified Pool -> HostFacade.
+
+    Thin composition over the Task-B bootstrap and the existing manual
+    build_facade — no routing knowledge lives here (who is usable, not how
+    a task executes). Fails honestly when no runtime reaches admission.
+    """
+    from discovery_bootstrap import bootstrap_runtime_session
+
+    session = bootstrap_runtime_session(
+        registry, evidence=evidence, qualifier=qualifier,
+        required_capabilities=_CAPS_ALL,
+    )
+    admitted = [entry for entry in session.entries if entry.admitted]
+    if not admitted:
+        reasons = "; ".join(
+            f"{entry.runtime_id}:{entry.reason}" for entry in session.entries
+        ) or "NO RUNTIMES REGISTERED"
+        raise RuntimeError(f"no admitted verified runtime ({reasons})")
+    entry = admitted[0]
+    descriptor = registry.get(entry.runtime_id)
+    validation = session.evidence[descriptor.identity]
+    adapter = descriptor.adapter_factory()
+    return build_facade(adapter, validation, current_health,
+                       timeout_seconds=timeout_seconds)

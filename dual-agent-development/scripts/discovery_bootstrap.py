@@ -60,11 +60,17 @@ def _assert_clean(value: str | None, name: str) -> None:
 
 @dataclass(frozen=True)
 class RuntimeBootstrapSession:
-    """Whole-session outcome: entries + the admitted VerifiedRuntimePool."""
+    """Whole-session outcome: entries + the admitted VerifiedRuntimePool.
+
+    `evidence` exposes the FINAL store (caller-supplied reused evidence
+    plus any qualification results produced this session) so downstream
+    composition can hand the exact admitted asset to the host — additive
+    field, no existing contract changes."""
 
     entries: tuple
     pool: VerifiedRuntimePool
     qualification_count: int
+    evidence: dict | None = None
 
 
 def bootstrap_runtime_session(
@@ -170,4 +176,5 @@ def bootstrap_runtime_session(
     return RuntimeBootstrapSession(
         entries=tuple(entries), pool=pool,
         qualification_count=qualification_count,
+        evidence=store,
     )
