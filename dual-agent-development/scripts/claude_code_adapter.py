@@ -1,4 +1,20 @@
-"""Claude Code CLI implementation of the provider-neutral runtime adapter."""
+"""Provider 中立 runtime adapter 的 Claude Code CLI 实现。
+
+引擎中立契约背后的一个具体 adapter —— Claude Code CLI 是"一个"
+adapter，绝不是"那个" runtime。关于这个具体 CLI 的全部知识只
+存在于本模块，别处皆无。
+
+本 adapter 保持的安全/行为边界：
+- 环境：discovery/auth 探测与调用都以最小 env 白名单
+  （_minimal_env）启动 CLI 子进程 —— 凭据与配置绝不转发进子进程；
+  CLI 自行读取自己的状态。
+- Authentication 只通过 CLI 自身的状态面（auth status --json）
+  "观测"；adapter 绝不自己打开、解析或存储凭据材料。
+- 输出解析（_parse_output）只信任 stdout 中 CLI 的 JSON 封装
+  （"result" 字段）；无法解析的原始进程文本按原样返回，并继续
+  受上游 packet/内容安全边界约束 —— 绝不直接进入 packet 或
+  ledger。
+"""
 from __future__ import annotations
 
 import json
@@ -28,6 +44,8 @@ class ClaudeCodeAdapter:
 
     @classmethod
     def from_environment(cls, profile: RuntimeProfile | None = None):
+        # 仅查存在的注册：PATH 查找，不访问任何配置或凭据；
+        # 可执行文件不存在意味着"未安装"（None），绝不是错误。
         executable = shutil.which("claude") or shutil.which("claude.exe")
         if not executable:
             return None
@@ -54,6 +72,9 @@ class ClaudeCodeAdapter:
         return True, (process.stdout or process.stderr).strip()
 
     def check_authentication(self):
+        # Auth 只被"观测"，绝不被执行：CLI 汇报自己的登录状态；
+        # adapter 只存储分类化结果，以及下方 check_provider_model
+        # 所需的 provider 标签。
         from runtime_health import AuthenticationCheck
         from runtime_status import AuthenticationState, ReasonCode
         try:
@@ -75,6 +96,9 @@ class ClaudeCodeAdapter:
         return AuthenticationCheck(AuthenticationState.UNKNOWN, reason_code=ReasonCode.PROTOCOL_ERROR)
 
     def check_provider_model(self):
+        # Provider 可用性以上方观测到的 auth 状态（first-party 登录）
+        # 为门；_auth_provider 是耦合点，这也是 check_authentication
+        # 必须先于本检查运行的原因。
         from runtime_health import ProviderModelCheck
         from runtime_status import ReasonCode
         if not self.profile.provider:
@@ -84,6 +108,9 @@ class ClaudeCodeAdapter:
         return ProviderModelCheck(self.profile.provider, self.profile.model, True, ReasonCode.NONE)
 
     def minimal_health_check(self, timeout_seconds: float):
+        # 唯一的 Health 调用是 opt-in 的：没有 REAL gate 时它上报
+        # 诚实的 UNSUPPORTED 检查，而不是悄悄运行（也不是悄悄
+        # 跳过并伪造一个通过）。
         from runtime_health import MinimalHealthCheck
         from runtime_status import ReasonCode
         if os.environ.get("RUN_REAL_PROVIDER_TESTS", "") != "1":
@@ -117,6 +144,10 @@ class ClaudeCodeAdapter:
             request.provider, request.model, request.role, InvocationStatus.STARTING,
             started_at=started,
         )
+        # 非交互调用契约：--print（一次性、无 TUI）、
+        # --output-format json（机器可读封装）、
+        # --no-session-persistence（health/validation 调用不留任何
+        # session 状态）。
         argv = [self.executable, "--print", "--output-format", "json", "--no-session-persistence"]
         if request.model:
             argv.extend(["--model", request.model])
@@ -177,6 +208,10 @@ class ClaudeCodeAdapter:
 
     @staticmethod
     def _parse_output(stdout: str) -> Any:
+        # 只信任 CLI 的 JSON 封装：当 stdout 解析为 {"result": ...}
+        # 载荷时，result 文本即为调用输出。其余内容按原始文本原样
+        # 返回 —— 该文本是否可用、是否安全，仍由上游 packet 验证
+        # 与内容扫描说了算。
         text = stdout.strip()
         if not text:
             return ""
@@ -190,6 +225,9 @@ class ClaudeCodeAdapter:
 
     @staticmethod
     def _minimal_env() -> dict[str, str]:
+        # 白名单，而非黑名单：子进程只收到它执行与定位自身状态
+        # 所需的变量 —— 父环境中的其余内容（尤其是携带凭据的
+        # 变量）一概不转发。
         return {key: value for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT") if (value := os.environ.get(key))}
 
     @staticmethod

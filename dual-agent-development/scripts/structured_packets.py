@@ -1,4 +1,12 @@
-"""Immutable, serializable, secret-free structured handoff packets."""
+"""不可变、可序列化、无秘密的结构化交接 packet。
+
+四个业务 packet 是角色之间的 WIRE CONTRACT：REQUIRED_FIELDS 不是
+内部 schema 细节 —— 它是 runtime 必须应答的协议，因此增删一个
+字段都是协议变更，不是重构。packet 是 frozen dataclass，只能通过
+验证构造（from_dict 或带 __post_init__ 检查的直接构造）；下方的
+秘密形态扫描是边界防御，不是完整的安全系统 —— 共享的两级权威是
+content_safety（值中的凭据形态、结构上的 marker key）。
+"""
 from __future__ import annotations
 
 import json
@@ -8,9 +16,14 @@ from typing import Any, ClassVar
 
 
 class PacketValidationError(ValueError):
+    """封闭的验证失败；可作为 reason 安全上报。"""
+
     pass
 
 
+# 凭据"赋值形态"（token=..., api_key: ...）。纯文本中提及一个
+# marker 词不会被匹配 —— 本扫描拒绝的是形态化的秘密，
+# 不是词汇本身。
 _SECRET_PATTERN = re.compile(
     r"(?i)(api[-_ ]?key|token|secret|authorization|password)\s*[:=]"
 )
@@ -44,6 +57,9 @@ def _tuple(value: Any, field: str) -> tuple:
 
 @dataclass(frozen=True)
 class ArchitecturePacket:
+    """Architect 的设计回答：目标、约束、结构、步骤、验收标准与
+    风险 —— 是 coder 的完整输入契约。"""
+
     task_id: str
     role: str
     goal: tuple[str, ...]
@@ -88,6 +104,9 @@ class ArchitecturePacket:
 
 @dataclass(frozen=True)
 class ImplementationPacket:
+    """Coder 的实现回答：变更文件、摘要、细节、假设，以及 tester
+    必须满足的测试要求。"""
+
     task_id: str
     role: str
     changed_files: tuple[str, ...]
@@ -124,6 +143,9 @@ class ImplementationPacket:
 
 @dataclass(frozen=True)
 class ReviewPacket:
+    """Reviewer 的裁决：发现、严重度、受影响文件、必需变更与逐条
+    验收状态。"""
+
     task_id: str
     role: str
     status: str
@@ -154,6 +176,9 @@ class ReviewPacket:
 
 @dataclass(frozen=True)
 class TestPacket:
+    """Tester 的验证回答：运行/通过/失败的测试、失败细节、覆盖
+    证据与剩余风险。"""
+
     task_id: str
     role: str
     tests_run: tuple[str, ...]
@@ -186,6 +211,8 @@ _PACKET_TYPES = {name: cls for name, cls in (("ArchitecturePacket", Architecture
 
 
 def serialize_packet(packet) -> str:
+    """规范化 wire 文本（key 排序、紧凑分隔符）—— 正是 ledger 存储
+    与 transport 比对所用的精确表示，因此必须保持确定性。"""
     if type(packet).__name__ not in _PACKET_TYPES:
         raise PacketValidationError("unsupported packet type")
     payload = _clean(asdict(packet))
@@ -194,6 +221,8 @@ def serialize_packet(packet) -> str:
 
 
 def deserialize_packet(payload: str):
+    """wire 文本 -> packet，通过与构造相同的 REQUIRED_FIELDS 契约；
+    未知 packet 类型与畸形 JSON 一律拒绝，绝不 best-effort 解析。"""
     try:
         data = json.loads(payload)
     except (TypeError, json.JSONDecodeError) as exc:

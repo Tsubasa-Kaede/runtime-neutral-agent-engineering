@@ -1,4 +1,18 @@
-"""Deterministic, provider-neutral dual-agent selection decisions."""
+"""确定性的、Provider 中立的双 agent 选择决策。
+
+三种结果形态，各有自己的消费方（刻意保持区分；它们不是冗余
+视图）：
+- select()：供经典引擎 plan 循环使用的逐阶段 agent 指派
+  （每个阶段得到其最优合格 agent）。
+- decide()：带 fallback 链与预算前置条件的 architect/coder DUAL
+  决策 —— 最丰富的形态，供需要推理字段的调用方使用。
+- to_selection_result()：从 decide() 结果到指派形态的纯桥接，
+  角色亲和性固定（tester 工作跟随 coder 侧 agent，review 工作
+  跟随 architect 侧 agent）。
+
+所有决策都是确定性的：候选已排序、平局裁决固定、无随机、
+无 runtime 名称分支。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,12 +26,16 @@ from task_budget import TaskBudget, BudgetUsage
 
 
 class DualAgentMode(str, Enum):
+    """封闭的结果词汇：两个 agent、一个 agent、或没有。"""
+
     TWO_AGENT = "TWO_AGENT"
     SINGLE_AGENT = "SINGLE_AGENT"
     NO_AGENT = "NO_AGENT"
 
 
 class DecisionReason(str, Enum):
+    """封闭的决策词汇；可上报，绝不是诊断文本。"""
+
     TWO_CAPABLE_AGENTS = "TWO_CAPABLE_AGENTS"
     SINGLE_CAPABLE_AGENT = "SINGLE_CAPABLE_AGENT"
     SIMPLE_TASK = "SIMPLE_TASK"
@@ -35,11 +53,16 @@ _STAGE_REQUIREMENTS: dict[str, tuple[CapabilityName, ...]] = {
 }
 
 _REQUIRED_CALLS: dict[Complexity, int] = {
+    # Complexity -> dual 决策所要求的最小剩余预算；低于它时诚实的
+    # 结果是 BUDGET_INSUFFICIENT，绝不半规划地跑 dual。
     Complexity.SIMPLE: 1,
     Complexity.MEDIUM: 2,
     Complexity.COMPLEX: 4,
 }
 
+# 专业化门：只有当每一侧都在自己的角色上严格更好、且增益之和
+# 超过 0.1 时 dual 才成立 —— 这是可观察决策契约的一部分，
+# 不是可随意调节的参数。
 _SPECIALIZATION_THRESHOLD = 0.1
 
 
@@ -151,6 +174,11 @@ class DualAgentSelection:
         usage: BudgetUsage,
         mode: str = "AUTO",
     ) -> DualAgentDecision:
+        """带预算前置条件的 architect/coder dual 决策。
+
+        gate 顺序：合格性（READY runtime）-> coder 必须存在 ->
+        剩余预算必须覆盖该复杂度所需的调用数 -> 差异化 + 专业化
+        决定 TWO 还是 SINGLE。"""
         complexity = Complexity(complexity)
         eligible = tuple(
             profile for profile in sorted(profiles, key=lambda item: item.agent_id)
@@ -202,9 +230,9 @@ class DualAgentSelection:
         )
 
     def to_selection_result(self, decision: DualAgentDecision) -> DualAgentSelectionResult:
-        """Bridge a DualAgentDecision into the stage->agent assignment shape the
-        orchestrator/execution engine consume. Stage affinity: tester work goes
-        to the coder-side agent, review work to the architect-side agent."""
+        """把 DualAgentDecision 桥接为 orchestrator/execution engine
+        消费的 stage->agent 指派形态。阶段亲和性：tester 工作归
+        coder 侧 agent，review 工作归 architect 侧 agent。"""
         complexity = Complexity(decision.complexity)
         assignments: dict[str, str | None] = {}
         for stage in self._stages(complexity):

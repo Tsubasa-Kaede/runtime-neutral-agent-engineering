@@ -1,4 +1,17 @@
-"""Hugging Face tiny-agents CLI implementation of the external runtime adapter."""
+"""外部 runtime adapter 的 Hugging Face tiny-agents CLI 实现。
+
+一个具体 adapter；所有 tiny-agents 专属知识只存在于本模块。
+注册契约：from_environment 要求 PATH 上的可执行文件与
+TINY_AGENTS_AGENT_PATH / TINY_AGENTS_COMMAND 环境变量（指明要运行
+的 agent 与 command）同时在场 —— 配置不完整时返回 None
+（未注册），绝不产生半配置的 adapter。
+
+错误安全边界：与原始错误字符串不同，所有可能离开本模块的进程
+错误都经过 _safe_error，在文本进入 trace、discovery reason 或
+报告之前先抹除凭据形态的值（赋值形态、bearer 材料、hf_/sk-
+key 形态）。invoke() 与 cancel() 共享的进程簿记由 _state_lock
+保护，因此并发调用不会损坏 process/cancelled/completed 集合。
+"""
 from __future__ import annotations
 
 import os
@@ -21,7 +34,7 @@ from external_runtime import (
 
 
 class TinyAgentsAdapter:
-    """Invoke a configured tiny-agents runner through a real subprocess."""
+    """通过真实子进程调用一个已配置的 tiny-agents runner。"""
 
     def __init__(
         self,
@@ -51,6 +64,9 @@ class TinyAgentsAdapter:
         command: str | None = None,
         command_args: tuple[str, ...] = (),
     ) -> "TinyAgentsAdapter" | None:
+        # 注册要求三元组完整（可执行文件 + agent path + command）：
+        # 没有配置 agent/command 的 runtime 不是可用候选，而是诚实
+        # 地缺席（None），绝不给默认值。
         executable = shutil.which("tiny-agents") or shutil.which("tiny-agents.exe")
         resolved_path = agent_path or os.environ.get("TINY_AGENTS_AGENT_PATH")
         resolved_command = command or os.environ.get("TINY_AGENTS_COMMAND")
@@ -75,6 +91,9 @@ class TinyAgentsAdapter:
         )
 
     def _probe(self) -> tuple[bool, str | None]:
+        # 每条失败细节都经 _safe_error 清洗：discovery reason 可以携带
+        # 进程错误文本（必须保持诚实），但绝不能携带其中的凭据
+        # 形态材料。
         try:
             process = subprocess.run(
                 [self.executable, "--help"],
@@ -145,6 +164,9 @@ class TinyAgentsAdapter:
                 trace=self._finish_trace(trace, InvocationStatus.SUCCESS, started, process.returncode, finished),
             )
         except (subprocess.TimeoutExpired, TimeoutError):
+            # 在锁下复查 cancellation 集合：在超时过程中被取消的调用
+            # 上报 CANCELLED（调用方意图），而不是 TIMEOUT ——
+            # 两者是不同的诚实结果。
             with self._state_lock:
                 cancelled = invocation_id in self._cancelled
             if process is not None:
@@ -189,6 +211,8 @@ class TinyAgentsAdapter:
 
     @staticmethod
     def _minimal_env() -> dict[str, str]:
+        # 与另一个 CLI adapter 相同的白名单纪律：只转发定位执行所需
+        # 的变量；父环境中任何携带凭据的内容都到不了子进程。
         return {
             key: value
             for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT")
@@ -197,7 +221,7 @@ class TinyAgentsAdapter:
 
     @staticmethod
     def _safe_error(value: str) -> str:
-        """Redact common credential-shaped values before exposing process errors."""
+        """在暴露进程错误之前抹除常见凭据形态的值。"""
         text = value.strip()
         patterns = (
             r"(?i)(api[-_ ]?key\s*[\"']?\s*[:=]\s*[\"']?)[^\s,;\"']+",
