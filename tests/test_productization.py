@@ -148,7 +148,10 @@ class DocumentationTests(unittest.TestCase):
 
 class PackagingTests(unittest.TestCase):
     def test_pyproject_declares_package_cli_and_assets(self):
-        import tomllib
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10: tomllib is 3.11+ stdlib
+            import tomli as tomllib
         data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(data["project"]["name"], "dual-agent-development")
         scripts = data["project"]["scripts"]
