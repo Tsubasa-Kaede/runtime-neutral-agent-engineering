@@ -1,13 +1,146 @@
-# Dual-Agent Development（V2）
+Runtime-Neutral Agent Engineering
 
-一个 **Runtime 中立的 agent 协作编排器**：给定一个任务，它对工作进行分类、
-路由，并经由最多四个结构化协作阶段 —— **architect → coder → tester →
-reviewer** —— 运行，全程使用结构化 packet 交接、append-only 共享 ledger、
-单一任务生命周期预算、环保护与诚实的失败上报。
+The engineering layer between Agents and the runtimes they depend on.
 
-它**不是聊天机器人**，也不是模型提供商。它是位于你已有的编码 agent CLI
-之上的编排层：它发现 runtime、检查其 Health、以经过验证的能力（绝不以
-名字）对其进行 qualification，并通过已验证的契约协调它们的工作。
+«Discover capabilities. Verify execution. Control collaboration.»
+
+Runtime-Neutral Agent Engineering is an engineering layer for building reliable Agent systems across different execution runtimes.
+
+It discovers available runtimes, validates their capabilities, verifies real execution, and coordinates structured Agent workflows through explicit contracts.
+
+It is not a chatbot, not a model provider, and not tied to a single Agent runtime. It sits above the execution layer and provides the engineering controls needed to make Agent execution more reliable, verifiable, and controllable.
+
+Why This Exists
+
+Modern Agent systems often depend directly on a specific model provider, CLI, or runtime.
+
+That creates a practical problem:
+
+How do you know an Agent runtime is actually capable of performing a task — rather than simply being available?
+
+This project treats that question as an engineering problem.
+
+Instead of assuming:
+
+Runtime exists
+    ↓
+Runtime is ready
+    ↓
+Runtime can perform the task
+    ↓
+Runtime is safe to execute
+
+V2 establishes explicit boundaries:
+
+Discovery
+    ↓
+Health
+    ↓
+Capability
+    ↓
+Qualification
+    ↓
+Verification
+    ↓
+Admission
+    ↓
+Execution
+    ↓
+Collaboration
+
+Each stage produces explicit evidence and has its own responsibility.
+
+The result is a system that can distinguish:
+
+- what a runtime is
+- what a runtime can do
+- what has been verified
+- what is safe to admit
+- what can be executed
+- how Agents can collaborate
+
+What Makes It Different
+
+Runtime-Neutral
+
+No single model provider, CLI, or runtime is embedded into the orchestration layer.
+
+Runtimes are integrated through explicit adapter contracts.
+
+Verification-First
+
+A runtime being available does not mean it is verified.
+
+READY ≠ VERIFIED
+OFFLINE ≠ REAL
+Health ≠ Qualification
+Qualification ≠ Verification
+Verification ≠ Admission
+
+Real capability evidence is earned through controlled validation before a runtime can enter the Verified Runtime Pool.
+
+Controlled Execution
+
+Agent execution is protected by explicit lifecycle controls:
+
+- Task Budget
+- LoopGuard
+- Capability validation
+- Verified runtime admission
+- Structured handoffs
+- Deterministic failure semantics
+
+Structured Collaboration
+
+Agent stages communicate through structured contracts rather than passing raw model output between stages.
+
+Architect
+    ↓
+ArchitecturePacket
+    ↓
+Coder
+    ↓
+ImplementationPacket
+    ↓
+Tester
+    ↓
+TestPacket
+    ↓
+Reviewer
+    ↓
+ReviewPacket
+
+The collaboration layer is runtime-neutral and contract-driven.
+
+Core Capabilities
+
+Capability| Purpose
+Runtime Discovery| Discover available execution runtimes
+Runtime Health| Determine whether a runtime is currently usable
+Capability Validation| Establish what a runtime has actually demonstrated
+Qualification| Run controlled validation against explicit gates
+Verification| Produce trusted execution evidence
+Verified Runtime Pool| Admit only qualified runtimes
+Controlled Execution| Execute tasks under budget and loop protection
+Structured Collaboration| Coordinate Agent stages through explicit packets
+Production Facade| Provide a stable host-facing integration surface
+CLI / Host Integration| Integrate the orchestration layer into real environments
+
+---
+
+V2
+
+V2 establishes the verification-first runtime engineering foundation.
+
+The current architecture focuses on:
+
+Discovery → Capability → Qualification → Verification → Admission → Execution → Collaboration
+
+Future V3 work will extend this foundation toward Agent-centric infrastructure, including Agent identity, discovery, trust, remote collaboration, and multi-agent orchestration.
+
+«V2 is not about running two agents.
+
+It is about building the engineering foundation that makes Agent systems reliable, verifiable, controllable, and runtime-neutral.»
 
 ---
 
