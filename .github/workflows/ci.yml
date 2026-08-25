@@ -1,0 +1,56 @@
+# V2 CI — offline-only verification matrix.
+#
+# Hard rules baked into this workflow:
+# - The REAL-runtime gate stays CLOSED in CI: RUN_REAL_PROVIDER_TESTS is
+#   never set, so gated REAL tests skip (they would invoke a real runtime).
+# - No runtime login, no credentials access, no runtime configuration.
+# - Everything below runs on the pure-stdlib offline engine.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package (with test extra; runtime CLIs are NOT dependencies)
+        run: python -m pip install ".[test]"
+
+      - name: Compile gate
+        run: python -m compileall -q dual-agent-development
+
+      - name: Offline test suite (gated REAL tests skip)
+        run: python -m pytest tests/ -q
+
+      - name: CLI entrypoint --version
+        run: dual-agent --version
+
+      - name: CLI entrypoint --help
+        run: dual-agent --help
+
+      - name: Offline end-to-end example
+        run: python examples/offline_mock_run.py

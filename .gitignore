@@ -14,3 +14,4 @@ dist/
 build/
 .vscode/
 .idea/
+*.egg-info/
