@@ -12,11 +12,17 @@ import sys
 
 from mode_gate import Mode
 
+try:  # installed-package mode: dual_agent.cli -> package shim
+    from . import __version__
+except ImportError:  # source-tree flat-import mode (tests/examples)
+    from __init__ import __version__
+
 _MODE_MAP = {"off": Mode.OFF, "auto": Mode.AUTO, "on": Mode.ON}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dual-agent", description="Dual-agent collaboration entrypoint")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="Run a collaboration task")
     run.add_argument("--mode", choices=("off", "auto", "on"), default="auto",
@@ -48,6 +54,9 @@ def run_cli(facade, argv=None) -> str:
 
 
 def main(argv=None) -> int:
+    # Parse up front so --help/--version work even without an injected
+    # facade (argparse handles both before any facade access).
+    build_parser().parse_args(argv)
     # The facade must be injected/configured by the embedding application; this
     # module never builds one. If none is provided, report clearly and exit.
     facade = getattr(main, "_facade", None)

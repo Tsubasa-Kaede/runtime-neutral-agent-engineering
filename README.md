@@ -390,6 +390,11 @@ Task 1 → Facade 1 → done        Task 2 → Facade 2 → done
 adapter，不是"那个" runtime。新增一个 runtime 意味着实现 adapter 协议，
 而不是修改 orchestrator。
 
+Runtime 层面前提（不是本 Python 包的依赖）：Claude Code CLI 自身依赖
+Node.js 运行环境 —— 它是 Claude Code CLI 的安装前提，与
+`dual-agent-development` 包的安装无关；本包保持零 Python 运行时依赖、
+Runtime 中立。
+
 ### 测试
 
 ```bash

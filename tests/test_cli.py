@@ -50,6 +50,59 @@ class ParserTests(unittest.TestCase):
             build_parser().parse_args(["run", "--mode", "bogus", "task"])
 
 
+class VersionTests(unittest.TestCase):
+    """RELEASE-2A: `--version` must use the package shim as its single source."""
+
+    def test_cli_version_comes_from_package_init(self):
+        import re as _re
+
+        import cli
+
+        init_text = (SCRIPTS / "__init__.py").read_text(encoding="utf-8")
+        match = _re.search(r'__version__\s*=\s*"([^"]+)"', init_text)
+        self.assertIsNotNone(match, "package shim must define __version__")
+        self.assertEqual(cli.__version__, match.group(1))
+
+    def test_version_flag_prints_and_exits_zero(self):
+        import contextlib
+        import io
+
+        import cli
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as ctx:
+                build_parser().parse_args(["--version"])
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertEqual(out.getvalue().strip(), f"dual-agent {cli.__version__}")
+
+    def test_main_version_and_help_work_without_facade(self):
+        """--help/--version must not require an injected facade (RELEASE-2A)."""
+        import contextlib
+        import io
+
+        import cli
+
+        saved = cli.main.__dict__.get("_facade")
+        cli.main.__dict__.pop("_facade", None)
+        try:
+            for flag in ("--version", "--help"):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    with self.assertRaises(SystemExit) as ctx:
+                        cli.main([flag])
+                self.assertEqual(ctx.exception.code, 0, flag)
+                self.assertNotIn("no facade configured", out.getvalue(), flag)
+            # without a facade a real run still fails honestly with exit 2
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["run", "x"]), 2)
+            self.assertIn("no facade configured", err.getvalue())
+        finally:
+            if saved is not None:
+                cli.main._facade = saved
+
+
 class RenderTests(unittest.TestCase):
     def test_render_emits_closed_summary(self):
         summary = render_summary(stub_result())
