@@ -35,7 +35,7 @@ pyproject.toml                # 包映射 (scripts/ -> dual_agent)
 ## 安装
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Tsubasa-Kaede/agent-development.git
 cd dual-agent-development-repo
 pip install -e .          # 安装 dual_agent 包 + dual-agent CLI
 ```

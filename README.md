@@ -283,7 +283,7 @@ transfer —— roadmap 文档列出了全部十条继承原则），而不是�
 要求 Python 3.10+（仅标准库）：
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Tsubasa-Kaede/agent-development.git
 cd dual-agent-development-repo
 pip install -e .
 ```
