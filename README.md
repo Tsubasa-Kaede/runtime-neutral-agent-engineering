@@ -341,8 +341,8 @@ prerequisites; for example the Claude Code CLI requires Node.js, which is a
 runtime-level concern, not a dependency of this package.
 
 ```bash
-git clone https://github.com/Tsubasa-Kaede/agent-development.git
-cd agent-development
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
 pip install -e .
 python examples/offline_mock_run.py
 ```
