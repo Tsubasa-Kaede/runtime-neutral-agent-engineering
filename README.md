@@ -1,449 +1,506 @@
-# Dual-Agent Development（V2）
+# Runtime-Neutral Agent Engineering
 
-一个 **Runtime 中立的 agent 协作编排器**：给定一个任务，它对工作进行分类、
-路由，并经由最多四个结构化协作阶段 —— **architect → coder → tester →
-reviewer** —— 运行，全程使用结构化 packet 交接、append-only 共享 ledger、
-单一任务生命周期预算、环保护与诚实的失败上报。
+> The engineering layer between Agents and the runtimes they depend on.
 
-它**不是聊天机器人**，也不是模型提供商。它是位于你已有的编码 agent CLI
-之上的编排层：它发现 runtime、检查其 Health、以经过验证的能力（绝不以
-名字）对其进行 qualification，并通过已验证的契约协调它们的工作。
+**Discover capabilities. Verify execution. Control collaboration.**
 
----
+Coding-agent CLIs are powerful — but building a product on top of one leaves
+you guessing. Is the runtime installed? Is it healthy *right now*? Has it
+actually **proven** it can architect, code, test, and review — or only
+claimed it? What happens when an invocation fails mid-task, the budget runs
+out, or two agents need to hand work to each other without dumping raw
+transcripts?
 
-## 1. 项目定位（Overview）
+This project is the engineering layer that answers those questions. It sits
+between your application (the host) and the coding-agent CLIs (the
+runtimes): it discovers runtimes, checks their health, qualifies their
+capabilities behind real gates, admits them to a verified pool, and
+orchestrates their collaboration under budget and loop protection.
 
-引擎从六个正交的输入决定如何执行一个任务：
+**It is not** a chatbot, a model provider, a single-runtime wrapper, a
+remote agent network, or an A2A implementation.
 
-- **任务复杂度** —— 确定性分类（SIMPLE / MEDIUM / COMPLEX / UNRESOLVED）
-- **Runtime Health** —— 某个 runtime 现在 是否 READY
-- **Verified Capability** —— 一个 runtime *已经证明*自己能做什么
-- **Mode** —— OFF / AUTO / ON，调用方意图
-- **Budget** —— 每个任务一个生命周期内封闭的核算
-- **LoopGuard** —— 在任何花费之前的 重复/环/升级 保护
+- **Runtime-neutral** — no runtime, provider, or model name is hard-coded in
+  the engine; runtimes plug in through an adapter contract.
+- **Verification-first** — a runtime is selected by *verified capability*,
+  never by name.
+- **Controlled execution** — budget is reserved before every invoke, loop
+  protection runs before any spend, and failures are structured and
+  terminal; nothing is wrapped as success.
+- **Structured agent collaboration** — architect → coder → tester →
+  reviewer exchange validated packets over an append-only ledger, never raw
+  output.
 
-链路中的每个决策都是结构化、分类化、诚实的：没有任何东西被包装成成功，
-没有任何静默 fallback，任何一层都不宣称属于另一层的答案。
+## Why This Exists
 
-## 2. Core Architecture（核心架构）
+Agent systems are increasingly capable — but their reliability still
+depends on the runtime layer beneath them. Different CLIs, model providers,
+execution environments, and local configurations expose different
+capabilities and different levels of reliability.
 
-```text
- Task
-  ↓
- Classification (SIMPLE / MEDIUM / COMPLEX / UNRESOLVED)
-  ↓
- Runtime Discovery        ── does the runtime exist?
-  ↓
- Health                   ── is it READY right now?
-  ↓
- Capability               ── what has it PROVEN it can do?
-  ↓
- Qualification (G1–G14)   ── one sanctioned validation run
-  ↓
- Verification             ── VERIFIED + REAL evidence
-  ↓
- Selection                ── pick agents from the Verified Pool
-  ↓
- Execution                ── architect → coder → tester → reviewer
-  ↓
- Result                   ── closed, secret-free summary
-```
+Depending directly on a specific runtime creates practical, unanswered
+questions:
 
-这条链路表示一个任务从分类到最终执行的受控生命周期：先确认 runtime
-存在（Discovery），再确认它此刻可用（Health），再确认它已证明的能力
-（Capability），经过唯一一次受门控的 Qualification 运行（G1–G14）得到
-VERIFIED + REAL 证据，才能进入 Verified Pool 参与选择与执行。
+- **Existence and health.** A runtime that worked yesterday may be missing,
+  logged out, or broken today. Hoping is not a deployment strategy.
+- **Unverified capability.** "It usually writes good code" is not a
+  contract. Without gated evidence you cannot know what a runtime can
+  *prove* it does.
+- **Runaway cost.** Retry loops and repeated failures burn invocations with
+  nobody accounting for them.
+- **Opaque collaboration.** Multi-stage work degrades into chat logs: raw
+  output flows between stages with no validation, no contract, no audit
+  trail.
+- **Runtime lock-in.** Most wrappers hard-code one CLI; switching or adding
+  a runtime means rewriting the orchestrator.
 
-引擎绝不模糊的五条边界：
+This project treats those questions as engineering problems. It answers
+three of them directly:
 
-| 区分 | 含义 |
-|---|---|
-| Discovery ≠ Health | 被找到的 runtime 可能并不健康；DISCOVERED 候选绝不会被当作 READY |
-| Health ≠ Qualification | READY 对 validation 证据不做任何断言 |
-| Qualification ≠ Verification | qualification 运行产生一个结果；VERIFIED 是一次完整通过运行的结局 |
-| Verification ≠ Capability | VERIFIED 但缺少所需能力集合，依然不能承担角色 |
-| Runtime ≠ Agent | runtime 是执行基底；agent 是寄宿其上的可路由身份 |
+- **What runtimes are actually available?**
+- **What capabilities have they actually proven?**
+- **Which runtime is safe to admit for execution?**
 
-深入阅读：[`docs/architecture/overview.md`](docs/architecture/overview.md)。
+The goal is not another agent or model provider. The goal is to make agent
+execution **discoverable, verifiable, controllable, and runtime-neutral**.
 
-## 3. Runtime Lifecycle（Runtime 生命周期）
+## What It Does
 
-三套独立的词汇，三个独立的归属层：
-
-**Discovery**（`runtime_discovery.py`）—— 只回答"存在与否"：
-
-| 状态 | 含义 |
-|---|---|
-| `DISCOVERED` | 通过其 adapter 找到了该 runtime |
-| `NOT_FOUND` | 缺席，或 discovery 出错（受控结果，绝不抛异常） |
-
-**Health**（`runtime_status.py`）—— 检查时刻的 task-level 状态：
-
-| 状态 | 含义 |
-|---|---|
-| `READY` | 通过 discovery + auth + provider/model + 最小 Health 检查 |
-| `AUTH_REQUIRED` | 身份缺失或被拒 |
-| `UNAVAILABLE` | 无法启动 / 可执行文件缺失 |
-| `ERROR` | 已启动但行为异常 |
-
-（`UNKNOWN` 属于 *authentication* 词汇，不在 RuntimeState 中。）
-
-**Validation**（`candidate_validation.py`）—— 准入 qualification：
-
-| 状态 | 含义 |
-|---|---|
-| `VERIFIED` | 全部 14 个 gate 通过；能力证据已收集 |
-| `BLOCKED` | 缺少外部条件（gate 关闭、auth 缺席） |
-| `FAILED` | 在某个具体 gate 上暴露出集成缺陷 |
-| `NOT_VERIFIED` | 运行在完成前被短路 |
-
-**READY ≠ VERIFIED。** Health 是可续期的状态；qualification 是挣来的
-证据。两者互不隐含，任一方向都不行。
-
-深入阅读：[`docs/architecture/runtime-lifecycle.md`](docs/architecture/runtime-lifecycle.md)。
-
-## 4. ReadyPool Path 与 Verified Path
-
-两条平行路径并存；运行哪一条取决于入口：
+Given a task, the engine runs one controlled lifecycle:
 
 ```text
-ReadyPool path (classic engine)              Verified path (production stack)
-─────────────────────────────                ────────────────────────────────
-Runtime                                      Runtime
- → Health                                     → Discovery
- → Capability (registry evidence)             → Health
- → ReadyPool (runtime_pool)                   → Qualification (G1–G14, gated)
- → CapabilityRegistry selection               → Verification (VERIFIED + REAL)
- → ExecutionEngine                            → VerifiedRuntimePool admission
-                                              → Verified selection (score-less)
-                                              → Execution (never falls back)
+Classification (SIMPLE / MEDIUM / COMPLEX / UNRESOLVED)
+  ↓
+Discovery ──────── does the runtime exist?
+  ↓
+Health ─────────── is it READY right now?
+  ↓
+Capability ─────── what has it PROVEN it can do?
+  ↓
+Qualification ──── one sanctioned validation run (G1–G14)
+  ↓
+Verification ───── VERIFIED + REAL evidence
+  ↓
+Admission ──────── Verified Runtime Pool entry
+  ↓
+Execution ──────── architect → coder → tester → reviewer
+  ↓
+Collaboration ──── structured packets, shared ledger
 ```
 
-左列是经典引擎路径：Health 通过即可进入 ReadyPool，由 CapabilityRegistry
-打分选择；右列是生产路径：必须经过门控的 G1–G14 qualification 取得
-VERIFIED + REAL 证据、被 VerifiedRuntimePool 准入后才执行，且绝不 fallback。
+In short:
+**Discovery → Health → Capability → Qualification → Verification →
+Admission → Execution → Collaboration.**
 
-承重不变量：**Verified Path 绝不静默借用 ReadyPool。** 在代码中这是结构
-性的 —— `VerifiedOrchestrator` 将空的 verified 选择归一化为
-`NO_CAPABLE_AGENT`，而不是去咨询 ready-pool registry，并以**空的
-fallback 策略**执行。
+Per task, the engine classifies complexity, routes simple work to a single
+agent and complex work through the four-stage path, enforces one
+task-lifecycle budget and loop guard, and reports a closed, secret-free
+summary — including honest failure categories when things go wrong.
 
-Pool 准入（经 RC-3 bootstrap 组合）要求 **VERIFIED + REAL provenance**
-（外加所需能力子集 + READY Health）。仅 `VERIFIED`、或 `OFFLINE` 证据，
-一律拒绝。
+## Architecture
 
-深入阅读：[`docs/architecture/ready-vs-verified.md`](docs/architecture/ready-vs-verified.md)。
+### Runtime Lifecycle
 
-## 5. Provenance：OFFLINE 与 REAL
+Three vocabularies, three ownership layers — no layer answers for another:
 
-每个 validation 结果都携带 `provenance`：
-
-- `OFFLINE` —— 由 mock/注入 executor 产生；可用于契约验证，但**不是**
-  真实能力的证据。
-- `REAL` —— 只在显式的真实验证 gate（`RUN_REAL_PROVIDER_TESTS=1`）之下、
-  带真实调用证据地产生。
-
-离线（Offline）验证不等于真实（REAL）验证。引擎在结构上阻止两者被互换：
-runner 拒绝在没有真实调用证据时给 `REAL`；一次 REAL qualification 即可将
-runtime 准入 pool 并服务多个任务（绝不按任务重复 qualification）。
-
-## 6. Capability（能力）
-
-能力（`architecture`、`coding`、`review`、`testing`）描述一个
-agent/runtime 能为某个角色做什么 —— 它**不是** Health，也**不是**
-verification：
-
-- Capability ≠ Health：一个 READY 的 runtime 可以没有任何 verified 能力。
-- Capability ≠ Verification：`VERIFIED` 但缺少所需能力集合，依然不能承担
-  角色（准入检查的是子集）。
-
-`validated_capabilities` **只**由结构化的 gate 证据（G14 的四个角色实验）
-构建；候选*声明*的能力上下文绝不会被晋升进去。在证据层级中，`DECLARED`
-永远不算 `VERIFIED`。
-
-## 7. Security Boundaries（安全边界）
-
-- **无秘密契约**：原始输出、秘密与模型推理绝不进入 packet、ledger、
-  trace 或公开结果；`content_safety` 是唯一的扫描权威（值中的凭据形态、
-  结构上的 marker key）。
-- **原始输出隔离**：一个阶段的输入永远是上游 *packet*；原始调用输出必须
-  先通过 packet 契约与内容扫描解析，才能到达下一个阶段。
-- **Protected paths**：REAL validation 对调用方声明的受保护文件
-  （凭据/配置）做快照，运行期间任何变更都会使 G13 失败。
-- **最小环境**：CLI adapter 以白名单 env（`PATH`/`HOME`/`USERPROFILE`/
-  `SYSTEMROOT`）启动子进程 —— 携带凭据的变量绝不转发。
-- **安全的错误归一化**：adapter 错误文本在到达 trace 或报告之前先做形态
-  抹除（`_safe_error` / `sanitize_trace`）。
-- 引擎绝不读取、存储、打印或修改凭据，绝不登录或登出，绝不触碰 runtime
-  配置。
-- 真实 runtime 调用是 opt-in 且默认关闭的（`RUN_REAL_PROVIDER_TESTS=1`
-  门控真实测试）。
-- CLI 输出只是封闭的 allow-list 摘要。
-
-## 8. Budget 与 LoopGuard
-
-两道守卫都运行在任何调用**之前** —— 这正是关键：被拒绝的重复或已耗尽的
-预算绝不能消耗金钱或调用。
-
-- **TaskBudget** —— 一个预算跨越一个任务生命周期。预留是
-  reserve-before-invoke：调用名额在 adapter 调用之前被预留（耗尽即抛出
-  异常），因此一次调用要么已被支付、要么从未发生。Token 计数默认为诚实
-  的 `"unknown"`，绝不猜测。
-- **LoopGuard** —— 一个 guard 跨越一个任务。`check()` 是预检
-  （DUPLICATE_TASK / REPEATED_FAILURE / CYCLE_DETECTED / 上限），
-  `record()` 在调用之后补全配对。被记忆的只有 hash 后的失败*类别*，
-  绝无原始诊断。
-
-## 9. Collaboration（协作）
-
-四阶段链路通过 packet 通信，绝不传递原始输出：
-
-```text
-Architect → ArchitecturePacket → CollaborationPacket → Transport → Coder → …
-```
-
-这条链路表示：architect 的设计被封装为 ArchitecturePacket，再由
-CollaborationPacket（协议信封）经 Transport 送达 coder，逐阶段传递 ——
-每次交接的都是已验证的结构化契约，而不是聊天文本。
-
-| 角色 | 读取 | 产出 |
+| Layer | States | Question |
 |---|---|---|
-| architect | 任务本身 | `ArchitecturePacket` |
-| coder | architecture packet 的 wire 文本 | `ImplementationPacket` |
-| tester | 最新 implementation packet | `TestPacket` |
+| Discovery | `DISCOVERED` / `NOT_FOUND` | does the runtime exist? |
+| Health | `READY` / `AUTH_REQUIRED` / `UNAVAILABLE` / `ERROR` | is it usable right now? |
+| Validation | `VERIFIED` / `BLOCKED` / `FAILED` / `NOT_VERIFIED` | did it pass the gates? |
+
+The distinctions the engine never blurs:
+
+| Distinction | Meaning |
+|---|---|
+| Discovery ≠ Health | a discovered runtime may not be healthy; `DISCOVERED` is never treated as `READY` |
+| Health ≠ Qualification | `READY` asserts nothing about validation evidence |
+| Qualification ≠ Verification | a qualification run produces a result; `VERIFIED` is the outcome of one full gated pass |
+| Verification ≠ Admission | `VERIFIED` alone does not enter the pool — admission also requires the required capability subset, `READY` health, and no duplicate |
+| READY ≠ VERIFIED | health is a renewable state; verification is earned evidence — neither implies the other, in either direction |
+
+### ReadyPool Path vs Verified Path
+
+Two parallel paths; the entry point decides which one runs:
+
+```text
+ReadyPool path (classic engine)          Verified path (production stack)
+──────────────────────────────           ───────────────────────────────
+Runtime                                  Runtime
+ → Health                                 → Discovery
+ → Capability (registry evidence)         → Health
+ → ReadyPool (runtime_pool)               → Capability (gate evidence)
+ → CapabilityRegistry selection           → Qualification (G1–G14, gated)
+ → ExecutionEngine                        → Verification (VERIFIED + REAL)
+                                          → VerifiedRuntimePool admission
+                                          → Verified selection (score-less)
+                                          → Execution (never falls back)
+```
+
+The classic path admits on health and scores candidates from registry
+evidence. The production path requires gated qualification, `VERIFIED` +
+`REAL` evidence, and Verified Runtime Pool admission before execution — and
+never falls back.
+
+Load-bearing invariant: **the Verified path never silently borrows the
+ReadyPool.** This is structural — an empty verified selection normalizes to
+`NO_CAPABLE_AGENT` instead of consulting the ready-pool registry, and the
+verified orchestrator executes with an empty fallback policy.
+
+### Task Lifecycle
+
+One `ProductionFacade` owns exactly one task lifecycle:
+
+```text
+Task 1 → Facade 1 → done          Task 2 → Facade 2 → done
+```
+
+- Budget, loop guard, and ledger are per-task and never reset between runs.
+- SINGLE path: at most 1 real agent invocation (one coder call).
+- FOUR_STAGE path: at most 4 (architect, coder, tester, reviewer — each
+  exactly once). Beyond that: `BUDGET_EXHAUSTED`; a new task needs a new
+  facade.
+- Verified evidence is reused across tasks: one sanctioned REAL
+  qualification admits a runtime to the pool for many facades — runtimes
+  are never re-qualified per task.
+
+## What Makes It Different
+
+### Runtime-Neutral
+
+The engine core contains no runtime, provider, or model names anywhere.
+Concrete adapters (for example the Claude Code CLI adapter) are individual
+implementations of the adapter contract
+([`dual-agent-development/references/adapter-contract.md`](dual-agent-development/references/adapter-contract.md)):
+Claude Code is *an* adapter, not *the* runtime. Adding a runtime means
+implementing the adapter protocol — never modifying the orchestrator.
+
+### Verification-First
+
+Selection works on verified capability, never on names. Capabilities are
+built only from structured gate evidence; a candidate's *declared*
+capabilities are never promoted into verified ones. In the evidence
+hierarchy, DECLARED never counts as VERIFIED.
+
+### Controlled Execution
+
+Every guard runs **before** money or invocations can be spent. The budget
+reserves an invocation slot before the adapter is called
+(reserve-before-invoke), and the loop guard pre-checks duplicates, repeated
+failures, and cycles. Failures are structured and terminal — upstream
+failure stops downstream stages, nothing is packaged as success, and the
+verified path has no silent fallback.
+
+### Structured Collaboration
+
+Stages exchange validated packets over an append-only shared ledger — never
+raw model output. A stage's input is always an upstream *packet*; raw
+invocation output must pass the packet contract and content scanning before
+it reaches the next stage.
+
+## Core Capabilities
+
+| Component | Responsibility |
+|---|---|
+| Runtime Adapter Registry | registers adapters satisfying the adapter contract |
+| Runtime Discovery | existence: `DISCOVERED` / `NOT_FOUND` (controlled result, never an exception) |
+| Runtime Health | moment-of-call state: auth, provider/model, minimal probe |
+| Capability Registry | evidence-backed capability records |
+| Capability Validation | `validated_capabilities` built only from gate evidence |
+| Qualification G1–G14 | the one sanctioned validation run, double-gated |
+| Verified Runtime Pool | admission for VERIFIED + REAL runtimes only |
+| Verified Selection | score-less selection from the verified pool |
+| Budget | per-task invocation accounting (reserve-before-invoke) |
+| LoopGuard | duplicate / repeated-failure / cycle protection before spend |
+| Collaboration Packet | the protocol contract between stages |
+| Local Collaboration Transport | in-process delivery mechanism |
+| Collaboration Ledger | append-only shared record of handoffs |
+| Production Facade | per-task engine surface for host applications |
+| Host / CLI Integration | facade injection plus the `dual-agent` CLI |
+| REAL Runtime Validation | gated, evidence-carrying real-call validation |
+| Cross-platform CI | Ubuntu / Windows / macOS × Python 3.10 / 3.11 / 3.12 |
+
+## Collaboration
+
+Four stages, four contracts:
+
+```text
+Architect
+    ↓  ArchitecturePacket
+Coder
+    ↓  ImplementationPacket
+Tester
+    ↓  TestPacket
+Reviewer
+    ↓  ReviewPacket
+```
+
+| Role | Reads | Produces |
+|---|---|---|
+| architect | the task itself | `ArchitecturePacket` |
+| coder | architecture packet wire text | `ImplementationPacket` |
+| tester | latest implementation packet | `TestPacket` |
 | reviewer | architecture + implementation + test | `ReviewPacket` |
 
-两个重要的区分：
+Two layers that are easy to conflate but are not the same:
 
-- **`CollaborationPacket` 是协议契约**（在冻结的信封 schema 上，谁欠谁
-  什么工作）。**Transport 是投递机制**（今天是进程内邮箱）。它们是不同的
-  层。
-- 当前的 transport **不是** Remote Agent Network。remote transport 模块
-  以 loopback 实现定义了边界契约；V2 中不存在任何远程 peer。
+- **`CollaborationPacket` is the protocol contract** — who owes what work,
+  on a frozen envelope schema.
+- **Transport is the delivery mechanism** — an in-process mailbox today.
 
-## 10. REAL Runtime Validation（经验证的事实）
+V2 contains **no** Remote Agent Network, no A2A protocol, no distributed
+execution, and no multi-agent network. The remote transport module defines
+the boundary contract with a loopback implementation only.
 
-以下为实测事实，不是愿景（记录于 2026-08-25，commit `198fbe9`，
-本机）：
+## Runtime Verification
 
-- **Claude Code CLI**（2.1.227，first-party 登录）：完整链路已被 REAL
-  证明 —— Discovery（FOUND）→ Health（READY）→ REAL Qualification →
-  `VERIFIED` + `REAL`，含全部 4 项能力 → Verified Pool 准入。
-  测试：`tests/test_rc3_real_discovery.py`（门控）。
-- **证据复用**：同一台机器上的第二个 bootstrap session，携带第一个
-  session 的证据，不再重复 qualification（`qualification_count = 0`）。
-- **G13 protected paths**：证明运行的每次真实调用中，5 个受保护文件
-  （凭据/配置）均为 `diff = 0`。
-- **离线基线**：`python -m pytest tests/ -q` →
-  **942 passed / 21 skipped / 377 subtests**（21 个 skip 是 opt-in 的
-  REAL 门控测试）。该数字随测试增加而变化；套件输出本身才是权威。
-- **Codex CLI**：本环境未安装 —— 不做任何断言。
-- **tiny-agents**：可执行文件在场但未配置（`TINY_AGENTS_AGENT_PATH` /
-  `TINY_AGENTS_COMMAND` 未设置）→ 不可注册；诚实地缺席，而非"失败"。
+### Capability Validation
 
-## 11. RC-3 Status（RC-3 状态）
+`validated_capabilities` is built **only** from structured gate evidence
+(the four role experiments of G14). A candidate's declared capability
+context is never promoted into it: DECLARED never becomes VERIFIED. Pool
+admission checks that the required capabilities are a subset of the
+validated ones.
 
-| 任务 | 范围 | 状态 |
-|---|---|---|
-| A | runtime adapter registry | ✅（`7bfdece`） |
-| B | discovery bootstrap 组合 | ✅（`7bfdece` / `55546be`） |
-| C | Host/CLI 离线接线（`build_facade_from_bootstrap`） | ✅（`55546be`） |
-| D | REAL 本地 runtime discovery 证明 | ✅（`198fbe9`） |
+### Provenance
 
-**RC-3 Task D：COMPLETED。**
+Every validation result carries a `provenance`:
 
-## 12. V2 → V3 Roadmap（未实现）
+- `OFFLINE` — produced by mock / injected executors; valid for contract
+  verification, **not** evidence of real capability.
+- `REAL` — produced only under the explicit real-validation gate
+  (`RUN_REAL_PROVIDER_TESTS=1`) with real-call evidence.
 
-- **V2（当前）**：可靠的 agent/runtime 编排 —— 本 README 的一切。V2 通过
-  挣取事实的链路（Discovery → Health → Qualification → VERIFIED+REAL →
-  Admission）回答*"哪个 runtime 可以执行这个任务？"*。
-- **V3（未来）**：以 agent 为中心的协作基础设施 —— 它问的是*"哪个 agent
-  最适合接这个任务？"*，runtime 降级为 agent 的一种执行能力。远程协作、
-  multi-agent network、跨机器 transport。
+**Offline validation is not REAL validation.** The runner refuses to grant
+`REAL` without real-call evidence, so the two cannot be swapped.
 
-分阶段设计目标（完整细节：[docs/roadmap/v2-to-v3.md](docs/roadmap/v2-to-v3.md)）：
+### REAL Runtime Validation
 
-| 阶段 | 主题 | 状态 |
-|---|---|---|
-| V3.0 | Agent Foundation —— identity、manifest、discovery、capability、contract、verification、trust、admission | NOT IMPLEMENTED |
-| V3.1 | Remote Collaboration —— 远程 agent、基于 artifact 的交换、context 隔离、authN/authZ | NOT IMPLEMENTED |
-| V3.2 | Multi-Agent Orchestration —— 任务分解、调度、工作流、失败恢复 | NOT IMPLEMENTED |
-| V3.5+ | Agent Network —— pool、动态选择、reputation、marketplace | NOT IMPLEMENTED |
+Verified facts, not aspirations (measured 2026-08-25 on the reference
+machine; gated test: `tests/test_rc3_real_discovery.py`):
 
-V3 能力**尚未构建**。当前代码库中没有任何东西实现远程 peer、A2A 协议或
-multi-agent network；不要把 remote-transport *契约*读成已部署的网络 ——
-`remote_transport.py` 是一个仅有 **loopback 实现**的边界契约。V3 是在
-V2 之上的演进（contract-first、verification-first、minimal-context
-transfer —— roadmap 文档列出了全部十条继承原则），而不是对它的推翻。
+- **Claude Code CLI** (2.1.227, first-party login): the full chain is
+  REAL-proven — Discovery (`FOUND`) → Health (`READY`) → REAL qualification
+  → `VERIFIED` + `REAL` with all four capabilities → Verified Runtime Pool
+  admission.
+- **Evidence reuse**: a second bootstrap session carrying the first
+  session's evidence performs zero re-qualification
+  (`qualification_count = 0`).
+- **G13 protected paths**: all five declared protected files
+  (credentials / config) showed `diff = 0` across every real call.
+- **Codex CLI**: not installed on the reference machine — no claims made.
+- **tiny-agents**: executable present but unconfigured
+  (`TINY_AGENTS_AGENT_PATH` / `TINY_AGENTS_COMMAND` unset) → not
+  registered; honest absence, not failure.
 
-## 13. Development（开发）
+Offline baseline at commit `2fa1ab2`: 945 passed / 21 skipped (all skips
+are opt-in REAL-gated tests) / 377 subtests. See the latest CI run for the
+authoritative test result.
 
-### 安装
+## Safety & Control
 
-要求 Python 3.10+（仅标准库）：
+### Security Boundaries
+
+- **No-secrets contract**: raw output, secrets, and model reasoning never
+  enter packets, the ledger, traces, or public results; `content_safety`
+  is the single scan authority.
+- **Raw-output quarantine**: stage inputs are always upstream packets; raw
+  output must pass the packet contract and content scan first.
+- **Protected paths**: REAL validation snapshots caller-declared protected
+  files (credentials / config); any change during the run fails G13.
+- **Minimal environment**: CLI adapters start subprocesses with a
+  whitelist env (`PATH` / `HOME` / `USERPROFILE` / `SYSTEMROOT`) —
+  credential-bearing variables are never forwarded.
+- **Safe error normalization**: adapter error text is shape-scrubbed before
+  reaching traces or reports.
+- The engine never reads, stores, prints, or modifies credentials; never
+  logs in or out; never touches runtime configuration.
+- Real runtime calls are opt-in and off by default
+  (`RUN_REAL_PROVIDER_TESTS=1` gates the real tests).
+- CLI output is a closed allow-list summary.
+
+### Budget & LoopGuard
+
+Both guards run **before** any invocation — a rejected duplicate or an
+exhausted budget must never consume money or calls:
+
+- **TaskBudget** spans one task lifecycle. Reserve-before-invoke: the slot
+  is reserved before the adapter call (exhaustion raises), so a call either
+  happened-and-was-paid or never happened. Token counts default to an
+  honest `"unknown"` — never guessed.
+- **LoopGuard** spans one task. `check()` is the pre-check
+  (DUPLICATE_TASK / REPEATED_FAILURE / CYCLE_DETECTED / caps); `record()`
+  completes the pair after the call. Only hashed failure *categories* are
+  remembered — never raw diagnostics.
+
+## Quick Start
+
+Requirements: Python 3.10+ — the engine is pure standard library with zero
+runtime dependencies. Runtimes are optional and bring their own
+prerequisites; for example the Claude Code CLI requires Node.js, which is a
+runtime-level concern, not a dependency of this package.
 
 ```bash
 git clone https://github.com/Tsubasa-Kaede/agent-development.git
-cd dual-agent-development-repo
+cd agent-development
 pip install -e .
-```
-
-这将安装 `dual_agent` 包（从 `dual-agent-development/scripts/` 映射）、
-`dual-agent` console script，以及 package data 区域下的 skill 资产
-（`SKILL.md`、`references/`、`templates/`、`agents/`、`examples/`）。
-
-### 快速开始（离线，无需 runtime）
-
-```bash
 python examples/offline_mock_run.py
 ```
 
-预期输出 —— 一份封闭、无秘密的 JSON 摘要：
+Expected output — a closed, secret-free JSON summary:
 
 ```json
 {"path": "FOUR_STAGE", "status": "SUCCESS", "stages": ["architect","coder","tester","reviewer"], ...}
 ```
 
-### CLI
+## CLI
 
 ```bash
-dual-agent run --mode off  "实现 GitHub Webhook"
-dual-agent run --mode auto "实现 GitHub Webhook"
-dual-agent run --mode on   "实现 GitHub Webhook"
+dual-agent run --mode off  "Implement a GitHub webhook"
+dual-agent run --mode auto "Implement a GitHub webhook"
+dual-agent run --mode on   "Implement a GitHub webhook"
 ```
 
-**诚实的限制**：CLI 解析参数、调用被注入（injected）的 facade 并打印
-封闭的 JSON 摘要
-（status、mode、path、stages、失败类别、阶段计数）。`ProductionFacade`
-必须**由 host 应用配置并注入** —— CLI 绝不自行创建 runtime、adapter、
-凭据或默认 facade，也绝不会自动配置 provider 或读取 API key。没有注入
-facade 时它会以明确的错误退出。Host 应用这样注入：
+| Mode | Behavior |
+|---|---|
+| `OFF` | no orchestration; returns the delegated empty result |
+| `AUTO` | classify the task; SIMPLE / MEDIUM / UNRESOLVED take the single-agent path, COMPLEX takes the dual-agent path |
+| `ON` | force the dual-agent path (architect + coder; tester + reviewer when qualified candidates exist) |
+
+Without verified tester / reviewer candidates, dual-agent success is
+reported as `NO_VERIFICATION_CAPABILITY` — never a silent two-stage
+success, never a fabricated four-stage success.
+
+Honest limitation: the CLI parses arguments, invokes the **host-injected**
+facade, and prints a closed JSON summary. The `ProductionFacade` must be
+configured and injected by the host application — the CLI never creates
+runtimes, adapters, credentials, or a default facade, never configures
+providers, and never reads API keys. Without an injected facade it exits
+with a clear error. A host injects like this:
 
 ```python
 from dual_agent import cli
-cli.main._facade = my_configured_facade   # 用你的 adapters/pool 构建
+cli.main._facade = my_configured_facade   # build with your adapters/pool
 ```
 
-facade 如何由真实引擎组件构建，见 `examples/offline_mock_run.py`。
+See `examples/offline_mock_run.py` for constructing the facade from real
+engine components.
 
-### Modes（模式）
+**Failure semantics** — structured and terminal; downstream stages do not
+run after an upstream failure:
 
-| 模式 | 行为 |
-|---|---|
-| `off` | 不编排；返回被委托的空结果 |
-| `auto` | 对任务分类；SIMPLE/MEDIUM/UNRESOLVED 走单 agent 路径，COMPLEX 走双 agent 路径 |
-| `on` | 强制双 agent 路径（architect+coder；存在合格候选时再跑 tester+reviewer） |
+- `*_INVOKE_FAILED`, `*_PACKET_INVALID` — a stage failed on the runtime or
+  the packet contract
+- `MISSING_HANDOFF` — a required upstream packet is absent from the ledger
+- `BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED` — task-lifecycle guards
+- `NO_VERIFICATION_CAPABILITY` — no verified tester / reviewer candidates
 
-没有 verified tester/reviewer 候选时的双 agent 成功会上报为
-`NO_VERIFICATION_CAPABILITY` —— 绝不是静默的两阶段成功，也绝不是伪造的
-四阶段成功。
+Honest retries require a new `task_id`; the loop guard rejects re-running
+the same stage of the same task.
 
-### 失败语义
-
-失败是结构化且终态的；上游失败后下游阶段不再运行。没有任何东西被包装成
-成功，也没有任何静默 fallback：
-
-- `*_INVOKE_FAILED`、`*_PACKET_INVALID` —— 某阶段在 runtime 或 packet
-  契约上失败
-- `MISSING_HANDOFF` —— ledger 中缺少必需的上游 packet
-- `BUDGET_EXHAUSTED`、`LOOP_GUARD_REJECTED` —— 任务生命周期守卫
-- `NO_VERIFICATION_CAPABILITY` —— 没有 verified 的 tester/reviewer 候选
-
-SINGLE 路径上，封闭的 CLI 摘要上报粗粒度 `FAILED` 类别；细粒度 reason
-（budget/guard/handoff）保留在引擎的结构化 errors 中，供直接消费
-`ExecutionResult` 的 host 使用。
-
-诚实的重试需要新的 `task_id`；loop guard 会拒绝同一任务同一阶段的
-重跑。
-
-### 任务生命周期（一个 facade = 一个任务）
-
-```text
-Task 1 → Facade 1 → done        Task 2 → Facade 2 → done
-```
-
-图示含义：每个任务拥有自己的 facade 及其 budget/guard/ledger；facade
-之间互不共享，也不在运行之间重置。
-
-一个 `ProductionFacade` 拥有**一个**任务生命周期 —— 它的 budget、guard
-与 ledger 都是按任务的，且不在运行之间重置：
-
-- **SINGLE 生命周期**：最多 1 次真实 agent 调用（一次 coder 调用）。
-- **FOUR_STAGE 生命周期**：最多 4 次（architect、coder、tester、
-  reviewer —— 各恰好一次）。超出预算上报 `BUDGET_EXHAUSTED`；新任务需要
-  新 facade（每任务 `host.build_facade`）。
-- **Budget**：`TaskBudget(4, 4)` 覆盖整个任务；SINGLE 路径消耗 4 中的
-  1，四阶段路径消耗全部 4。
-- **Qualification 证据**：一次受认可的 REAL qualification 结果即可将
-  runtime 准入 pool 并服务多个 facade/任务（用同一 validation 结果构建
-  facade）；绝不按任务重复 qualification。
-- **Qualification ≠ 稳定性**：G14 qualification 一次性证明 runtime 的
-  角色能力；FOUR_STAGE 稳定性是在 N 次独立运行上单独测量的。N=10 的
-  测量是一个样本，不是长期稳定性保证；一次 SINGLE 成功也不意味着所有
-  简单任务都稳定。
-
-### Runtime 中立设计
-
-引擎中任何地方都没有硬编码 runtime、provider 或模型名。具体 adapter
-（例如 Claude Code CLI adapter）是 adapter 契约
-（`references/adapter-contract.md`）的个别实现 —— Claude Code 是"一个"
-adapter，不是"那个" runtime。新增一个 runtime 意味着实现 adapter 协议，
-而不是修改 orchestrator。
-
-Runtime 层面前提（不是本 Python 包的依赖）：Claude Code CLI 自身依赖
-Node.js 运行环境 —— 它是 Claude Code CLI 的安装前提，与
-`dual-agent-development` 包的安装无关；本包保持零 Python 运行时依赖、
-Runtime 中立。
-
-### 测试
+## Verification
 
 ```bash
-python -m pytest tests/ -q                        # 完整离线套件 + 门控 skip
-python -m unittest discover -s tests              # 等价的 unittest 运行器
-python -m compileall dual-agent-development       # 语法门
+python -m pytest tests/ -q                     # offline suite + gated skips
+python -m unittest discover -s tests           # equivalent stdlib runner
+python -m compileall dual-agent-development    # syntax gate
 ```
 
-引擎是纯标准库。V2 的每个阶段都是测试先行构建的。
+Every layer of V2 was built test-first. REAL-runtime tests are opt-in
+(`RUN_REAL_PROVIDER_TESTS=1`; they invoke real runtimes) and skipped by
+default. Cross-platform CI runs the offline matrix on Ubuntu, Windows, and
+macOS across Python 3.10 / 3.11 / 3.12 — see the latest CI run for the
+authoritative result.
 
-### 故障排查
+## V2 Foundation
 
-| 症状 | 原因 / 处置 |
+What V2 delivers today:
+
+- The full chain, implemented and offline-tested: Discovery → Health →
+  Capability → Qualification → Verification → Admission → Execution →
+  Collaboration
+- Four-stage structured collaboration with packets, ledger, and transport
+- Two execution paths (ReadyPool classic engine; Verified production stack)
+  with the no-silent-borrowing invariant
+- Adapter contract plus a REAL-proven Claude Code CLI adapter
+- Production Facade and host / CLI integration
+- Cross-platform CI (3 OS × Python 3.10 / 3.11 / 3.12)
+- MIT license
+
+## What V2 Does Not Include
+
+- No Remote Agent Network, A2A protocol, distributed execution, or
+  multi-agent network — the remote transport module is a loopback boundary
+  contract only
+- No model provider or inference — it orchestrates your existing agent
+  CLIs
+- No automatic runtime login, logout, or configuration — credentials are
+  yours, and the engine never touches them
+- The task classifier is a closed keyword table, not a model; tasks with no
+  keyword hit classify as UNRESOLVED and take the orchestration path
+- Nothing from the V3 roadmap (below)
+
+## V2 → V3 Roadmap
+
+V2 asks *"which runtime can execute this task?"*. V3 asks *"which agent is
+best suited for this task?"* — the runtime becomes one execution capability
+of an agent. V3 is an **evolution of V2, not a replacement**:
+contract-first, verification-first, and minimal-context-transfer principles
+carry over.
+
+| V2 | V3 |
 |---|---|
-| `{"error": "no facade configured"}` | 没有 host 注入 facade 时的预期行为；配置一个（见 CLI 一节） |
-| 一切都报 `NO_VERIFICATION_CAPABILITY` / 无候选 | 尚无 runtime 拥有 verified 能力证据；runtime 必须先通过门控 validation 链才能被选择 |
-| 重试时报 `LOOP_GUARD_REJECTED` | 同一任务 + 同一阶段已运行过；使用新的 `task_id` |
-| 测试出现门控 skip | REAL-runtime 测试条目是 opt-in 的；设置 `RUN_REAL_PROVIDER_TESTS=1` 运行它们（它们会调用真实 runtime） |
+| Runtime | Agent identity |
+| Runtime Discovery | Agent discovery |
+| Capability | Agent capability |
+| Verification | Trust / admission |
+| Local collaboration | Remote collaboration |
 
-## 14. Documentation（文档树）
+| Stage | Theme | Status |
+|---|---|---|
+| V3.0 | Agent Foundation — identity, manifest, discovery, capability, contract, verification, trust, admission | NOT IMPLEMENTED |
+| V3.1 | Remote Collaboration — remote agents, artifact-based exchange, context isolation, authN/authZ | NOT IMPLEMENTED |
+| V3.2 | Multi-Agent Orchestration — task decomposition, scheduling, workflows, failure recovery | NOT IMPLEMENTED |
+| V3.5+ | Agent Network — pools, dynamic selection, reputation, marketplace | NOT IMPLEMENTED |
+
+Full design goals and the ten inheritance principles:
+[docs/roadmap/v2-to-v3.md](docs/roadmap/v2-to-v3.md).
+
+## Documentation
 
 ```text
 docs/
 ├── architecture/
-│   ├── overview.md           # 完整架构与模块地图
+│   ├── overview.md           # full architecture and module map
 │   ├── runtime-lifecycle.md  # Discovery / Health / Qualification / Verification / Admission
-│   ├── ready-vs-verified.md  # 双路径与"不得静默借用"不变量
-│   ├── execution.md          # Health→Guard→Handoff→Budget→Reserve→Invoke gate 链
-│   └── collaboration.md      # packet、契约、transport、session、交接
+│   ├── ready-vs-verified.md  # dual paths and the no-silent-borrowing invariant
+│   ├── execution.md          # Health → Guard → Handoff → Budget → Reserve → Invoke gate chain
+│   └── collaboration.md      # packets, contracts, transport, sessions, handoffs
 ├── development/
-    ├── getting-started.md    # 结构、环境、安装、首次测试
-    ├── development-guide.md  # contract-first、boundary-first 工作流
-    ├── testing.md            # unit / integration / E2E / OFFLINE 与 REAL
-    └── real-runtime.md       # 门控的 Registry→…→Admission 链与 RC-3 证明
+│   ├── getting-started.md    # structure, environment, install, first tests
+│   ├── development-guide.md  # contract-first, boundary-first workflow
+│   ├── testing.md            # unit / integration / E2E, OFFLINE vs REAL
+│   └── real-runtime.md       # the gated Registry → … → Admission chain and RC-3 proof
 └── roadmap/
-    └── v2-to-v3.md           # V3 设计目标 —— agent 为中心的演进（未实现）
+    └── v2-to-v3.md           # V3 design goals — agent-centric evolution (not implemented)
 ```
 
-Skill 面向资产：`dual-agent-development/SKILL.md`、
-`references/adapter-contract.md`、`references/workflow.md`、`templates/`。
+Skill-facing assets: `dual-agent-development/SKILL.md`,
+`dual-agent-development/references/`, `dual-agent-development/templates/`.
 
-## 15. Known Limitations（已知限制）
+## Known Limitations
 
-- 当前机器上只有**一个 runtime**（Claude Code CLI）拥有 REAL 证明的能力
-  证据；其它 adapter 存在但在本机未经证明。
-- 任务分类是一张**封闭的关键词表**，不是模型 —— 无关键词命中的任务分类
-  为 UNRESOLVED 并走编排路径。
-- 双路径覆盖 **architect+coder**；tester+reviewer 作为验证阶段运行，以
-  双 agent 成功为门（否则 `NO_VERIFICATION_CAPABILITY`）。
-- Qualification 是时点证明；**N 次运行的稳定性是单独的测量**（抽样，
-  不保证）。
-- V2 中不存在远程协作（见 §12）。
+- On the reference machine only **one runtime** (Claude Code CLI) holds
+  REAL-proven capability evidence; other adapters exist but are unproven
+  there.
+- Task classification is a closed keyword table — not a model.
+- The dual-agent path covers architect + coder; tester + reviewer run as
+  verification stages gated on dual-agent success (otherwise
+  `NO_VERIFICATION_CAPABILITY`).
+- Qualification is a point-in-time proof; stability over N runs is a
+  separate measurement (sampled, not guaranteed).
+- No remote collaboration in V2 — see the roadmap.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
