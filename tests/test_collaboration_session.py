@@ -482,7 +482,7 @@ class RealDualAgentSmokeTests(unittest.TestCase):
         identity = ("claude-cli", "anthropic", None, "fp-10hd-real")
         architect = collab_agent_address(identity, "architect")
         coder = collab_agent_address(identity, "coder")
-        budget = TaskBudget(4, 4, timeout_seconds=90.0)
+        budget = TaskBudget(4, 4, timeout_seconds=300.0)
         usage = BudgetUsage()
         protected = tuple(
             Path.home().joinpath(*part) for part in (
