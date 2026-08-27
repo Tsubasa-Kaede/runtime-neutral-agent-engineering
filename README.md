@@ -635,9 +635,9 @@ python -m unittest discover -s tests           # equivalent stdlib runner
 python -m compileall -q dual-agent-development # syntax gate
 ```
 
-Offline baseline: **972 passed / 15 skipped / 377 subtests** (945 before the
-Integration, bootstrap, and Codex adapter additions). Every skip is an
-opt-in REAL-gated test entry.
+Offline baseline: **979 passed / 15 skipped / 377 subtests** (945 before the
+Integration, bootstrap, Codex adapter, and transport E2E additions). Every
+skip is an opt-in REAL-gated test entry.
 
 ### REAL Runtime Tests
 
@@ -661,6 +661,12 @@ evidence with all four capabilities, and admits the runtime to the Verified
 Runtime Pool. One sanctioned qualification is then reused across tasks — the
 runtime is never re-qualified per task.
 
+A gated dual-agent collaboration smoke
+(`tests/test_collaboration_session.py`) additionally proves the
+architect → packet → transport → coder → reply loop end to end with
+`provenance=REAL`, using one REAL-verified runtime under two role-qualified
+agent addresses.
+
 ## Verification Status
 
 | Area | Status |
@@ -674,6 +680,7 @@ runtime is never re-qualified per task.
 | Local transport | Implemented + offline-tested |
 | Remote transport | Boundary contract with loopback implementation only — no remote peers |
 | Four-stage orchestration | Implemented; proven end-to-end offline |
+| Dual-agent collaboration (architect → coder) | ✅ Real verified — one REAL-verified runtime, two role-qualified agent invocations, `provenance=REAL` both directions (gated `tests/test_collaboration_session.py`) |
 | Claude Code CLI REAL verification | ✅ Real verified — full chain, v2.1.227, all four capabilities, pool admission |
 | tiny-agents REAL verification | Not performed (adapter implemented; offline-tested) |
 | Codex CLI adapter | Implemented + offline-tested; REAL verification not performed |
