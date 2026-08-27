@@ -1,226 +1,250 @@
 # Runtime-Neutral Agent Engineering
 
-> The engineering layer between Agents and the runtimes they depend on.
+[![CI](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Discover capabilities. Verify execution. Control collaboration.**
+> **Discover capabilities. Verify execution. Control collaboration.**
 
-Coding-agent CLIs are powerful — but building a product on top of one leaves
-you guessing. Is the runtime installed? Is it healthy *right now*? Has it
-actually **proven** it can architect, code, test, and review — or only
-claimed it? What happens when an invocation fails mid-task, the budget runs
-out, or two agents need to hand work to each other without dumping raw
-transcripts?
+Runtime-Neutral Agent Engineering is the engineering layer between agents and
+the runtimes they depend on. It discovers coding-agent CLIs, validates what
+they can actually prove, admits them to a verified pool, and orchestrates
+their work under explicit budgets and loop protection.
 
-This project is the engineering layer that answers those questions. It sits
-between your application (the host) and the coding-agent CLIs (the
-runtimes): it discovers runtimes, checks their health, qualifies their
-capabilities behind real gates, admits them to a verified pool, and
-orchestrates their collaboration under budget and loop protection.
+**Agent runtime ≠ agent orchestration.** Runtimes execute; this project
+engineers the layer above them. It is **not** a chatbot, a model provider, a
+single-runtime wrapper, a remote agent network, an A2A implementation, a
+distributed execution platform, or a multi-agent network.
 
-**It is not** a chatbot, a model provider, a single-runtime wrapper, a
-remote agent network, or an A2A implementation.
+What the layer provides:
 
-- **Runtime-neutral** — no runtime, provider, or model name is hard-coded in
-  the engine; runtimes plug in through an adapter contract.
-- **Verification-first** — a runtime is selected by *verified capability*,
-  never by name.
-- **Controlled execution** — budget is reserved before every invoke, loop
-  protection runs before any spend, and failures are structured and
-  terminal; nothing is wrapped as success.
-- **Structured agent collaboration** — architect → coder → tester →
-  reviewer exchange validated packets over an append-only ledger, never raw
-  output.
+- **Runtime Discovery** — is a runtime present at all?
+- **Runtime Validation** — gated qualification runs (G1–G14) producing real evidence
+- **Capability-based Selection** — selection by proven capability, never by name
+- **Agent Orchestration** — architect → coder → tester → reviewer stage chains
+- **Structured Collaboration** — validated packets over an append-only ledger
+- **Budget Control** — invocation slots reserved before every call
+- **LoopGuard** — duplicate / repeated-failure / cycle protection before spend
+- **Provenance** — every validation result carries OFFLINE or REAL evidence
+- **Security Boundary** — no-secrets contract, content scanning, protected paths
 
-## Why This Exists
+**Contents:** [Why](#why) · [Quick Start](#quick-start) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Agent Runtime Support](#agent-runtime-support) · [Installation](#installation) · [Configuration](#configuration) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
 
-Agent systems are increasingly capable — but their reliability still
-depends on the runtime layer beneath them. Different CLIs, model providers,
-execution environments, and local configurations expose different
-capabilities and different levels of reliability.
+## Why
 
-Depending directly on a specific runtime creates practical, unanswered
-questions:
+| Problem | How this project addresses it |
+|---|---|
+| Orchestration logic coupled to one specific runtime | Runtime-neutral engine core; runtimes plug in through an adapter contract. No runtime, provider, or model name is hard-coded in the engine |
+| Runtime state is opaque — installed? logged in? working? | Discovery and Health are explicit, structured checks with closed state vocabularies |
+| Capability and health get conflated | Health (READY) and capability (proven evidence) are separate layers; neither implies the other |
+| Multi-agent collaboration lacks structured contracts | Stages exchange typed packets through a protocol contract and an append-only ledger — never raw model output |
+| Real verification is unclear or claimed without evidence | Provenance is enforced: the runner refuses to grant REAL without real-call evidence; Offline validation is not REAL validation |
+| Agent calls have no unified budget | TaskBudget spans one task lifecycle with reserve-before-invoke semantics |
+| Multi-stage work lacks loop protection | LoopGuard pre-checks duplicates, repeated failures, and cycles before any spend |
+| Runtime-specific logic pollutes the orchestration layer | Adapters own all runtime specifics; the orchestrator only sees the adapter protocol |
 
-- **Existence and health.** A runtime that worked yesterday may be missing,
-  logged out, or broken today. Hoping is not a deployment strategy.
-- **Unverified capability.** "It usually writes good code" is not a
-  contract. Without gated evidence you cannot know what a runtime can
-  *prove* it does.
-- **Runaway cost.** Retry loops and repeated failures burn invocations with
-  nobody accounting for them.
-- **Opaque collaboration.** Multi-stage work degrades into chat logs: raw
-  output flows between stages with no validation, no contract, no audit
-  trail.
-- **Runtime lock-in.** Most wrappers hard-code one CLI; switching or adding
-  a runtime means rewriting the orchestrator.
+## Quick Start
 
-This project treats those questions as engineering problems. It answers
-three of them directly:
+Try it in 30 seconds — from a fresh clone, offline, no runtime, login, or
+configuration needed:
 
-- **What runtimes are actually available?**
-- **What capabilities have they actually proven?**
-- **Which runtime is safe to admit for execution?**
-
-The goal is not another agent or model provider. The goal is to make agent
-execution **discoverable, verifiable, controllable, and runtime-neutral**.
-
-## What It Does
-
-Given a task, the engine runs one controlled lifecycle:
-
-```text
-Classification (SIMPLE / MEDIUM / COMPLEX / UNRESOLVED)
-  ↓
-Discovery ──────── does the runtime exist?
-  ↓
-Health ─────────── is it READY right now?
-  ↓
-Capability ─────── what has it PROVEN it can do?
-  ↓
-Qualification ──── one sanctioned validation run (G1–G14)
-  ↓
-Verification ───── VERIFIED + REAL evidence
-  ↓
-Admission ──────── Verified Runtime Pool entry
-  ↓
-Execution ──────── architect → coder → tester → reviewer
-  ↓
-Collaboration ──── structured packets, shared ledger
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python examples/offline_mock_run.py
 ```
 
-In short:
-**Discovery → Health → Capability → Qualification → Verification →
-Admission → Execution → Collaboration.**
+Expected output — a closed, secret-free JSON summary:
 
-Per task, the engine classifies complexity, routes simple work to a single
-agent and complex work through the four-stage path, enforces one
-task-lifecycle budget and loop guard, and reports a closed, secret-free
-summary — including honest failure categories when things go wrong.
+```json
+{"path": "FOUR_STAGE", "status": "SUCCESS", "stages": ["architect","coder","tester","reviewer"], ...}
+```
+
+To run real tasks through the CLI, see [Installation](#installation)
+(environment setup) and [Modes](#modes) (CLI usage and facade injection).
+
+## Core Concepts
+
+| Concept | Meaning |
+|---|---|
+| Runtime Discovery | Does the runtime exist? (`DISCOVERED` / `NOT_FOUND`) |
+| Runtime Health | Is it usable right now? (`READY` / `AUTH_REQUIRED` / `UNAVAILABLE` / `ERROR`) |
+| Agent Capability | What a runtime has *proven* it can do (architecture, coding, testing, review) — built only from gate evidence, never from declarations |
+| Candidate Validation | The gated qualification run (G1–G14) over a runtime candidate |
+| Verified Runtime | A runtime whose validation concluded `VERIFIED` with `REAL` provenance |
+| Runtime Selection | Choosing agents by verified capability subset; the verified path is score-less and never falls back to the ready pool |
+| Mode Gate | Caller intent: OFF / AUTO / ON routing |
+| Collaboration Packet | The protocol contract between stages — who owes what work, on a frozen envelope schema |
+| Collaboration Transport | The delivery mechanism — an in-process mailbox today |
+| Provenance | Evidence class of a validation result: `OFFLINE` (mock) or `REAL` (real calls under an explicit gate) |
+| Task Budget | Per-task invocation accounting; a call either happened-and-was-paid or never happened |
+| LoopGuard | Pre-invoke protection against duplicate tasks, repeated failures, and cycles |
 
 ## Architecture
 
-### Runtime Lifecycle
+Two execution paths share one engine; the entry point decides which runs:
 
-Three vocabularies, three ownership layers — no layer answers for another:
+```mermaid
+flowchart TD
+    T[Task] --> MG["Mode Gate: OFF / AUTO / ON"]
+    MG --> CL["Classifier: SIMPLE / MEDIUM / COMPLEX / UNRESOLVED"]
 
-| Layer | States | Question |
+    subgraph VP["Verified path (production stack)"]
+        D["Runtime Discovery"] --> H["Runtime Health"]
+        H --> Q["Qualification G1-G14 (gated)"]
+        Q --> V["Verification: VERIFIED + REAL"]
+        V --> ADM["Verified Runtime Pool admission"]
+        ADM --> SEL["Verified selection (score-less)"]
+    end
+
+    subgraph RP["ReadyPool path (classic engine)"]
+        H2["Runtime Health"] --> CAP["Capability Registry"]
+        CAP --> POOL["ReadyPool"]
+        POOL --> SSE["Scored selection"]
+    end
+
+    CL --> VP
+    CL --> RP
+    SEL --> EX["Execution: architect - coder - tester - reviewer"]
+    SSE --> EX
+    EX --> G["Per-invoke gates: Handoff - LoopGuard - Budget reserve - Invoke"]
+    G --> OUT["Closed, secret-free summary"]
+```
+
+- The **ReadyPool path** (classic engine) admits runtimes on health and scores
+  candidates from registry evidence.
+- The **Verified path** (production stack) requires a gated qualification run,
+  `VERIFIED` + `REAL` evidence, and Verified Runtime Pool admission before
+  execution — and it **never falls back**.
+- Load-bearing invariant: **the verified path never silently borrows the
+  ReadyPool.** An empty verified selection normalizes to `NO_CAPABLE_AGENT`
+  instead of consulting the ready-pool registry, and the verified orchestrator
+  executes with an empty fallback policy.
+- The five distinctions the engine never blurs: Discovery ≠ Health,
+  Health ≠ Qualification, Qualification ≠ Verification, Verification ≠
+  Admission, READY ≠ VERIFIED.
+
+Task lifecycle: one `ProductionFacade` owns exactly one task. Budget, guard,
+and ledger are per-task and never reset between runs. SINGLE path: at most 1
+real invocation. Four-stage path: at most 4 (each role exactly once); beyond
+that, `BUDGET_EXHAUSTED`. A new task needs a new facade.
+
+## Agent Runtime Support
+
+Support tiers, strictly separated:
+
+| Runtime | Adapter | Discovery | Authentication | REAL verification | Status |
+|---|---|---|---|---|---|
+| Claude Code CLI | Implemented (`claude_code_adapter.py`) | `claude` executable on PATH | Its own login flow (first-party observed) | ✅ Full chain proven — Discovery → Health → REAL qualification → `VERIFIED` + `REAL`, all four capabilities, pool admission (v2.1.227, gated test `tests/test_rc3_real_discovery.py`) | **Implemented + Real Verified** |
+| tiny-agents | Implemented (`tiny_agents_adapter.py`) | Executable **plus** `TINY_AGENTS_AGENT_PATH` **plus** `TINY_AGENTS_COMMAND` — all three required, else honestly absent | n/a | ❌ Not performed | **Implemented (adapter-level)**; on the reference machine it is unconfigured → not registered |
+| Codex CLI | None shipped | n/a | n/a | ❌ | **Architecture-compatible** (mentioned in the adapter contract; no adapter in this repository) |
+| Any other CLI | None — implement the adapter contract | n/a | n/a | ❌ | **Architecture-compatible** |
+
+"Architecture-compatible" means the design allows integration; it does not
+mean supported.
+
+## Installation
+
+Python 3.10+ (3.10 / 3.11 / 3.12 tested in CI). The engine is pure standard
+library with zero runtime dependencies.
+
+This project is **not published on PyPI** — install from source:
+
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
+pip install -e .
+```
+
+This installs the `dual_agent` package (mapped from
+`dual-agent-development/scripts/`), the `dual-agent` console script, and the
+skill assets (`SKILL.md`, references, templates, agents, examples).
+
+Verify the install:
+
+```bash
+dual-agent --version
+```
+
+## Configuration
+
+There is no configuration file. The engine reads exactly these environment
+variables:
+
+| Variable | Purpose | Default |
 |---|---|---|
-| Discovery | `DISCOVERED` / `NOT_FOUND` | does the runtime exist? |
-| Health | `READY` / `AUTH_REQUIRED` / `UNAVAILABLE` / `ERROR` | is it usable right now? |
-| Validation | `VERIFIED` / `BLOCKED` / `FAILED` / `NOT_VERIFIED` | did it pass the gates? |
+| `RUN_REAL_PROVIDER_TESTS` | Set to `1` to opt in to REAL runtime tests (they invoke real runtimes) | unset — REAL tests stay skipped |
+| `TINY_AGENTS_AGENT_PATH` | tiny-agents agent path; required (with the executable and `TINY_AGENTS_COMMAND`) for registration | unset — tiny-agents stays unregistered |
+| `TINY_AGENTS_COMMAND` | tiny-agents command; see above | unset |
 
-The distinctions the engine never blurs:
+Runtime prerequisites (runtime-level, not dependencies of this package):
 
-| Distinction | Meaning |
+| Runtime | Prerequisite |
 |---|---|
-| Discovery ≠ Health | a discovered runtime may not be healthy; `DISCOVERED` is never treated as `READY` |
-| Health ≠ Qualification | `READY` asserts nothing about validation evidence |
-| Qualification ≠ Verification | a qualification run produces a result; `VERIFIED` is the outcome of one full gated pass |
-| Verification ≠ Admission | `VERIFIED` alone does not enter the pool — admission also requires the required capability subset, `READY` health, and no duplicate |
-| READY ≠ VERIFIED | health is a renewable state; verification is earned evidence — neither implies the other, in either direction |
+| Claude Code CLI | `claude` on PATH, logged in through its own flow (the CLI itself requires Node.js) |
+| tiny-agents | Executable + both environment variables above |
 
-### ReadyPool Path vs Verified Path
+Additional behavior is set through constructor parameters, not environment:
+mode is a CLI flag (`--mode`), and health-check timeouts are parameters
+(discovery checks use 10 s; the minimal health check is capped at 30 s).
 
-Two parallel paths; the entry point decides which one runs:
+**Secrets:** never put API keys or tokens in the repository, in examples, or
+in committed environment files. The engine never reads, stores, prints, or
+modifies credentials; runtime authentication belongs to the runtime, not to
+this layer.
 
-```text
-ReadyPool path (classic engine)          Verified path (production stack)
-──────────────────────────────           ───────────────────────────────
-Runtime                                  Runtime
- → Health                                 → Discovery
- → Capability (registry evidence)         → Health
- → ReadyPool (runtime_pool)               → Capability (gate evidence)
- → CapabilityRegistry selection           → Qualification (G1–G14, gated)
- → ExecutionEngine                        → Verification (VERIFIED + REAL)
-                                          → VerifiedRuntimePool admission
-                                          → Verified selection (score-less)
-                                          → Execution (never falls back)
+## Modes
+
+The CLI parses arguments and invokes a **host-injected** facade:
+
+```bash
+dual-agent run --mode off  "Implement a GitHub webhook"
+dual-agent run --mode auto "Implement a GitHub webhook"
+dual-agent run --mode on   "Implement a GitHub webhook"
 ```
 
-The classic path admits on health and scores candidates from registry
-evidence. The production path requires gated qualification, `VERIFIED` +
-`REAL` evidence, and Verified Runtime Pool admission before execution — and
-never falls back.
+Honest limitation: the CLI never creates runtimes, adapters, credentials, or
+a default facade — without an injected facade it exits with a clear error. A
+host injects like this:
 
-Load-bearing invariant: **the Verified path never silently borrows the
-ReadyPool.** This is structural — an empty verified selection normalizes to
-`NO_CAPABLE_AGENT` instead of consulting the ready-pool registry, and the
-verified orchestrator executes with an empty fallback policy.
-
-### Task Lifecycle
-
-One `ProductionFacade` owns exactly one task lifecycle:
-
-```text
-Task 1 → Facade 1 → done          Task 2 → Facade 2 → done
+```python
+from dual_agent import cli
+cli.main._facade = my_configured_facade   # build with your adapters/pool
 ```
 
-- Budget, loop guard, and ledger are per-task and never reset between runs.
-- SINGLE path: at most 1 real agent invocation (one coder call).
-- FOUR_STAGE path: at most 4 (architect, coder, tester, reviewer — each
-  exactly once). Beyond that: `BUDGET_EXHAUSTED`; a new task needs a new
-  facade.
-- Verified evidence is reused across tasks: one sanctioned REAL
-  qualification admits a runtime to the pool for many facades — runtimes
-  are never re-qualified per task.
+See `examples/offline_mock_run.py` for constructing the facade from real
+engine components, and `host.py` (`build_facade`) for the host-facing
+construction API.
 
-## What Makes It Different
-
-### Runtime-Neutral
-
-The engine core contains no runtime, provider, or model names anywhere.
-Concrete adapters (for example the Claude Code CLI adapter) are individual
-implementations of the adapter contract
-([`dual-agent-development/references/adapter-contract.md`](dual-agent-development/references/adapter-contract.md)):
-Claude Code is *an* adapter, not *the* runtime. Adding a runtime means
-implementing the adapter protocol — never modifying the orchestrator.
-
-### Verification-First
-
-Selection works on verified capability, never on names. Capabilities are
-built only from structured gate evidence; a candidate's *declared*
-capabilities are never promoted into verified ones. In the evidence
-hierarchy, DECLARED never counts as VERIFIED.
-
-### Controlled Execution
-
-Every guard runs **before** money or invocations can be spent. The budget
-reserves an invocation slot before the adapter is called
-(reserve-before-invoke), and the loop guard pre-checks duplicates, repeated
-failures, and cycles. Failures are structured and terminal — upstream
-failure stops downstream stages, nothing is packaged as success, and the
-verified path has no silent fallback.
-
-### Structured Collaboration
-
-Stages exchange validated packets over an append-only shared ledger — never
-raw model output. A stage's input is always an upstream *packet*; raw
-invocation output must pass the packet contract and content scanning before
-it reaches the next stage.
-
-## Core Capabilities
-
-| Component | Responsibility |
+| Mode | Behavior |
 |---|---|
-| Runtime Adapter Registry | registers adapters satisfying the adapter contract |
-| Runtime Discovery | existence: `DISCOVERED` / `NOT_FOUND` (controlled result, never an exception) |
-| Runtime Health | moment-of-call state: auth, provider/model, minimal probe |
-| Capability Registry | evidence-backed capability records |
-| Capability Validation | `validated_capabilities` built only from gate evidence |
-| Qualification G1–G14 | the one sanctioned validation run, double-gated |
-| Verified Runtime Pool | admission for VERIFIED + REAL runtimes only |
-| Verified Selection | score-less selection from the verified pool |
-| Budget | per-task invocation accounting (reserve-before-invoke) |
-| LoopGuard | duplicate / repeated-failure / cycle protection before spend |
-| Collaboration Packet | the protocol contract between stages |
-| Local Collaboration Transport | in-process delivery mechanism |
-| Collaboration Ledger | append-only shared record of handoffs |
-| Production Facade | per-task engine surface for host applications |
-| Host / CLI Integration | facade injection plus the `dual-agent` CLI |
-| REAL Runtime Validation | gated, evidence-carrying real-call validation |
-| Cross-platform CI | Ubuntu / Windows / macOS × Python 3.10 / 3.11 / 3.12 |
+| `OFF` | No orchestration; returns the delegated empty result — never silently runs |
+| `AUTO` (default) | Classify the task; SIMPLE / MEDIUM / UNRESOLVED take the single-agent path, COMPLEX takes the dual-agent path |
+| `ON` | Force the dual-agent path (architect + coder; tester + reviewer when qualified candidates exist) |
 
-## Collaboration
+Task classification is a closed keyword table (SIMPLE / MEDIUM / COMPLEX /
+UNRESOLVED) — a deterministic classifier, not a model. Tasks with no keyword
+hit classify as UNRESOLVED and take the orchestration path.
+
+Without verified tester / reviewer candidates, dual-agent success is reported
+as `NO_VERIFICATION_CAPABILITY` — never a silent two-stage success, never a
+fabricated four-stage success.
+
+Failures are structured and terminal; downstream stages do not run after an
+upstream failure:
+
+- `*_INVOKE_FAILED`, `*_PACKET_INVALID` — a stage failed on the runtime or the packet contract
+- `MISSING_HANDOFF` — a required upstream packet is absent from the ledger
+- `BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED` — task-lifecycle guards
+- `NO_CAPABLE_AGENT`, `NO_VERIFICATION_CAPABILITY` — no verified candidates
+
+Honest retries require a new `task_id`; the loop guard rejects re-running the
+same stage of the same task.
+
+## Agent Collaboration
 
 Four stages, four contracts:
 
@@ -244,262 +268,145 @@ Reviewer
 
 Two layers that are easy to conflate but are not the same:
 
-- **`CollaborationPacket` is the protocol contract** — who owes what work,
-  on a frozen envelope schema.
+- **`CollaborationPacket` is the protocol contract** — who owes what work, on
+  a frozen envelope schema.
 - **Transport is the delivery mechanism** — an in-process mailbox today.
 
-V2 contains **no** Remote Agent Network, no A2A protocol, no distributed
-execution, and no multi-agent network. The remote transport module defines
-the boundary contract with a loopback implementation only.
+The remote transport module defines a boundary contract with a loopback
+implementation only. This release contains **no** remote agent network, no
+A2A protocol, no distributed execution, and no multi-agent network.
 
-## Runtime Verification
+## Extending Runtime
 
-### Capability Validation
+New runtimes integrate through the `ExternalAgentAdapter` protocol
+(`dual-agent-development/scripts/external_agent_adapter.py`) with three
+methods:
 
-`validated_capabilities` is built **only** from structured gate evidence
-(the four role experiments of G14). A candidate's declared capability
-context is never promoted into it: DECLARED never becomes VERIFIED. Pool
-admission checks that the required capabilities are a subset of the
-validated ones.
+- `discover()` → `RuntimeDiscovery` — is the runtime present?
+- `invoke(request)` → `InvocationResult` — run one agent request
+- `cancel(invocation_id)` → `InvocationResult` — cancel an in-flight invocation
 
-### Provenance
+Adapters own all runtime specifics — executable resolution, authentication
+state, subprocess environment (whitelisted: `PATH` / `HOME` / `USERPROFILE` /
+`SYSTEMROOT`), error normalization. The orchestrator only sees the protocol,
+so adding a runtime never means modifying the orchestrator.
 
-Every validation result carries a `provenance`:
+Registration goes through the runtime adapter registry
+(`runtime_adapter_registry.py`, `register(AdapterDescriptor)`) and the
+discovery bootstrap (`discovery_bootstrap.py`). The full contract is
+documented in
+[`dual-agent-development/references/adapter-contract.md`](dual-agent-development/references/adapter-contract.md),
+and `adapter_probe.py` is a small developer probe for exercising an adapter
+by hand.
 
-- `OFFLINE` — produced by mock / injected executors; valid for contract
-  verification, **not** evidence of real capability.
-- `REAL` — produced only under the explicit real-validation gate
-  (`RUN_REAL_PROVIDER_TESTS=1`) with real-call evidence.
+Note: there is no third-party plugin package API in this release — extending
+means implementing the protocol inside a checkout, as the built-in adapters
+do.
 
-**Offline validation is not REAL validation.** The runner refuses to grant
-`REAL` without real-call evidence, so the two cannot be swapped.
-
-### REAL Runtime Validation
-
-Verified facts, not aspirations (measured 2026-08-25 on the reference
-machine; gated test: `tests/test_rc3_real_discovery.py`):
-
-- **Claude Code CLI** (2.1.227, first-party login): the full chain is
-  REAL-proven — Discovery (`FOUND`) → Health (`READY`) → REAL qualification
-  → `VERIFIED` + `REAL` with all four capabilities → Verified Runtime Pool
-  admission.
-- **Evidence reuse**: a second bootstrap session carrying the first
-  session's evidence performs zero re-qualification
-  (`qualification_count = 0`).
-- **G13 protected paths**: all five declared protected files
-  (credentials / config) showed `diff = 0` across every real call.
-- **Codex CLI**: not installed on the reference machine — no claims made.
-- **tiny-agents**: executable present but unconfigured
-  (`TINY_AGENTS_AGENT_PATH` / `TINY_AGENTS_COMMAND` unset) → not
-  registered; honest absence, not failure.
-
-Offline baseline at commit `2fa1ab2`: 945 passed / 21 skipped (all skips
-are opt-in REAL-gated tests) / 377 subtests. See the latest CI run for the
-authoritative test result.
-
-## Safety & Control
-
-### Security Boundaries
+## Security
 
 - **No-secrets contract**: raw output, secrets, and model reasoning never
-  enter packets, the ledger, traces, or public results; `content_safety`
-  is the single scan authority.
+  enter packets, the ledger, traces, or public results; `content_safety` is
+  the single scan authority.
 - **Raw-output quarantine**: stage inputs are always upstream packets; raw
-  output must pass the packet contract and content scan first.
+  output must pass the packet contract and content scan before reaching the
+  next stage.
 - **Protected paths**: REAL validation snapshots caller-declared protected
-  files (credentials / config); any change during the run fails G13.
-- **Minimal environment**: CLI adapters start subprocesses with a
-  whitelist env (`PATH` / `HOME` / `USERPROFILE` / `SYSTEMROOT`) —
-  credential-bearing variables are never forwarded.
+  files (credentials / config); any change during the run fails gate G13.
+- **Minimal environment**: adapters start subprocesses with a whitelist env
+  (`PATH` / `HOME` / `USERPROFILE` / `SYSTEMROOT`) — credential-bearing
+  variables are never forwarded.
 - **Safe error normalization**: adapter error text is shape-scrubbed before
   reaching traces or reports.
-- The engine never reads, stores, prints, or modifies credentials; never
-  logs in or out; never touches runtime configuration.
-- Real runtime calls are opt-in and off by default
-  (`RUN_REAL_PROVIDER_TESTS=1` gates the real tests).
+- The engine never reads, stores, prints, or modifies credentials; never logs
+  in or out; never touches runtime configuration. Authentication belongs to
+  the runtime.
+- Real runtime calls are opt-in and off by default (`RUN_REAL_PROVIDER_TESTS=1`
+  gates the real tests).
 - CLI output is a closed allow-list summary.
 
-### Budget & LoopGuard
+## Testing
 
-Both guards run **before** any invocation — a rejected duplicate or an
-exhausted budget must never consume money or calls:
-
-- **TaskBudget** spans one task lifecycle. Reserve-before-invoke: the slot
-  is reserved before the adapter call (exhaustion raises), so a call either
-  happened-and-was-paid or never happened. Token counts default to an
-  honest `"unknown"` — never guessed.
-- **LoopGuard** spans one task. `check()` is the pre-check
-  (DUPLICATE_TASK / REPEATED_FAILURE / CYCLE_DETECTED / caps); `record()`
-  completes the pair after the call. Only hashed failure *categories* are
-  remembered — never raw diagnostics.
-
-## Quick Start
-
-Requirements: Python 3.10+ — the engine is pure standard library with zero
-runtime dependencies. Runtimes are optional and bring their own
-prerequisites; for example the Claude Code CLI requires Node.js, which is a
-runtime-level concern, not a dependency of this package.
-
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-pip install -e .
-python examples/offline_mock_run.py
-```
-
-Expected output — a closed, secret-free JSON summary:
-
-```json
-{"path": "FOUR_STAGE", "status": "SUCCESS", "stages": ["architect","coder","tester","reviewer"], ...}
-```
-
-## CLI
-
-```bash
-dual-agent run --mode off  "Implement a GitHub webhook"
-dual-agent run --mode auto "Implement a GitHub webhook"
-dual-agent run --mode on   "Implement a GitHub webhook"
-```
-
-| Mode | Behavior |
-|---|---|
-| `OFF` | no orchestration; returns the delegated empty result |
-| `AUTO` | classify the task; SIMPLE / MEDIUM / UNRESOLVED take the single-agent path, COMPLEX takes the dual-agent path |
-| `ON` | force the dual-agent path (architect + coder; tester + reviewer when qualified candidates exist) |
-
-Without verified tester / reviewer candidates, dual-agent success is
-reported as `NO_VERIFICATION_CAPABILITY` — never a silent two-stage
-success, never a fabricated four-stage success.
-
-Honest limitation: the CLI parses arguments, invokes the **host-injected**
-facade, and prints a closed JSON summary. The `ProductionFacade` must be
-configured and injected by the host application — the CLI never creates
-runtimes, adapters, credentials, or a default facade, never configures
-providers, and never reads API keys. Without an injected facade it exits
-with a clear error. A host injects like this:
-
-```python
-from dual_agent import cli
-cli.main._facade = my_configured_facade   # build with your adapters/pool
-```
-
-See `examples/offline_mock_run.py` for constructing the facade from real
-engine components.
-
-**Failure semantics** — structured and terminal; downstream stages do not
-run after an upstream failure:
-
-- `*_INVOKE_FAILED`, `*_PACKET_INVALID` — a stage failed on the runtime or
-  the packet contract
-- `MISSING_HANDOFF` — a required upstream packet is absent from the ledger
-- `BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED` — task-lifecycle guards
-- `NO_VERIFICATION_CAPABILITY` — no verified tester / reviewer candidates
-
-Honest retries require a new `task_id`; the loop guard rejects re-running
-the same stage of the same task.
-
-## Verification
+### Offline Tests
 
 ```bash
 python -m pytest tests/ -q                     # offline suite + gated skips
 python -m unittest discover -s tests           # equivalent stdlib runner
-python -m compileall dual-agent-development    # syntax gate
+python -m compileall -q dual-agent-development # syntax gate
 ```
 
-Every layer of V2 was built test-first. REAL-runtime tests are opt-in
-(`RUN_REAL_PROVIDER_TESTS=1`; they invoke real runtimes) and skipped by
-default. Cross-platform CI runs the offline matrix on Ubuntu, Windows, and
-macOS across Python 3.10 / 3.11 / 3.12 — see the latest CI run for the
-authoritative result.
+Offline baseline measured at commit `04133ec`:
+**945 passed / 14 skipped / 377 subtests.** Every skip is an opt-in
+REAL-gated test entry.
 
-## V2 Foundation
+### REAL Runtime Tests
 
-What V2 delivers today:
+REAL tests invoke real runtimes and require a logged-in `claude` on PATH:
 
-- The full chain, implemented and offline-tested: Discovery → Health →
-  Capability → Qualification → Verification → Admission → Execution →
-  Collaboration
-- Four-stage structured collaboration with packets, ledger, and transport
-- Two execution paths (ReadyPool classic engine; Verified production stack)
-  with the no-silent-borrowing invariant
-- Adapter contract plus a REAL-proven Claude Code CLI adapter
-- Production Facade and host / CLI integration
-- Cross-platform CI (3 OS × Python 3.10 / 3.11 / 3.12)
-- MIT license
+```bash
+# Windows (cmd)
+set RUN_REAL_PROVIDER_TESTS=1
+python -m pytest tests/test_rc3_real_discovery.py -v -s
 
-## What V2 Does Not Include
+# macOS / Linux
+RUN_REAL_PROVIDER_TESTS=1 python -m pytest tests/test_rc3_real_discovery.py -v -s
+```
 
-- No Remote Agent Network, A2A protocol, distributed execution, or
-  multi-agent network — the remote transport module is a loopback boundary
-  contract only
-- No model provider or inference — it orchestrates your existing agent
-  CLIs
-- No automatic runtime login, logout, or configuration — credentials are
-  yours, and the engine never touches them
-- The task classifier is a closed keyword table, not a model; tasks with no
-  keyword hit classify as UNRESOLVED and take the orchestration path
-- Nothing from the V3 roadmap (below)
+This qualification run takes several minutes, produces `VERIFIED` + `REAL`
+evidence with all four capabilities, and admits the runtime to the Verified
+Runtime Pool. One sanctioned qualification is then reused across tasks — the
+runtime is never re-qualified per task.
 
-## V2 → V3 Roadmap
+## Verification Status
 
-V2 asks *"which runtime can execute this task?"*. V3 asks *"which agent is
-best suited for this task?"* — the runtime becomes one execution capability
-of an agent. V3 is an **evolution of V2, not a replacement**:
-contract-first, verification-first, and minimal-context-transfer principles
-carry over.
-
-| V2 | V3 |
+| Area | Status |
 |---|---|
-| Runtime | Agent identity |
-| Runtime Discovery | Agent discovery |
-| Capability | Agent capability |
-| Verification | Trust / admission |
-| Local collaboration | Remote collaboration |
+| Runtime Discovery | Implemented + offline-tested |
+| Runtime Health | Implemented + offline-tested |
+| Capability Validation (G1–G14) | Implemented + offline-tested |
+| Verified Runtime Pool | Implemented + offline-tested |
+| Agent Selection (both paths) | Implemented + offline-tested |
+| Collaboration contract & packets | Implemented + offline-tested |
+| Local transport | Implemented + offline-tested |
+| Remote transport | Boundary contract with loopback implementation only — no remote peers |
+| Four-stage orchestration | Implemented; proven end-to-end offline |
+| Claude Code CLI REAL verification | ✅ Real verified — full chain, v2.1.227, all four capabilities, pool admission |
+| tiny-agents REAL verification | Not performed (adapter implemented; offline-tested) |
+| Provenance enforcement | Implemented — the runner refuses REAL without real-call evidence |
+| Security boundary | Implemented + offline-tested (content safety, protected paths, env whitelist) |
 
-| Stage | Theme | Status |
-|---|---|---|
-| V3.0 | Agent Foundation — identity, manifest, discovery, capability, contract, verification, trust, admission | NOT IMPLEMENTED |
-| V3.1 | Remote Collaboration — remote agents, artifact-based exchange, context isolation, authN/authZ | NOT IMPLEMENTED |
-| V3.2 | Multi-Agent Orchestration — task decomposition, scheduling, workflows, failure recovery | NOT IMPLEMENTED |
-| V3.5+ | Agent Network — pools, dynamic selection, reputation, marketplace | NOT IMPLEMENTED |
+## Release
 
-Full design goals and the ten inheritance principles:
-[docs/roadmap/v2-to-v3.md](docs/roadmap/v2-to-v3.md).
+Current release: **[Runtime-Neutral Agent Engineering v2.0.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.0.0)**
+(Latest). An earlier release-candidate tag, `v2.0.0-rc.1`, also exists.
 
-## Documentation
+## Limitations
 
-```text
-docs/
-├── architecture/
-│   ├── overview.md           # full architecture and module map
-│   ├── runtime-lifecycle.md  # Discovery / Health / Qualification / Verification / Admission
-│   ├── ready-vs-verified.md  # dual paths and the no-silent-borrowing invariant
-│   ├── execution.md          # Health → Guard → Handoff → Budget → Reserve → Invoke gate chain
-│   └── collaboration.md      # packets, contracts, transport, sessions, handoffs
-├── development/
-│   ├── getting-started.md    # structure, environment, install, first tests
-│   ├── development-guide.md  # contract-first, boundary-first workflow
-│   ├── testing.md            # unit / integration / E2E, OFFLINE vs REAL
-│   └── real-runtime.md       # the gated Registry → … → Admission chain and RC-3 proof
-└── roadmap/
-    └── v2-to-v3.md           # V3 design goals — agent-centric evolution (not implemented)
-```
-
-Skill-facing assets: `dual-agent-development/SKILL.md`,
-`dual-agent-development/references/`, `dual-agent-development/templates/`.
-
-## Known Limitations
-
-- On the reference machine only **one runtime** (Claude Code CLI) holds
-  REAL-proven capability evidence; other adapters exist but are unproven
-  there.
-- Task classification is a closed keyword table — not a model.
+- Only **one runtime** (Claude Code CLI) holds REAL-proven capability
+  evidence; the tiny-agents adapter is implemented but not real-verified, and
+  no other adapter ships in this repository.
+- Runtime availability depends on your environment: PATH executables, login
+  state, and (for tiny-agents) two environment variables. Missing pieces mean
+  honest absence, never partial registration.
+- Task classification is a closed keyword table, not a model.
 - The dual-agent path covers architect + coder; tester + reviewer run as
-  verification stages gated on dual-agent success (otherwise
-  `NO_VERIFICATION_CAPABILITY`).
-- Qualification is a point-in-time proof; stability over N runs is a
-  separate measurement (sampled, not guaranteed).
-- No remote collaboration in V2 — see the roadmap.
+  verification stages gated on dual-agent success.
+- Qualification is a point-in-time proof; stability over repeated runs is a
+  separate measurement, not a guarantee.
+- Package maturity: source install only (no PyPI package); the CLI requires a
+  host-injected facade by design.
+- No remote collaboration in this release — the remote transport is a
+  loopback boundary contract.
+
+## Contributing
+
+Simple GitHub workflow:
+
+1. Fork the repository
+2. Create a branch for your change
+3. Make the change
+4. Run the offline suite (`python -m pytest tests/ -q`) and keep it green
+5. Open a Pull Request
 
 ## License
 
