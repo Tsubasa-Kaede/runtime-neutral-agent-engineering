@@ -81,6 +81,7 @@ skip 数量随门控测试的加入而增长；套件输出是权威，不是任
 |---|---|---|
 | Claude Code CLI | PATH 上有 `claude`（其自身依赖 Node.js 运行环境），经其自身登录流程登录 | Node.js 是 Claude Code CLI 的安装前提，不是本 Python 包的依赖；REAL validation 测试使用；引擎绝不替你登录或登出 |
 | tiny-agents | PATH 上有 `tiny-agents` **且**设置了 `TINY_AGENTS_AGENT_PATH` + `TINY_AGENTS_COMMAND` | 三者缺一即诚实地缺席（不注册），绝不半配置 |
+| Codex CLI | PATH 上有 `codex`，经其自身登录流程登录 | adapter 已实现 + 离线测试（Level B），未 REAL 验证；引擎绝不替你登录或登出 |
 | 其它任意 CLI | 实现 adapter 契约（`references/adapter-contract.md`） | 新增 runtime 绝不意味着修改 orchestrator |
 
 **绝不把秘密放进仓库、测试、环境变量默认值或文档。** 引擎的契约在

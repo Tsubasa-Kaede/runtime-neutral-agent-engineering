@@ -113,6 +113,7 @@
 | `external_agent_adapter.py` | 最小 adapter 协议 |
 | `claude_code_adapter.py` | Claude Code CLI adapter |
 | `tiny_agents_adapter.py` | tiny-agents CLI adapter |
+| `codex_adapter.py` | Codex CLI adapter（Level B：已实现 + 离线测试，未 REAL 验证，无 health 三方法） |
 | `adapter_probe.py` | 有界的可执行文件探测（仅存在性） |
 | `candidate_adapter_contract.py` | adapter → 候选实例 桥 |
 | `mock_adapter.py` | 离线测试 adapter |
