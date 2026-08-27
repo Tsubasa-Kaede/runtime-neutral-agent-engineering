@@ -16,7 +16,7 @@ engineers the layer above them. It is **not** a chatbot, a model provider, a
 single-runtime wrapper, a remote agent network, an A2A implementation, a
 distributed execution platform, or a multi-agent network.
 
-**Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ⚠️ tiny-agents — adapter implemented, offline-tested (not REAL-verified) · ⚠️ Codex CLI — adapter implemented, offline-tested (not REAL-verified) · ℹ️ any other CLI — not currently integrated. Details in [Agent Runtime Support](#agent-runtime-support).
+**Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ⚠️ tiny-agents — adapter implemented, offline-tested (not REAL-verified) · ⚠️ Codex CLI — adapter implemented, offline-tested (not REAL-verified). Details in [Agent Runtime Support](#agent-runtime-support).
 
 **Contents:** [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
 
@@ -43,12 +43,11 @@ other runtime by name.
 - **Provenance** — every validation result carries OFFLINE or REAL evidence
 - **Security Boundary** — no-secrets contract, content scanning, protected paths
 
-**What it supports** — support is reported at three strictly separated
-levels: **REAL verified** · **adapter implemented** ·
-**not currently integrated**. The
+**What it supports** — support is reported at two strictly separated
+levels: **REAL verified** · **adapter implemented**. The
 [Agent Runtime Support](#agent-runtime-support) section defines each level,
-and [Agent Runtime Ecosystem](#agent-runtime-ecosystem) places them against
-the wider landscape.
+and [Agent Runtime Ecosystem](#agent-runtime-ecosystem) lists the runtimes
+with actual integration evidence in this repository.
 
 **Current Runtime Integration**
 
@@ -161,25 +160,25 @@ mock or offline execution.
 
 ### Responsibility Boundary
 
-| Responsibility | Owner |
-|---|---|
-| Install Claude Code CLI and authenticate using Claude Code's own process; keep `claude` available on `PATH` | User |
-| Opt in to REAL runtime tests by setting `RUN_REAL_PROVIDER_TESTS=1` | User |
-| Declare protected paths required by the G13 gate | User |
-| Runtime discovery, runtime health checks, G1–G14 qualification, Verified Pool admission, orchestration, budget enforcement, and LoopGuard | This Project |
-| Reading, storing, or printing API keys; logging in/out; modifying runtime configuration | **Never performed by this project** |
+| Responsibility | Scope | Execution Boundary |
+|---|---|---|
+| Claude Code installation and authentication | Claude Code CLI installation, authentication, and PATH availability | External to this project |
+| REAL runtime opt-in | Setting `RUN_REAL_PROVIDER_TESTS=1` when REAL tests are intentionally executed | Explicitly controlled outside the project |
+| Protected-path declaration | Paths required by the G13 protection gate | Declared by the execution environment |
+| Runtime qualification and orchestration | Discovery, health checks, G1–G14 qualification, Verified Pool admission, orchestration, budget enforcement, and LoopGuard | Handled by the project |
+| Credentials and runtime configuration | API keys, login/logout, and runtime configuration | Not accessed or managed by the project |
 
-The project deliberately does not manage credentials, authentication, or
-runtime configuration. These responsibilities remain with the user and the
-runtime's own tooling.
+The project does not install, authenticate, or manage Claude Code or its
+credentials. It invokes an already installed and configured runtime through
+the `ExternalAgentAdapter` contract.
 
 ### REAL Runtime Usage
 
 The currently REAL-verified runtime is Claude Code CLI. The user installs and
 authenticates Claude Code through its own tooling; this project invokes the
-already configured runtime through its adapter. This project never installs
-or logs in to Claude Code, never manages its credentials, and never modifies
-its runtime configuration.
+already configured runtime through the `ExternalAgentAdapter` contract. This
+project never installs or logs in to Claude Code, never manages its
+credentials, and never modifies its runtime configuration.
 
 The REAL dual-agent collaboration fact base (one REAL-verified runtime —
 not two runtimes):
@@ -253,7 +252,7 @@ For any other runtime, implement the three-method adapter contract — see
 
 This project does **not** bundle, replace, or depend on a specific agent
 runtime. It integrates with external coding-agent CLIs through adapters,
-and support is reported at three strictly separated levels:
+and support is reported at two strictly separated levels:
 
 - **REAL VERIFIED** — an adapter ships in this repository, discovery works,
   offline tests cover it, and a gated REAL qualification run produced
@@ -261,29 +260,26 @@ and support is reported at three strictly separated levels:
 - **Adapter implemented** — an adapter ships and is covered by offline
   tests, but no REAL qualification run has ever been performed for it.
   Adapter implemented, but not REAL-verified.
-- **Not currently integrated** — no adapter or integration is currently
-  included in this repository. This does not imply incompatibility: other
-  CLIs can be integrated by implementing the `ExternalAgentAdapter`
-  contract.
 
 ### Runtime Compatibility Matrix
 
 | Agent Runtime / Tool | Adapter | Discovery | Offline Tests | REAL Verification |
 |---|---|---|---|---|
-| Claude Code CLI | `claude_code_adapter.py` | `claude` executable on PATH | ✅ `tests/test_claude_health.py` | ✅ Full chain — Discovery → Health → REAL qualification (G1–G14) → `VERIFIED` + `REAL`, all four capabilities, pool admission, and REAL dual-agent collaboration (v2.1.227; gated `tests/test_rc3_real_discovery.py`, `tests/test_collaboration_session.py`) |
-| tiny-agents | `tiny_agents_adapter.py` | Executable **plus** `TINY_AGENTS_AGENT_PATH` **plus** `TINY_AGENTS_COMMAND` — all three, else honestly absent | ✅ `tests/test_tiny_agents_adapter.py` | ❌ Not performed |
-| Codex CLI | `codex_adapter.py` | `codex` executable on PATH | ✅ `tests/test_codex_adapter.py` | ❌ Not performed |
-| Any other CLI | None — implement the `ExternalAgentAdapter` contract | n/a | You write them | ❌ until you qualify one |
+| Claude Code CLI | `claude_code_adapter.py` | `claude` executable available on PATH | ✅ `tests/test_claude_health.py` | ✅ REAL VERIFIED — Discovery → Health → G1–G14 qualification → Verified Pool admission → REAL dual-agent collaboration (v2.1.227) |
+| tiny-agents | `tiny_agents_adapter.py` | Runtime entry provided by `TINY_AGENTS_AGENT_PATH` / `TINY_AGENTS_COMMAND` | ✅ `tests/test_tiny_agents_adapter.py` | ❌ Not performed |
+| Codex CLI | `codex_adapter.py` | `codex` executable available on PATH | ✅ `tests/test_codex_adapter.py` | ❌ Not performed |
 
 ### What "Supported" Means
 
-Only REAL VERIFIED means supported in the strong sense: the runtime has
-passed the same gated REAL chain this project ships for itself, and the
-evidence is in this repository. Adapter implemented means the plumbing
-exists and is offline-tested — treat the runtime as unverified until you
-run a REAL qualification in your own environment. Not currently integrated
-makes no support claim at all: it states that no adapter or integration is
-currently included in this repository, not that integration is impossible.
+Support is reported at exactly two levels:
+
+- **REAL VERIFIED** — an adapter is implemented and has passed real runtime
+  qualification / REAL verification.
+- **Adapter implemented** — an adapter is implemented and covered by
+  offline tests, but REAL runtime verification has not been performed.
+
+Treat an adapter-implemented runtime as unverified until you run a REAL
+qualification in your own environment.
 
 ### Which runtime should I use?
 
@@ -303,46 +299,19 @@ without `VERIFIED` + `REAL` evidence, and no fallback to weaker paths.
 
 ## Agent Runtime Ecosystem
 
-The agent ecosystem is much larger than what this repository integrates.
-The table below maps representative, currently shipping tools and
-frameworks to this project's integration status. It describes the
-landscape — it is not a claim that this project has integrated or verified
-any tool beyond what the "This Project" column says.
+This section lists the runtimes that currently have actual integration
+evidence in this repository — a shipped adapter and, where stated, REAL
+verification. It makes no claim about tools not listed here.
 
 | Tool / Runtime | Category | Integration Status |
 |---|---|---|
-| Claude Code | Coding Agent CLI | **REAL VERIFIED** |
+| Claude Code CLI | Coding Agent CLI | **REAL VERIFIED** |
 | tiny-agents (Hugging Face) | Minimal Agent Runtime | **Adapter implemented** |
 | Codex CLI | Coding Agent CLI | **Adapter implemented** |
-| Gemini CLI | Coding Agent CLI | Not currently integrated |
-| Aider | Coding Agent CLI | Not currently integrated |
-| OpenCode | Coding Agent CLI | Not currently integrated |
-| Goose | Coding Agent CLI | Not currently integrated |
-| GitHub Copilot CLI | Coding Agent CLI | Not currently integrated |
-| Cursor | IDE Agent | Not currently integrated |
-| Cline | IDE Agent | Not currently integrated |
-| Roo Code | IDE Agent | Not currently integrated |
-| Continue | IDE Agent | Not currently integrated |
-| LangGraph | Agent Framework / SDK | Not currently integrated |
-| CrewAI | Agent Framework / SDK | Not currently integrated |
-| Microsoft Agent Framework | Agent Framework / SDK | Not currently integrated |
-| OpenAI Agents SDK | Agent Framework / SDK | Not currently integrated |
-| Google ADK | Agent Framework / SDK | Not currently integrated |
-| Claude Agent SDK | Agent Framework / SDK | Not currently integrated |
-| LlamaIndex Workflows | Agent Framework / SDK | Not currently integrated |
-| Pydantic AI | Agent Framework / SDK | Not currently integrated |
 
-The "Integration Status" column uses three fixed values: **REAL VERIFIED**,
-**Adapter implemented**, and **Not currently integrated**. "Not currently
-integrated" means that no adapter or integration is currently included in
-this repository; it does not imply incompatibility. For precision:
-tiny-agents and Codex CLI are adapter-implemented, but not REAL-verified.
-
-**Not currently integrated does not mean cannot be integrated.** The
-project is designed around the `ExternalAgentAdapter` contract: any CLI
-runtime can be brought in by implementing the three-method adapter
-contract (see [Extending Runtime](#extending-runtime)) — and doing so adds
-no claim to this table until the adapter and its verification exist.
+The "Integration Status" column uses two fixed values: **REAL VERIFIED**
+and **Adapter implemented**. tiny-agents and Codex CLI are
+adapter-implemented, but not REAL-verified.
 
 ## Installation
 
@@ -424,15 +393,15 @@ a statement that these agents are integrated or verified by it.
 
 ### Runtime Configuration
 
-No project-specific configuration file is required. The engine reads the
-following environment variables when the corresponding runtime integration
-is used.
+No project-specific runtime configuration file is required. The engine
+reads environment variables when the corresponding runtime integration
+uses them.
 
-| Variable | Purpose | Default |
-|---|---|---|
-| `RUN_REAL_PROVIDER_TESTS` | Enables gated tests that invoke real runtimes when set to `1` | Unset — REAL tests remain skipped |
-| `TINY_AGENTS_AGENT_PATH` | Path to the tiny-agents agent executable/configuration | Unset — tiny-agents remains unregistered |
-| `TINY_AGENTS_COMMAND` | Command used to invoke the configured tiny-agents agent | Unset — tiny-agents remains unregistered |
+| Variable | Purpose |
+|---|---|
+| `RUN_REAL_PROVIDER_TESTS` | Enables gated REAL runtime tests when set to `1` |
+| `TINY_AGENTS_AGENT_PATH` | Path to the tiny-agents agent executable or configuration |
+| `TINY_AGENTS_COMMAND` | Command used to invoke the configured tiny-agents agent |
 
 These variables are optional. They are not required for the core engine or
 for the currently verified Claude Code path.
@@ -689,12 +658,13 @@ evidence with all four capabilities, and admits the runtime to the Verified
 Runtime Pool. One sanctioned qualification is then reused across tasks — the
 runtime is never re-qualified per task.
 
-A gated dual-agent collaboration smoke (`tests/test_collaboration_session.py`,
-Claude Code CLI v2.1.227) additionally proves the architect → packet →
-transport → coder → reply loop end to end: two real invocations under two
-role-qualified agent addresses on one REAL-verified runtime, `provenance=REAL`
-on both envelopes, one shared `correlation_id`, `DELIVERED` receipts in both
-directions, and credential-file invariance across the run.
+A dual-agent collaboration smoke, gated by `RUN_REAL_PROVIDER_TESTS=1`
+(`tests/test_collaboration_session.py`, Claude Code CLI v2.1.227),
+additionally proves the architect → packet → transport → coder → reply loop
+end to end: two real invocations under two role-qualified agent addresses on
+one REAL-verified runtime, `provenance=REAL` on both envelopes, one shared
+`correlation_id`, `DELIVERED` receipts in both directions, and
+credential-file invariance across the run.
 
 ## Verification Status
 
