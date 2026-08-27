@@ -16,7 +16,22 @@ engineers the layer above them. It is **not** a chatbot, a model provider, a
 single-runtime wrapper, a remote agent network, an A2A implementation, a
 distributed execution platform, or a multi-agent network.
 
-What the layer provides:
+**Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ⚠️ tiny-agents — adapter implemented, offline-tested (not REAL-verified) · ℹ️ Codex CLI and any other CLI — architecture-compatible, no adapter shipped. Details in [Agent Runtime Support](#agent-runtime-support).
+
+**Contents:** [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+
+## Overview
+
+**What** — a runtime-neutral agent engineering and orchestration layer that
+sits between your application and the coding-agent CLIs it drives.
+
+**Why** — orchestration logic keeps getting hard-coupled to one runtime.
+This layer decouples the two: your application talks to the engine, and the
+engine discovers, verifies, and orchestrates whatever runtime you plug in
+through the adapter contract. Your code never binds to Claude Code or any
+other runtime by name.
+
+**What it does** — the layer provides:
 
 - **Runtime Discovery** — is a runtime present at all?
 - **Runtime Validation** — gated qualification runs (G1–G14) producing real evidence
@@ -28,7 +43,22 @@ What the layer provides:
 - **Provenance** — every validation result carries OFFLINE or REAL evidence
 - **Security Boundary** — no-secrets contract, content scanning, protected paths
 
-**Contents:** [Why](#why) · [Quick Start](#quick-start) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Agent Runtime Support](#agent-runtime-support) · [Installation](#installation) · [Configuration](#configuration) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+**What it supports** — support is reported at four strictly separated
+levels: **REAL verified** · **adapter implemented** ·
+**architecture-compatible** · **not currently integrated**. The
+[Agent Runtime Support](#agent-runtime-support) section defines each level,
+and [Agent Runtime Ecosystem](#agent-runtime-ecosystem) places them against
+the wider landscape.
+
+**Current Runtime Integration**
+
+- 1 REAL-verified — Claude Code CLI
+- 1 adapter-level — tiny-agents
+- 1 architecture-compatible — Codex CLI
+- + more via the `ExternalAgentAdapter` contract
+
+These counts describe this repository's integrations, not the size of the
+agent ecosystem.
 
 ## Why
 
@@ -62,6 +92,340 @@ Expected output — a closed, secret-free JSON summary:
 
 To run real tasks through the CLI, see [Installation](#installation)
 (environment setup) and [Modes](#modes) (CLI usage and facade injection).
+To connect a real runtime or your own application, see
+[Integration](#integration).
+
+## Integration
+
+Three on-ramps, from a 30-second offline taste to a real application.
+
+### How it fits
+
+```text
+User Application
+      ↓
+Host / Facade  (ProductionFacade via host.py)
+      ↓
+Runtime Discovery  →  Runtime Health  →  G1–G14 Qualification (gated)
+      ↓
+Verified Runtime Pool  (VERIFIED + REAL evidence only)
+      ↓
+Orchestration  (Budget reserve + LoopGuard before every invoke)
+      ↓                                  ↓
+Claude Code CLI                  Your runtime adapter
+(verified integration)           (implement ExternalAgentAdapter)
+```
+
+The agent runtime is an **external dependency**, never a component of this
+project: the engine discovers, verifies, and orchestrates; the runtime
+executes.
+
+### Try Offline
+
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python examples/offline_mock_run.py
+```
+
+- No runtime, no login, no credentials, no network
+- Runs the real ProductionFacade end to end with mock adapters
+- Prints one closed, secret-free JSON summary
+
+### Run with Claude Code
+
+| Responsibility | Owner |
+|---|---|
+| Install the Claude Code CLI, log in through its own flow, keep `claude` on PATH | **You** |
+| Opt in to real runtime calls: `RUN_REAL_PROVIDER_TESTS=1` | **You** |
+| Declare the protected paths (gate G13) your run must not mutate | **You** |
+| Runtime Discovery, Runtime Health, G1–G14 Qualification, Verified Pool admission, Orchestration, Budget, LoopGuard | **This project** |
+| Read, store, or print API keys · log you in or out · touch runtime configuration | **Never this project, by design** |
+
+`RUN_REAL_PROVIDER_TESTS=1` is a safety gate, not a test-only switch: real
+runtime health checks and real invocations — in the gated tests and in
+`minimal_host_app.py` alike — run only when it is explicitly set in the
+environment. It exists so a real call can never happen by accident; do not
+bypass or hard-code it.
+
+```bash
+# Windows (cmd)
+set RUN_REAL_PROVIDER_TESTS=1
+python examples/minimal_host_app.py "Add a slug helper and its test"
+
+# Windows (PowerShell)
+$env:RUN_REAL_PROVIDER_TESTS="1"
+python examples/minimal_host_app.py "Add a slug helper and its test"
+
+# macOS / Linux
+RUN_REAL_PROVIDER_TESTS=1 python examples/minimal_host_app.py "Add a slug helper and its test"
+```
+
+The first run performs the gated G1–G14 qualification (several minutes)
+and admits the runtime to the Verified Runtime Pool; that qualification
+evidence is then reused across tasks instead of re-running per task. The
+example fails honestly — non-zero exit, one-line reason — when the CLI is
+absent, not logged in, or fails qualification. It never falls back to
+mock or offline execution.
+
+### Integrate into Your Application
+
+The same chain as a library (runnable file:
+[`examples/minimal_host_app.py`](examples/minimal_host_app.py)):
+
+```python
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "dual-agent-development" / "scripts"))
+
+from claude_code_adapter import ClaudeCodeAdapter
+from generic_runtime_health import GenericRuntimeHealth
+from host import build_facade_from_bootstrap
+from mode_gate import Mode
+from real_validation_executor import run_real_validation
+from runtime_adapter_registry import (
+    AdapterDescriptor, AdapterRegistry, discovery_sources)
+from runtime_discovery import RuntimeCandidateDiscovery
+
+adapter = ClaudeCodeAdapter.from_environment()   # None when not installed
+if adapter is None:
+    raise SystemExit("Claude Code CLI not found on PATH")
+
+registry = AdapterRegistry()
+registry.register(AdapterDescriptor(
+    runtime_id="claude-cli", provider_id="anthropic", model_id=None,
+    runtime_type="coding-agent", display_name="Claude Code",
+    adapter_factory=lambda: adapter, config_fingerprint="installed"))
+
+def qualify(instance):
+    validation, _ = run_real_validation(
+        instance, instance.probe, timeout_seconds=300.0,
+        protected_paths=(Path.home() / ".claude" / ".credentials.json",))
+    return validation
+
+health = {}
+for candidate in RuntimeCandidateDiscovery(
+        discovery_sources(registry)).discover_all():
+    if candidate.available:
+        item = registry.get(candidate.runtime_id)
+        checked = GenericRuntimeHealth().check(candidate, item.adapter_factory())
+        health[candidate.runtime_id] = checked.status
+
+facade = build_facade_from_bootstrap(
+    registry, qualifier=qualify, current_health=health)
+result = facade.run(task_id="my-task", task=task, prompt=task, mode=Mode.ON)
+```
+
+`facade.run` omits `provenance` on purpose: the HostFacade labels every run
+from the qualification evidence, so a real run can never be mislabeled
+OFFLINE at the CLI seam. To drive the same facade from the `dual-agent`
+CLI, inject it — `cli.main._facade = facade` — see [Modes](#modes).
+
+For any other runtime, implement the three-method adapter contract — see
+[Extending Runtime](#extending-runtime).
+
+## Agent Runtime Support
+
+This project does **not** bundle, replace, or depend on a specific agent
+runtime. It integrates with external coding-agent CLIs through adapters,
+and support is reported at four strictly separated levels:
+
+- **A — Implemented + Real Verified** — an adapter ships in this repository,
+  discovery works, offline tests cover it, and a gated REAL qualification
+  run produced `VERIFIED` + `REAL` evidence with Verified Runtime Pool
+  admission.
+- **B — Adapter Implemented / Offline Tested** — an adapter ships and is
+  covered by offline tests, but no REAL qualification run has ever been
+  performed for it. Adapter implemented, but not REAL-verified.
+- **C — Architecture-Compatible** — the design allows an adapter, but none
+  is included in this repository. Architecture compatibility is not support.
+- **D — Custom Runtime** — any other CLI you integrate yourself by
+  implementing the adapter contract. Architecture compatibility ≠ current
+  support.
+
+### Runtime Compatibility Matrix
+
+| Agent Runtime / Tool | Adapter | Discovery | Offline Tests | REAL Verified | Status |
+|---|---|---|---|---|---|
+| Claude Code CLI | `claude_code_adapter.py` | `claude` executable on PATH | ✅ `tests/test_claude_health.py` | ✅ Full chain — Discovery → Health → REAL qualification (G1–G14) → `VERIFIED` + `REAL`, all four capabilities, pool admission (v2.1.227, gated `tests/test_rc3_real_discovery.py`) | **A — Implemented + Real Verified** |
+| tiny-agents | `tiny_agents_adapter.py` | Executable **plus** `TINY_AGENTS_AGENT_PATH` **plus** `TINY_AGENTS_COMMAND` — all three, else honestly absent | ✅ `tests/test_tiny_agents_adapter.py` | ❌ Not performed | **B — Adapter Implemented / Offline Tested** — adapter implemented, but not REAL-verified |
+| Codex CLI | None shipped | n/a | Contract-level only (named in the adapter contract) | ❌ | **C — Architecture-Compatible** — architecture-compatible, but no production Codex adapter is currently included |
+| Any other CLI | None — implement the adapter contract | n/a | You write them | ❌ until you qualify one | **D — Custom Runtime** via `ExternalAgentAdapter` |
+
+### What "Supported" Means
+
+Only level A means supported in the strong sense: the runtime has passed
+the same gated REAL chain this project ships for itself, and the evidence
+is in this repository. Level B means the plumbing exists and is
+offline-tested — treat the runtime as unverified until you run a REAL
+qualification in your own environment. Levels C and D make no support
+claim at all: they state what the architecture allows, not what this
+repository provides.
+
+### Which runtime should I use?
+
+| If you use… | Do this |
+|---|---|
+| Claude Code CLI | Supported today (level A) — [Integration](#integration) → "Run with Claude Code" |
+| tiny-agents | Adapter is ready (level B): install the executable, set both `TINY_AGENTS_*` variables, then REAL-verify it in your environment before production use |
+| Codex CLI | No adapter is included (level C): implement `ExternalAgentAdapter` — see [Extending Runtime](#extending-runtime) |
+| Your own CLI or runtime | Level D: implement the three-method adapter contract; the orchestrator never needs modification |
+
+### Current Support Boundary
+
+Exactly one runtime — Claude Code CLI — holds REAL-proven capability
+evidence in this repository. Nothing else is supported in the verified
+sense, and the boundary is enforced by the engine itself: no admission
+without `VERIFIED` + `REAL` evidence, and no fallback to weaker paths.
+
+## Agent Runtime Ecosystem
+
+The agent ecosystem is much larger than what this repository integrates.
+The table below maps representative, currently shipping tools and
+frameworks to this project's integration status. It describes the
+landscape — it is not a claim that this project has integrated or verified
+any tool beyond what the "This Project" column says.
+
+| Tool / Runtime | Category | This Project |
+|---|---|---|
+| Claude Code | Coding Agent CLI | **REAL VERIFIED** |
+| tiny-agents (Hugging Face) | Minimal Agent Runtime | **Adapter implemented** |
+| Codex CLI | Coding Agent CLI | **Architecture-compatible** |
+| Gemini CLI | Coding Agent CLI | Not currently integrated |
+| Aider | Coding Agent CLI | Not currently integrated |
+| OpenCode | Coding Agent CLI | Not currently integrated |
+| Goose | Coding Agent CLI | Not currently integrated |
+| GitHub Copilot CLI | Coding Agent CLI | Not currently integrated |
+| Cursor | IDE Agent | Not currently integrated |
+| Cline | IDE Agent | Not currently integrated |
+| Roo Code | IDE Agent | Not currently integrated |
+| Continue | IDE Agent | Not currently integrated |
+| LangGraph | Agent Framework / SDK | Not currently integrated |
+| CrewAI | Agent Framework / SDK | Not currently integrated |
+| Microsoft Agent Framework | Agent Framework / SDK | Not currently integrated |
+| OpenAI Agents SDK | Agent Framework / SDK | Not currently integrated |
+| Google ADK | Agent Framework / SDK | Not currently integrated |
+| Claude Agent SDK | Agent Framework / SDK | Not currently integrated |
+| LlamaIndex Workflows | Agent Framework / SDK | Not currently integrated |
+| Pydantic AI | Agent Framework / SDK | Not currently integrated |
+
+The "This Project" column uses exactly four fixed values — **REAL
+VERIFIED**, **Adapter implemented**, **Architecture-compatible**, and
+**Not currently integrated** — the same vocabulary as the
+[support levels](#agent-runtime-support) above. For precision: tiny-agents
+is adapter-implemented, but not REAL-verified; no production Codex adapter
+is currently included.
+
+**Not currently integrated does not mean cannot be integrated.** The
+project is designed around the `ExternalAgentAdapter` contract: any CLI
+runtime can be brought in by implementing the three-method adapter
+contract (see [Extending Runtime](#extending-runtime)) — and doing so adds
+no claim to this table until the adapter and its verification exist.
+
+## Installation
+
+Python 3.10+ (3.10 / 3.11 / 3.12 tested in CI). The engine is pure standard
+library with zero runtime dependencies. This project is **not published on
+PyPI** — install from source, three ways:
+
+### Option 1 — Clone and Run
+
+The fastest first taste: nothing is installed, and the example runs
+straight from the checkout.
+
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python examples/offline_mock_run.py
+```
+
+- Python 3.10+ is the only prerequisite
+- No agent runtime required, no login, no credentials, no network
+- No package installation for the offline example
+
+### Option 2 — Editable Installation
+
+The regular development setup:
+
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python -m venv .venv
+
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
+
+python -m pip install -e .
+dual-agent --version
+```
+
+This installs the `dual_agent` package (mapped from
+`dual-agent-development/scripts/`), the `dual-agent` console script, and
+the skill assets (`SKILL.md`, references, templates, agents, examples).
+The project is not published on PyPI — `pip install -e .` from a checkout
+is the only package install.
+
+### Option 3 — One-command Bootstrap
+
+```bash
+python scripts/bootstrap.py
+```
+
+The bootstrap creates (or reuses) `.venv`, installs this project into it,
+and prints the next steps. It installs **this project only**: it never
+installs or logs into a third-party agent runtime, never reads secrets or
+`.env` files, and never modifies system-level configuration, `PATH`, or
+shell profiles. `--check` runs a no-side-effect preflight (Python version
+and repository layout — no files created, no network used):
+
+```bash
+python scripts/bootstrap.py --check
+```
+
+### Install with an AI Coding Agent
+
+You can hand the setup to a user-side coding agent (Claude Code, Codex
+CLI, Gemini CLI, Cursor, Cline, ...) with a prompt like:
+
+> Clone this repository, inspect its README installation instructions,
+> create the recommended Python environment, and install this project
+> only. Then run `dual-agent --version` and the offline smoke example,
+> and report the result. Do not install any third-party Agent Runtime.
+> Do not read or configure API keys, secrets, or credentials, and do not
+> log in to or out of any service. Do not modify system-level
+> configuration.
+
+This is user-side assistance — not a dependency of this project, and not
+a statement that these agents are integrated or verified by it.
+
+## Configuration
+
+There is no configuration file. The engine reads exactly these environment
+variables:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `RUN_REAL_PROVIDER_TESTS` | Set to `1` to opt in to REAL runtime tests (they invoke real runtimes) | unset — REAL tests stay skipped |
+| `TINY_AGENTS_AGENT_PATH` | tiny-agents agent path; required (with the executable and `TINY_AGENTS_COMMAND`) for registration | unset — tiny-agents stays unregistered |
+| `TINY_AGENTS_COMMAND` | tiny-agents command; see above | unset |
+
+Runtime prerequisites (runtime-level, not dependencies of this package):
+
+| Runtime | Prerequisite |
+|---|---|
+| Claude Code CLI | `claude` on PATH, logged in through its own flow (the CLI itself requires Node.js) |
+| tiny-agents | Executable + both environment variables above |
+
+Additional behavior is set through constructor parameters, not environment:
+mode is a CLI flag (`--mode`), and health-check timeouts are parameters
+(discovery checks use 10 s; the minimal health check is capped at 30 s).
+
+**Secrets:** never put API keys or tokens in the repository, in examples, or
+in committed environment files. The engine never reads, stores, prints, or
+modifies credentials; runtime authentication belongs to the runtime, not to
+this layer.
 
 ## Core Concepts
 
@@ -129,73 +493,6 @@ and ledger are per-task and never reset between runs. SINGLE path: at most 1
 real invocation. Four-stage path: at most 4 (each role exactly once); beyond
 that, `BUDGET_EXHAUSTED`. A new task needs a new facade.
 
-## Agent Runtime Support
-
-Support tiers, strictly separated:
-
-| Runtime | Adapter | Discovery | Authentication | REAL verification | Status |
-|---|---|---|---|---|---|
-| Claude Code CLI | Implemented (`claude_code_adapter.py`) | `claude` executable on PATH | Its own login flow (first-party observed) | ✅ Full chain proven — Discovery → Health → REAL qualification → `VERIFIED` + `REAL`, all four capabilities, pool admission (v2.1.227, gated test `tests/test_rc3_real_discovery.py`) | **Implemented + Real Verified** |
-| tiny-agents | Implemented (`tiny_agents_adapter.py`) | Executable **plus** `TINY_AGENTS_AGENT_PATH` **plus** `TINY_AGENTS_COMMAND` — all three required, else honestly absent | n/a | ❌ Not performed | **Implemented (adapter-level)**; on the reference machine it is unconfigured → not registered |
-| Codex CLI | None shipped | n/a | n/a | ❌ | **Architecture-compatible** (mentioned in the adapter contract; no adapter in this repository) |
-| Any other CLI | None — implement the adapter contract | n/a | n/a | ❌ | **Architecture-compatible** |
-
-"Architecture-compatible" means the design allows integration; it does not
-mean supported.
-
-## Installation
-
-Python 3.10+ (3.10 / 3.11 / 3.12 tested in CI). The engine is pure standard
-library with zero runtime dependencies.
-
-This project is **not published on PyPI** — install from source:
-
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS / Linux
-pip install -e .
-```
-
-This installs the `dual_agent` package (mapped from
-`dual-agent-development/scripts/`), the `dual-agent` console script, and the
-skill assets (`SKILL.md`, references, templates, agents, examples).
-
-Verify the install:
-
-```bash
-dual-agent --version
-```
-
-## Configuration
-
-There is no configuration file. The engine reads exactly these environment
-variables:
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `RUN_REAL_PROVIDER_TESTS` | Set to `1` to opt in to REAL runtime tests (they invoke real runtimes) | unset — REAL tests stay skipped |
-| `TINY_AGENTS_AGENT_PATH` | tiny-agents agent path; required (with the executable and `TINY_AGENTS_COMMAND`) for registration | unset — tiny-agents stays unregistered |
-| `TINY_AGENTS_COMMAND` | tiny-agents command; see above | unset |
-
-Runtime prerequisites (runtime-level, not dependencies of this package):
-
-| Runtime | Prerequisite |
-|---|---|
-| Claude Code CLI | `claude` on PATH, logged in through its own flow (the CLI itself requires Node.js) |
-| tiny-agents | Executable + both environment variables above |
-
-Additional behavior is set through constructor parameters, not environment:
-mode is a CLI flag (`--mode`), and health-check timeouts are parameters
-(discovery checks use 10 s; the minimal health check is capped at 30 s).
-
-**Secrets:** never put API keys or tokens in the repository, in examples, or
-in committed environment files. The engine never reads, stores, prints, or
-modifies credentials; runtime authentication belongs to the runtime, not to
-this layer.
-
 ## Modes
 
 The CLI parses arguments and invokes a **host-injected** facade:
@@ -216,8 +513,9 @@ cli.main._facade = my_configured_facade   # build with your adapters/pool
 ```
 
 See `examples/offline_mock_run.py` for constructing the facade from real
-engine components, and `host.py` (`build_facade`) for the host-facing
-construction API.
+engine components, `examples/minimal_host_app.py` for the full REAL-path
+chain (discovery → qualification → facade), and `host.py`
+(`build_facade`) for the host-facing construction API.
 
 | Mode | Behavior |
 |---|---|
@@ -278,6 +576,9 @@ A2A protocol, no distributed execution, and no multi-agent network.
 
 ## Extending Runtime
 
+Adding a runtime is support level D from the matrix above — the
+architecture allows it, and you own the adapter and its verification.
+
 New runtimes integrate through the `ExternalAgentAdapter` protocol
 (`dual-agent-development/scripts/external_agent_adapter.py`) with three
 methods:
@@ -335,9 +636,9 @@ python -m unittest discover -s tests           # equivalent stdlib runner
 python -m compileall -q dual-agent-development # syntax gate
 ```
 
-Offline baseline measured at commit `04133ec`:
-**945 passed / 14 skipped / 377 subtests.** Every skip is an opt-in
-REAL-gated test entry.
+Offline baseline: **957 passed / 14 skipped / 377 subtests** (945 before the
+Integration and bootstrap additions). Every skip is an opt-in REAL-gated test
+entry.
 
 ### REAL Runtime Tests
 
@@ -346,6 +647,10 @@ REAL tests invoke real runtimes and require a logged-in `claude` on PATH:
 ```bash
 # Windows (cmd)
 set RUN_REAL_PROVIDER_TESTS=1
+python -m pytest tests/test_rc3_real_discovery.py -v -s
+
+# Windows (PowerShell)
+$env:RUN_REAL_PROVIDER_TESTS="1"
 python -m pytest tests/test_rc3_real_discovery.py -v -s
 
 # macOS / Linux
