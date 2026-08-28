@@ -73,7 +73,19 @@ agent ecosystem.
 
 ## Quick Start
 
-Try it in 30 seconds — from a fresh clone, offline, no runtime, login, or
+Install the published package from PyPI — Python >= 3.10, zero runtime
+dependencies, no clone needed:
+
+```bash
+pip install dual-agent-development==2.1.0
+dual-agent --version
+```
+
+> Name map: the GitHub repository is `runtime-neutral-agent-engineering`;
+> the PyPI distribution is `dual-agent-development` (import `dual_agent`,
+> console script `dual-agent`).
+
+Or try it in 30 seconds from a fresh clone — offline, no runtime, login, or
 configuration needed:
 
 ```bash
@@ -316,10 +328,22 @@ adapter-implemented, but not REAL-verified.
 ## Installation
 
 Python 3.10+ (3.10 / 3.11 / 3.12 tested in CI). The engine is pure standard
-library with zero runtime dependencies. This project is **not published on
-PyPI** — install from source, three ways:
+library with zero runtime dependencies. Published on PyPI as
+**`dual-agent-development`** — install from the registry or from source:
 
-### Option 1 — Clone and Run
+### Option 1 — Install from PyPI (recommended)
+
+The published distribution — no clone, no build step:
+
+```bash
+pip install dual-agent-development==2.1.0
+```
+
+- Distribution [`dual-agent-development` on PyPI](https://pypi.org/project/dual-agent-development/) — note the GitHub repository name (`runtime-neutral-agent-engineering`) and the PyPI package name are different
+- Installs the `dual_agent` package, the `dual-agent` console script, and the skill assets (`SKILL.md`, references, templates, agents, examples)
+- Python >= 3.10, zero runtime dependencies; `dual-agent --version` verifies the install
+
+### Option 2 — Clone and Run
 
 The fastest first taste: nothing is installed, and the example runs
 straight from the checkout.
@@ -334,7 +358,7 @@ python examples/offline_mock_run.py
 - No agent runtime required, no login, no credentials, no network
 - No package installation for the offline example
 
-### Option 2 — Editable Installation
+### Option 3 — Editable Installation
 
 The regular development setup:
 
@@ -353,10 +377,10 @@ dual-agent --version
 This installs the `dual_agent` package (mapped from
 `dual-agent-development/scripts/`), the `dual-agent` console script, and
 the skill assets (`SKILL.md`, references, templates, agents, examples).
-The project is not published on PyPI — `pip install -e .` from a checkout
-is the only package install.
+For development on the engine itself, `pip install -e .` from a checkout
+is the editable equivalent of the PyPI install.
 
-### Option 3 — One-command Bootstrap
+### Option 4 — One-command Bootstrap
 
 ```bash
 python scripts/bootstrap.py
