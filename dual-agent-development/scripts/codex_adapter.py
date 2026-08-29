@@ -7,11 +7,21 @@
 非交互模式，提示词作为位置参数传递（不经 stdin），仅当
 request.model 存在时附加 --model。
 
-Level B 边界：本 adapter 不实现 check_authentication /
-check_provider_model / minimal_health_check —— 没有 health 就不可
-能 READY，更不可能进入 Verified Runtime Pool；REAL 验证属于未来
-独立的门控任务。认证属于 Codex 自身（用户侧 codex login），本
-模块绝不读取 ~/.codex 下的凭据或配置文件。
+事实面（6 方法）：discover/invoke/cancel 之外实现
+check_authentication / check_provider_model / minimal_health_check
+—— "具备方法"不等于"已经 REAL VERIFIED"：REAL 资格仍只由
+RealGateExecutor 的门控运行授予。Authentication 只通过
+codex login status 这一个只读观测面"观测"：对 stdout+stderr 的
+合并文本做分类化映射（本机实测 Codex 0.147.0 的状态行走
+stderr；Logged in using / Not logged in），文本优先、退出码
+辅助，无法可靠解释时如实上报 UNKNOWN —— 原始 stdout/stderr 绝不
+离开本模块；绝不使用 --with-api-key / --with-access-token /
+--device-auth（凭据写入面），绝不读取 ~/.codex 下的 auth.json 或
+凭据文件。认证属于 Codex 自身（用户侧 codex login）。最小 env
+白名单不含任何凭据变量 —— 经 env 注入的 API key 对本 adapter
+的观测面天然不可见（只观测文件式认证）。minimal_health_check
+只在 RUN_REAL_PROVIDER_TESTS=1（REAL gate）时执行，否则诚实
+上报 skipped，绝不伪造通过。
 
 错误安全边界：与原始错误字符串不同，所有可能离开本模块的进程
 错误都经过 _safe_error，在文本进入 trace、discovery reason 或
@@ -51,6 +61,12 @@ class CodexAdapter:
         self._completed: set[str] = set()
         self._state_lock = threading.Lock()
         self.last_invocation_id: str | None = None
+        # 已观测到的认证状态：仅用于 check_authentication() →
+        # check_provider_model() 的耦合（provider/model 检查建立在
+        # 观测到的认证上）。不是缓存系统，不持久化，不保存原始
+        # auth 输出。
+        self._auth_provider: str | None = None
+        self._auth_authenticated: bool = False
 
     @classmethod
     def from_environment(
@@ -87,6 +103,8 @@ class CodexAdapter:
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 shell=False,
                 env=self._minimal_env(),
@@ -125,6 +143,8 @@ class CodexAdapter:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 shell=False,
                 env=self._minimal_env(),
             )
@@ -200,6 +220,105 @@ class CodexAdapter:
                 self._cancelled.discard(invocation_id)
             return InvocationResult(InvocationStatus.UNAVAILABLE, error="invocation is no longer active")
         return InvocationResult(InvocationStatus.CANCELLED)
+
+    def check_authentication(self):
+        # Auth 只被"观测"，绝不被执行：codex login status 让 CLI 汇报
+        # 自己的登录状态；本模块只保留分类化结果与 method 标签，原始
+        # stdout/stderr 永不离开（不进入 trace、结果或报告）。绝不使用
+        # --with-api-key / --with-access-token / --device-auth（凭据
+        # 写入面），绝不打开 auth.json。显式 UTF-8 解码防止 GBK 控制台
+        # 下的解码异常逃过 SubprocessError 捕获。
+        from runtime_health import AuthenticationCheck
+        from runtime_status import AuthenticationState, ReasonCode
+        try:
+            result = subprocess.run(
+                [self.executable, "login", "status"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                shell=False,
+                env=self._minimal_env(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return AuthenticationCheck(
+                AuthenticationState.UNKNOWN,
+                reason_code=ReasonCode.PROTOCOL_ERROR,
+            )
+        # 合并观察面：本机实测 Codex 0.147.0 的 stdout 为空、状态行
+        # 输出在 stderr（前置 PATH alias WARNING），只映射 stdout 会把
+        # 真实已登录状态误判为 UNKNOWN。文本优先、退出码辅助不变：
+        # 只有 CLI 明说"Logged in using"且进程成功收尾才认
+        # AUTHENTICATED —— 宁可 UNKNOWN，绝不猜测成功；原始
+        # stdout/stderr 永不离开本模块。
+        observed = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        if result.returncode == 0 and "Logged in using" in observed:
+            method = None
+            if "an API key" in observed:
+                method = "api-key"
+            elif "ChatGPT" in observed:
+                method = "chatgpt"
+            self._auth_provider = self.profile.provider
+            self._auth_authenticated = True
+            return AuthenticationCheck(AuthenticationState.AUTHENTICATED, method)
+        if "Not logged in" in observed or result.returncode != 0:
+            return AuthenticationCheck(
+                AuthenticationState.AUTH_REQUIRED,
+                reason_code=ReasonCode.AUTH_REQUIRED,
+            )
+        return AuthenticationCheck(
+            AuthenticationState.UNKNOWN,
+            reason_code=ReasonCode.PROTOCOL_ERROR,
+        )
+
+    def check_provider_model(self):
+        # Provider 可用性以上方观测到的认证状态为门；_auth_provider 是
+        # 耦合点，这也是 check_authentication 必须先于本检查运行的原因。
+        # 未观测或 provider 不匹配时如实上报"不可担保"，绝不默认可用；
+        # model 原样透传，绝不猜测。
+        from runtime_health import ProviderModelCheck
+        from runtime_status import ReasonCode
+        provider = self.profile.provider
+        if not provider:
+            return ProviderModelCheck(
+                None, self.profile.model, False, ReasonCode.UNSUPPORTED_HEALTH_CHECK)
+        if self._auth_provider != provider or not self._auth_authenticated:
+            return ProviderModelCheck(
+                provider, self.profile.model, False, ReasonCode.PROVIDER_UNREACHABLE)
+        return ProviderModelCheck(provider, self.profile.model, True, ReasonCode.NONE)
+
+    def minimal_health_check(self, timeout_seconds: float):
+        # 唯一的 Health 调用是 opt-in 的：没有 REAL gate 时它上报
+        # 诚实的 UNSUPPORTED 检查，而不是悄悄运行（也不是悄悄
+        # 跳过并伪造一个通过）。与 Claude/Pi adapter 家族语义逐行
+        # 一致：timeout 钳位 [1, 30] 秒，CANCELLED 落入非 SUCCESS
+        # 通用分支（invoke_failed）。
+        from runtime_health import MinimalHealthCheck
+        from runtime_status import ReasonCode
+        if os.environ.get("RUN_REAL_PROVIDER_TESTS", "") != "1":
+            return MinimalHealthCheck(False, ReasonCode.UNSUPPORTED_HEALTH_CHECK, output_class="skipped")
+        request = ExternalAgentRequest(
+            task_id="runtime-health",
+            prompt="Return exactly OK and nothing else.",
+            agent_id=self.profile.agent_id,
+            role=self.profile.role,
+            provider=self.profile.provider,
+            model=self.profile.model,
+            timeout_seconds=min(30.0, max(1.0, timeout_seconds)),
+        )
+        result = self.invoke(request)
+        trace = result.trace
+        if result.status is InvocationStatus.TIMEOUT:
+            return MinimalHealthCheck(False, ReasonCode.TIMEOUT, trace, "timeout")
+        if result.status is InvocationStatus.UNAVAILABLE:
+            return MinimalHealthCheck(False, ReasonCode.CLI_START_FAILED, trace, "runtime_unavailable")
+        if result.status is not InvocationStatus.SUCCESS:
+            return MinimalHealthCheck(False, ReasonCode.HEALTH_CHECK_FAILED, trace, "invoke_failed")
+        if str(result.output).strip().upper() != "OK":
+            return MinimalHealthCheck(False, ReasonCode.PROTOCOL_ERROR, trace, "unexpected_response")
+        return MinimalHealthCheck(True, ReasonCode.NONE, trace, "exact_ok")
 
     @staticmethod
     def _minimal_env() -> dict[str, str]:

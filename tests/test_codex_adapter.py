@@ -5,6 +5,7 @@
 subprocess 调用点（_probe 的 subprocess.run、invoke 的 Popen）
 全部被 patch。
 """
+import os
 import subprocess
 import sys
 import threading
@@ -17,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from codex_adapter import CodexAdapter
 from external_runtime import ExternalAgentRequest, InvocationStatus, RuntimeProfile
+from runtime_status import AuthenticationState, ReasonCode
 
 
 class FakeProcess:
@@ -37,12 +39,12 @@ class FakeProcess:
 
 
 class CodexAdapterTests(unittest.TestCase):
-    def profile(self):
+    def profile(self, provider="openai", model=None):
         return RuntimeProfile(
             agent_id="coding-agent",
             runtime="codex-cli",
-            provider="openai",
-            model=None,
+            provider=provider,
+            model=model,
             role="coder",
             capabilities=frozenset(),
         )
@@ -86,6 +88,16 @@ class CodexAdapterTests(unittest.TestCase):
         argv = popen.call_args.args[0]
         self.assertEqual(
             argv, ["codex", "exec", "--model", "test-model", "Return exactly OK."])
+
+    def test_invoke_decodes_child_streams_as_utf_8(self):
+        process = FakeProcess()
+        with patch("codex_adapter.subprocess.Popen", return_value=process) as popen:
+            self.adapter().invoke(self.request())
+
+        # GBK 控制台下 text=True 默认按本地码页解码，UTF-8 输出会变
+        # 乱码；显式 UTF-8 + replace 与 pi adapter 家族保持一致。
+        self.assertEqual(popen.call_args.kwargs.get("encoding"), "utf-8")
+        self.assertEqual(popen.call_args.kwargs.get("errors"), "replace")
 
     def test_nonzero_exit_is_failed_and_does_not_report_success(self):
         process = FakeProcess(stdout="", stderr="bad", returncode=2)
@@ -235,6 +247,26 @@ class CodexAdapterTests(unittest.TestCase):
             set(kwargs["env"]),
             {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
 
+    def test_probe_decodes_child_streams_as_utf_8(self):
+        completed = subprocess.CompletedProcess(
+            args=["codex", "--version"], returncode=0,
+            stdout="codex-cli 0.20.0\n", stderr="")
+
+        class ProbeSpy:
+            calls = []
+
+            @classmethod
+            def run(cls, argv, **kwargs):
+                cls.calls.append((argv, kwargs))
+                return completed
+
+        with patch("codex_adapter.subprocess.run", new=ProbeSpy.run):
+            self.adapter()._probe()
+
+        _, kwargs = ProbeSpy.calls[0]
+        self.assertEqual(kwargs.get("encoding"), "utf-8")
+        self.assertEqual(kwargs.get("errors"), "replace")
+
     def test_probe_failure_redacts_secret_material(self):
         completed = subprocess.CompletedProcess(
             args=["codex", "--version"], returncode=1,
@@ -253,14 +285,287 @@ class CodexAdapterTests(unittest.TestCase):
 
         self.assertIsNone(adapter)
 
-    def test_three_method_protocol_conformance(self):
-        # Level B 的协议面就是这三个方法；health 三方法的有意缺席
-        # 由其不存在来证明（否则 Level B 语义被破坏）。
-        for name in ("discover", "invoke", "cancel"):
+    def test_six_method_protocol_conformance(self):
+        # 事实面是全部六个方法：三个协议方法 + 三个 health 方法。
+        # "具备方法"不等于 REAL VERIFIED —— 资格只由门控运行授予。
+        for name in (
+            "discover", "invoke", "cancel",
+            "check_authentication", "check_provider_model",
+            "minimal_health_check",
+        ):
             self.assertTrue(callable(getattr(CodexAdapter, name)))
-        for health in ("check_authentication", "check_provider_model",
-                       "minimal_health_check"):
-            self.assertFalse(hasattr(CodexAdapter, health))
+
+    # -- check_authentication ------------------------------------------------
+
+    def auth_completed(self, stdout, returncode=0):
+        return subprocess.CompletedProcess(
+            args=["codex", "login", "status"], returncode=returncode,
+            stdout=stdout, stderr="")
+
+    def test_check_authentication_api_key_maps_to_authenticated(self):
+        completed = self.auth_completed("Logged in using an API key")
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTHENTICATED)
+        self.assertEqual(result.method, "api-key")
+        self.assertEqual(result.reason_code, ReasonCode.NONE)
+
+    def test_check_authentication_chatgpt_maps_to_authenticated(self):
+        completed = self.auth_completed("Logged in using ChatGPT")
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTHENTICATED)
+        self.assertEqual(result.method, "chatgpt")
+
+    def test_check_authentication_real_form_status_on_stderr_maps_to_authenticated(self):
+        # 真实 Codex 0.147.0 形态（2026-08-29 本机实测）：rc=0、stdout
+        # 为空、状态行 "Logged in using ChatGPT" 输出在 stderr，且
+        # 前置一行 PATH alias WARNING。分类观察面必须覆盖 stderr，
+        # 否则真实已登录状态会被误判为 UNKNOWN。
+        completed = subprocess.CompletedProcess(
+            args=["codex", "login", "status"], returncode=0, stdout="",
+            stderr="WARNING: proceeding, even though we could not create "
+                   "PATH aliases: Refusing to create helper binaries under "
+                   "temporary dir\nLogged in using ChatGPT\n")
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTHENTICATED)
+        self.assertEqual(result.method, "chatgpt")
+        self.assertEqual(result.reason_code, ReasonCode.NONE)
+
+    def test_check_authentication_unknown_method_label_is_none(self):
+        completed = self.auth_completed("Logged in using myst")
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTHENTICATED)
+        self.assertIsNone(result.method)
+
+    def test_check_authentication_not_logged_in_is_auth_required(self):
+        completed = self.auth_completed("Not logged in", returncode=0)
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTH_REQUIRED)
+        self.assertEqual(result.reason_code, ReasonCode.AUTH_REQUIRED)
+        self.assertIsNone(result.method)
+
+    def test_check_authentication_nonzero_exit_is_auth_required(self):
+        completed = self.auth_completed("", returncode=1)
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTH_REQUIRED)
+        self.assertEqual(result.reason_code, ReasonCode.AUTH_REQUIRED)
+
+    def test_check_authentication_oserror_is_unknown(self):
+        with patch("codex_adapter.subprocess.run", side_effect=OSError("gone")):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_check_authentication_timeout_is_unknown(self):
+        with patch("codex_adapter.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd="codex", timeout=10)):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_check_authentication_unrecognized_output_is_unknown(self):
+        completed = self.auth_completed("something entirely different", returncode=0)
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_check_authentication_argv_and_env_and_no_credential_flags(self):
+        completed = self.auth_completed("Not logged in", returncode=1)
+
+        class AuthSpy:
+            calls = []
+
+            @classmethod
+            def run(cls, argv, **kwargs):
+                cls.calls.append((argv, kwargs))
+                return completed
+
+        with patch("codex_adapter.subprocess.run", new=AuthSpy.run):
+            self.adapter().check_authentication()
+
+        argv, kwargs = AuthSpy.calls[0]
+        # Read-only observation surface only: exactly login status, shell off,
+        # whitelist env, and none of the credential-writing flags.
+        self.assertEqual(argv, ["codex", "login", "status"])
+        for flag in ("--with-api-key", "--with-access-token", "--device-auth"):
+            self.assertNotIn(flag, argv)
+        self.assertFalse(kwargs["shell"])
+        self.assertLessEqual(
+            set(kwargs["env"]),
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+
+    def test_check_authentication_raw_output_never_leaves_adapter(self):
+        stdout = "Logged in using an API key - SENTINEL-raw-stdout-98765"
+        completed = self.auth_completed(stdout)
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            result = self.adapter().check_authentication()
+
+        self.assertNotIn("SENTINEL-raw-stdout-98765", repr(result))
+        self.assertEqual(result.method, "api-key")
+
+    # -- check_provider_model ------------------------------------------------
+
+    def test_check_provider_model_unavailable_before_observed_auth(self):
+        result = self.adapter().check_provider_model()
+
+        self.assertEqual(result.provider, "openai")
+        self.assertIsNone(result.model)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason_code, ReasonCode.PROVIDER_UNREACHABLE)
+
+    def test_check_provider_model_available_after_observed_auth(self):
+        adapter = self.adapter()
+        completed = self.auth_completed("Logged in using ChatGPT")
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            adapter.check_authentication()
+        result = adapter.check_provider_model()
+
+        self.assertEqual(result.provider, "openai")
+        self.assertTrue(result.available)
+        self.assertEqual(result.reason_code, ReasonCode.NONE)
+
+    def test_check_provider_model_without_provider_is_unsupported(self):
+        with patch("codex_adapter.subprocess.run") as run:
+            adapter = CodexAdapter(profile=self.profile(provider=None), executable="codex")
+            result = adapter.check_provider_model()
+
+        self.assertIsNone(result.provider)
+        self.assertFalse(result.available)
+        self.assertEqual(result.reason_code, ReasonCode.UNSUPPORTED_HEALTH_CHECK)
+        run.assert_not_called()
+
+    def test_check_provider_model_passes_model_through_without_guessing(self):
+        adapter = CodexAdapter(
+            profile=self.profile(provider="openai", model="test-model"),
+            executable="codex")
+        completed = self.auth_completed("Logged in using ChatGPT")
+        with patch("codex_adapter.subprocess.run", return_value=completed):
+            adapter.check_authentication()
+        result = adapter.check_provider_model()
+
+        self.assertEqual(result.model, "test-model")
+
+    def test_check_provider_model_never_spawns_a_subprocess(self):
+        adapter = self.adapter()
+        with patch("codex_adapter.subprocess.run") as run, \
+                patch("codex_adapter.subprocess.Popen") as popen:
+            adapter.check_provider_model()
+
+        run.assert_not_called()
+        popen.assert_not_called()
+
+    # -- minimal_health_check ------------------------------------------------
+
+    def test_minimal_health_check_skips_without_real_gate(self):
+        env = {k: v for k, v in os.environ.items() if k != "RUN_REAL_PROVIDER_TESTS"}
+        with patch.dict(os.environ, env, clear=True):
+            result = self.adapter().minimal_health_check(timeout_seconds=5)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, ReasonCode.UNSUPPORTED_HEALTH_CHECK)
+        self.assertEqual(result.output_class, "skipped")
+
+    def test_minimal_health_check_exact_ok_when_gated(self):
+        with patch.dict(os.environ, {"RUN_REAL_PROVIDER_TESTS": "1"}):
+            with patch("codex_adapter.subprocess.Popen",
+                       return_value=FakeProcess(stdout="OK\n")):
+                result = self.adapter().minimal_health_check(timeout_seconds=5)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.reason_code, ReasonCode.NONE)
+        self.assertEqual(result.output_class, "exact_ok")
+
+    def test_minimal_health_check_unexpected_output_is_not_passed(self):
+        with patch.dict(os.environ, {"RUN_REAL_PROVIDER_TESTS": "1"}):
+            with patch("codex_adapter.subprocess.Popen",
+                       return_value=FakeProcess(stdout="Sure thing\n")):
+                result = self.adapter().minimal_health_check(timeout_seconds=5)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+        self.assertEqual(result.output_class, "unexpected_response")
+
+    def test_minimal_health_check_failed_invoke_is_not_passed(self):
+        with patch.dict(os.environ, {"RUN_REAL_PROVIDER_TESTS": "1"}):
+            with patch("codex_adapter.subprocess.Popen",
+                       return_value=FakeProcess(stdout="", stderr="bad", returncode=2)):
+                result = self.adapter().minimal_health_check(timeout_seconds=5)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, ReasonCode.HEALTH_CHECK_FAILED)
+        self.assertEqual(result.output_class, "invoke_failed")
+
+    def test_minimal_health_check_timeout_is_not_passed(self):
+        class TimeoutProcess(FakeProcess):
+            def communicate(self, input=None, timeout=None):
+                raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+
+        with patch.dict(os.environ, {"RUN_REAL_PROVIDER_TESTS": "1"}):
+            with patch("codex_adapter.subprocess.Popen", return_value=TimeoutProcess()):
+                result = self.adapter().minimal_health_check(timeout_seconds=5)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, ReasonCode.TIMEOUT)
+        self.assertEqual(result.output_class, "timeout")
+
+    def test_minimal_health_check_unavailable_is_not_passed(self):
+        with patch.dict(os.environ, {"RUN_REAL_PROVIDER_TESTS": "1"}):
+            with patch("codex_adapter.subprocess.Popen", side_effect=OSError("no codex")):
+                result = self.adapter().minimal_health_check(timeout_seconds=5)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason_code, ReasonCode.CLI_START_FAILED)
+        self.assertEqual(result.output_class, "runtime_unavailable")
+
+    def test_minimal_health_check_cancelled_is_not_passed(self):
+        adapter = self.adapter()
+        started = threading.Event()
+        released = threading.Event()
+
+        class BlockingProcess(FakeProcess):
+            def communicate(self, input=None, timeout=None):
+                started.set()
+                released.wait(timeout=5)
+                self.returncode = -9
+                return "", ""
+
+            def kill(self):
+                super().kill()
+                released.set()
+
+        results = []
+
+        def run_health():
+            with patch.dict(os.environ, {"RUN_REAL_PROVIDER_TESTS": "1"}), \
+                    patch("codex_adapter.subprocess.Popen", return_value=BlockingProcess()):
+                results.append(adapter.minimal_health_check(timeout_seconds=5))
+
+        worker = threading.Thread(target=run_health)
+        worker.start()
+        self.assertTrue(started.wait(timeout=2))
+        invocation_id = adapter.last_invocation_id
+        self.assertIsNotNone(invocation_id)
+        adapter.cancel(invocation_id)
+        worker.join(timeout=2)
+
+        self.assertFalse(results[0].passed)
+        self.assertEqual(results[0].reason_code, ReasonCode.HEALTH_CHECK_FAILED)
+        self.assertEqual(results[0].output_class, "invoke_failed")
 
 
 if __name__ == "__main__":
