@@ -381,6 +381,88 @@ class DeterminismTests(unittest.TestCase):
         )
 
 
+class SynchronousContractTests(unittest.TestCase):
+    """Timeout / cancellation contract of the LOCAL (synchronous) transport.
+
+    A synchronous in-process transport has no in-flight state and no
+    waiting surface: send() is atomic (validate-and-enqueue or reject,
+    nothing in between) and receive() is non-blocking (empty means None
+    immediately). Therefore timeout and cancellation are EMPTY by
+    contract here — the module docstring must declare that these
+    semantics belong to the remote transport contract, and the tests
+    below pin both the declaration and the observable behavior.
+    """
+
+    def test_docstring_declares_timeout_and_cancellation_delegation(self):
+        import local_transport as module
+        doc = (module.__doc__ or "").lower()
+        self.assertIn("timeout", doc)
+        self.assertIn("cancellation", doc)
+        self.assertIn("remote", doc)
+
+    def test_send_is_atomic_no_intermediate_state(self):
+        # Rejected send leaves the transport exactly as it was: the
+        # mailbox gained nothing, and a subsequent valid send is the
+        # next state. There is no "in flight" to time out or cancel.
+        transport = LocalTransport()
+        before_pending = transport.pending(TARGET_AGENT)
+        receipt = transport.send(object())  # reject
+        self.assertEqual(receipt.status, DeliveryStatus.REJECTED_NOT_A_PACKET)
+        self.assertEqual(transport.pending(TARGET_AGENT), before_pending)
+        receipt2 = transport.send(envelope())  # accept
+        self.assertEqual(receipt2.status, DeliveryStatus.DELIVERED)
+        self.assertEqual(transport.pending(TARGET_AGENT), before_pending + 1)
+
+    def test_invalid_packet_rejection_is_terminal(self):
+        # A REJECTED receipt is final: the same packet object can be
+        # re-sent (and rejected again) with no retry-in-progress state,
+        # and no partial residue ever appears in the mailbox.
+        transport = LocalTransport()
+        bad = envelope(payload=arch(interfaces=({1: "a"},)))
+        first = transport.send(bad)
+        second = transport.send(bad)
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, DeliveryStatus.REJECTED_INVALID_PACKET)
+        self.assertEqual(transport.pending(TARGET_AGENT), 0)
+
+    def test_receive_never_blocks_and_empty_is_immediate_none(self):
+        # No waiting surface: an empty mailbox answers None on the very
+        # first call; there is no "pending receive" that could time out
+        # or be cancelled later.
+        transport = LocalTransport()
+        self.assertIsNone(transport.receive(TARGET_AGENT))
+        self.assertIsNone(transport.receive(TARGET_AGENT))
+        transport.send(envelope())
+        self.assertIsNotNone(transport.receive(TARGET_AGENT))
+        self.assertIsNone(transport.receive(TARGET_AGENT))
+
+    def test_delivery_has_no_cancel_window(self):
+        # Once send() returns DELIVERED the packet is fully enqueued;
+        # there is no in-flight phase during which a cancel could
+        # arrive between acceptance and availability.
+        transport = LocalTransport()
+        receipt = transport.send(envelope(correlation_id="C-now"))
+        self.assertEqual(receipt.status, DeliveryStatus.DELIVERED)
+        # Immediately available — no intermediate async state.
+        received = transport.receive(TARGET_AGENT)
+        self.assertEqual(received.correlation_id, "C-now")
+
+    def test_receive_drains_exactly_what_send_accepted(self):
+        # The observable universe is exactly {accepted packets}: every
+        # DELIVERED send is receivable exactly once, every rejection is
+        # receivable zero times. Nothing else exists to time out.
+        transport = LocalTransport()
+        accepted = [envelope(correlation_id=f"C{i}") for i in range(3)]
+        for packet in accepted:
+            self.assertEqual(transport.send(packet).status, DeliveryStatus.DELIVERED)
+        transport.send(object())  # rejected, invisible downstream
+        transport.send(envelope(payload=arch(interfaces=({1: "a"},))))  # rejected
+        drained = [transport.receive(TARGET_AGENT) for _ in range(3)]
+        self.assertEqual(drained, accepted)
+        self.assertIsNone(transport.receive(TARGET_AGENT))
+        self.assertEqual(transport.pending(TARGET_AGENT), 0)
+
+
 class SourceScanTests(unittest.TestCase):
     def test_no_runtime_names(self):
         import local_transport as module

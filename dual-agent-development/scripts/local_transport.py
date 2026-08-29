@@ -10,6 +10,13 @@ layer knows nothing about execution backends: it performs no calls, reads
 no configuration, mints no identifiers and never touches a clock. Queue
 growth is unbounded by design — a local deterministic transport has no
 capacity semantics.
+
+Timeout and cancellation are EMPTY here by contract: send() is atomic
+(validate-and-enqueue or reject) and receive() is non-blocking (empty
+means None immediately), so there is no in-flight state and no waiting
+surface to expire or cancel. Those semantics belong to the remote
+transport contract (remote_transport.py), where delivery crosses a
+deferred boundary.
 """
 from __future__ import annotations
 
