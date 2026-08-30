@@ -506,6 +506,88 @@ class LedgerTests(unittest.TestCase):
             self.assertNotIn(marker, surface)
 
 
+class RoleAssignerInjectionTests(unittest.TestCase):
+    """Phase 10H-E: 注入 RoleAssigner 后 orchestrator 的联合选择行为。"""
+
+    def dual_health(self):
+        return {IDENTITY_X[0]: health_ready(IDENTITY_X[0]),
+                IDENTITY_Y[0]: health_ready(IDENTITY_Y[0])}
+
+    def test_diversity_assigner_all_caps_pool_routes_multi(self):
+        # 全能力双 runtime 池 + COMPLEX + DiversityAssigner →
+        # MULTI，architect 在 X、coder 在 Y。
+        from role_assignment import DiversityAssigner
+
+        spy = SpySession(success_outcome())
+        facade, _, _ = make_facade(
+            pool_entries=[(IDENTITY_X, ALL_CAPS), (IDENTITY_Y, ALL_CAPS)],
+            session=spy, health=self.dual_health())
+        facade._role_assigner = DiversityAssigner()
+        run_facade(facade)
+
+        self.assertEqual(spy.kwargs["runtime_mode"], "MULTI")
+        self.assertEqual(spy.kwargs["architect_address"], ARCH_ADDR_X)
+        self.assertEqual(spy.kwargs["coder_address"], CODER_ADDR_Y)
+
+    def test_diversity_assigner_simple_task_converges_to_single_runtime(self):
+        # SIMPLE 强制 ON（mode 管 dual/single，complexity 管 runtime
+        # 布局）：即使双 runtime 也收敛。
+        from role_assignment import DiversityAssigner
+
+        spy = SpySession(success_outcome())
+        facade, _, _ = make_facade(
+            pool_entries=[(IDENTITY_X, ALL_CAPS), (IDENTITY_Y, ALL_CAPS)],
+            session=spy, health=self.dual_health())
+        facade._role_assigner = DiversityAssigner()
+        run_facade(facade, task=TASK_SIMPLE, mode=Mode.ON)
+
+        self.assertEqual(spy.kwargs["runtime_mode"], "SINGLE_RUNTIME")
+        self.assertEqual(spy.kwargs["architect_address"], ARCH_ADDR_X)
+        self.assertEqual(spy.kwargs["coder_address"], CODER_ADDR_X)
+
+    def test_diversity_assigner_single_runtime_pool_converges(self):
+        from role_assignment import DiversityAssigner
+
+        spy = SpySession(success_outcome())
+        facade, _, _ = make_facade(session=spy)
+        facade._role_assigner = DiversityAssigner()
+        run_facade(facade)
+
+        self.assertEqual(spy.kwargs["runtime_mode"], "SINGLE_RUNTIME")
+        self.assertEqual(spy.kwargs["architect_address"], ARCH_ADDR_X)
+        self.assertEqual(spy.kwargs["coder_address"], CODER_ADDR_X)
+
+    def test_decision_reason_records_role_assignment_policy(self):
+        from role_assignment import DiversityAssigner
+
+        spy = SpySession(success_outcome())
+        facade, _, _ = make_facade(
+            pool_entries=[(IDENTITY_X, ALL_CAPS), (IDENTITY_Y, ALL_CAPS)],
+            session=spy, health=self.dual_health())
+        facade._role_assigner = DiversityAssigner()
+        run_facade(facade)
+
+        decisions = [r for r in facade.state.history("T1")
+                     if r.direction is CollaborationDirection.DECISION]
+        self.assertIn("ROLE_ASSIGNMENT=POLICY_SPREAD", decisions[0].reason)
+        self.assertEqual(decisions[0].runtime_mode, "MULTI")
+
+    def test_default_assigner_keeps_current_behavior(self):
+        # 不注入时行为与历史完全一致（现行折叠 = ConvergingAssigner）。
+        spy = SpySession(success_outcome())
+        facade, _, _ = make_facade(
+            pool_entries=[(IDENTITY_X, ALL_CAPS), (IDENTITY_Y, ALL_CAPS)],
+            session=spy, health=self.dual_health())
+        run_facade(facade)
+
+        self.assertEqual(spy.kwargs["runtime_mode"], "SINGLE_RUNTIME")
+        self.assertEqual(spy.kwargs["architect_address"], ARCH_ADDR_X)
+        self.assertEqual(spy.kwargs["coder_address"], CODER_ADDR_X)
+        decisions = [r for r in facade.state.history("T1")
+                     if r.direction is CollaborationDirection.DECISION]
+        self.assertIn("ROLE_ASSIGNMENT=POLICY_CONVERGED", decisions[0].reason)
+
+
 class SourceScanTests(unittest.TestCase):
     def test_no_runtime_names_or_forbidden_channels(self):
         import collaboration_orchestrator as module

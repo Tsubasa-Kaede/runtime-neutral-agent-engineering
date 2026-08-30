@@ -20,6 +20,7 @@ from collaboration_session import (
 )
 from collaboration_state import TraceSummary
 from mode_gate import Mode, ModeGate
+from role_assignment import ConvergingAssigner
 from task_classifier import Complexity
 from verified_selection_bridge import VerifiedSelectionBridge
 from verified_stage_selector import _ROLE_REQUIREMENTS
@@ -40,7 +41,8 @@ class CollaborationOrchestrator:
     """Routes SINGLE/DUAL by mode+complexity; records into shared state."""
 
     def __init__(self, verified_orchestrator, pool, current_health, budget,
-                 usage, loop_guard, session_factory, state=None):
+                 usage, loop_guard, session_factory, state=None,
+                 role_assigner=None):
         self._verified_orchestrator = verified_orchestrator
         self._pool = pool
         self._current_health = dict(current_health)
@@ -48,6 +50,10 @@ class CollaborationOrchestrator:
         self._usage = usage
         self._loop_guard = loop_guard
         self._session_factory = session_factory
+        # 10H-E: role assignment is an injectable policy; the default
+        # (ConvergingAssigner) reproduces the historical candidates[0]
+        # fold verbatim, so absent injection nothing changes.
+        self._role_assigner = role_assigner if role_assigner is not None else ConvergingAssigner()
         from collaboration_state import SharedCollaborationState
         self._state = state if state is not None else SharedCollaborationState()
 
@@ -74,17 +80,26 @@ class CollaborationOrchestrator:
 
     # -- dual path --------------------------------------------------------
 
-    def _role_candidate(self, role):
+    def _role_candidate_sets(self):
+        """Per-role bridge candidate sets for the dual roles (10H-E joint
+        selection input). Empty dict when there is no pool."""
         if self._pool is None:
-            return None
-        candidate_set = VerifiedSelectionBridge().candidates_for(
-            self._pool, self._current_health, role, _ROLE_REQUIREMENTS[role])
-        candidates = candidate_set.candidates
-        return candidates[0] if candidates else None
+            return {}
+        bridge = VerifiedSelectionBridge()
+        return {
+            role: bridge.candidates_for(
+                self._pool, self._current_health, role, _ROLE_REQUIREMENTS[role])
+            for role in ("architect", "coder")
+        }
 
     def _run_dual(self, task_id, task, prompt, mode, decision, provenance):
-        architect = self._role_candidate("architect")
-        coder = self._role_candidate("coder")
+        # 10H-E: architect/coder joint choice goes through the injected
+        # role-assignment policy (default = historical candidates[0]
+        # fold). Candidates come only from the bridge sets.
+        candidate_sets = self._role_candidate_sets()
+        assignment = self._role_assigner.assign(candidate_sets, decision.complexity)
+        architect = assignment.assignments.get("architect")
+        coder = assignment.assignments.get("coder")
         if architect is None or coder is None:
             self._state = self._state.append_decision(
                 task_id, mode=decision.mode.value,
@@ -115,7 +130,8 @@ class CollaborationOrchestrator:
             task_id, mode=decision.mode.value,
             complexity=decision.complexity.value, path="DUAL",
             runtime_mode=runtime_mode,
-            reason=f"{decision.reason}/COVERAGE=ARCHITECT_CODER")
+            reason=f"{decision.reason}/COVERAGE=ARCHITECT_CODER"
+                   f"/ROLE_ASSIGNMENT={assignment.reason}")
 
         usage_before = self._usage.total_agent_calls
         session = self._session_factory()
