@@ -10,11 +10,10 @@ from external_runtime import ExternalAgentRequest, InvocationStatus
 from codex_adapter import CodexAdapter
 
 
-RUN_REAL_PROVIDER_TESTS = os.environ.get("RUN_REAL_PROVIDER_TESTS", "").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+# 与生产四处 gate 站点（claude/codex/pi adapter 的 minimal_health_check
+# 与 RealGateExecutor）逐字对齐：只认 "1"，不接受 true/yes —— 同一
+# 进程内"门开没开"不允许出现两种答案。
+RUN_REAL_PROVIDER_TESTS = os.environ.get("RUN_REAL_PROVIDER_TESTS", "") == "1"
 
 
 @unittest.skipUnless(
