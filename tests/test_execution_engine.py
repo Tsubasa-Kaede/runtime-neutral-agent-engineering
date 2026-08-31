@@ -34,7 +34,9 @@ class ExecutionEngineTests(unittest.TestCase):
 
     def test_ready_agent_success_executes_one_real_adapter_boundary(self):
         adapter = Mock()
-        adapter.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, output=ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=Mock(invocation_id="inv-1"))
+        # trace 的 token 字段必须显式给出：propagation seam 会把它们
+        # 交给 record_tokens，Mock 自动属性不是合法的观测值。
+        adapter.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, output=ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=Mock(invocation_id="inv-1", input_tokens="unknown", output_tokens="unknown"))
         engine = self.engine({"a": adapter}, {"a": runtime("a")})
         result = engine.execute(self.plan(), prompt="Return OK")
         self.assertEqual(result.status, ExecutionStatus.SUCCESS)
@@ -70,7 +72,7 @@ class ExecutionEngineTests(unittest.TestCase):
         first = Mock()
         first.invoke.return_value = InvocationResult(InvocationStatus.FAILED, error="failed")
         backup = Mock()
-        backup.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, output=ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=Mock(invocation_id="inv-2"))
+        backup.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, output=ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=Mock(invocation_id="inv-2", input_tokens="unknown", output_tokens="unknown"))
         engine = self.engine({"a": first, "b": backup}, {"a": runtime("a"), "b": runtime("b")}, max_calls=2)
         result = engine.execute(self.plan(), prompt="x")
         self.assertEqual(result.status, ExecutionStatus.SUCCESS)

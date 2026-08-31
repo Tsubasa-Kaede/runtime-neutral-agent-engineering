@@ -189,6 +189,11 @@ class CollaborationSession:
         ))
         if architect_result.trace is not None:
             traces.append(sanitize_trace(architect_result.trace))
+            # 10H-I：观测到的 token 用量进入既有核算；"unknown"
+            # 原样透传（record_tokens 只累计观测到的非负整数）。
+            self.usage.record_tokens(
+                architect_result.trace.input_tokens,
+                architect_result.trace.output_tokens, self.budget)
         if architect_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "architect", architect_address,
                                             "architect_invoke_failed")
@@ -234,6 +239,10 @@ class CollaborationSession:
         ))
         if coder_result.trace is not None:
             traces.append(sanitize_trace(coder_result.trace))
+            # 10H-I：同 architect 阶段的用量传播语义。
+            self.usage.record_tokens(
+                coder_result.trace.input_tokens,
+                coder_result.trace.output_tokens, self.budget)
         if coder_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "coder", coder_address,
                                            "coder_invoke_failed")

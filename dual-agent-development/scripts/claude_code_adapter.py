@@ -208,10 +208,12 @@ class ClaudeCodeAdapter:
                     trace=self._finish_trace(trace, InvocationStatus.FAILED, started, process.returncode, finished, error),
                 )
             output = self._parse_output(stdout)
+            input_tokens, output_tokens = self._parse_usage(stdout)
             return InvocationResult(
                 InvocationStatus.SUCCESS,
                 output=output,
-                trace=self._finish_trace(trace, InvocationStatus.SUCCESS, started, process.returncode, finished),
+                trace=self._finish_trace(trace, InvocationStatus.SUCCESS, started, process.returncode, finished,
+                                         input_tokens=input_tokens, output_tokens=output_tokens),
             )
         except (subprocess.TimeoutExpired, TimeoutError):
             # 在锁下复查 cancellation 集合：在超时过程中被取消的调用
@@ -260,6 +262,30 @@ class ClaudeCodeAdapter:
         return InvocationResult(InvocationStatus.CANCELLED)
 
     @staticmethod
+    def _parse_usage(stdout: str) -> tuple[int | str, int | str]:
+        # 10H-I usage capture（defensive）：CLI 的 JSON 封装若携带
+        # usage 键且值为非负 int，则如实填充；缺失、类型不符、
+        # 负数、stdout 不可解析一律保持 "unknown" —— 绝不猜测、
+        # 绝不把 unknown 伪装成 0。解析失败绝不影响调用本身。
+        text = stdout.strip()
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return "unknown", "unknown"
+        if not isinstance(payload, dict):
+            return "unknown", "unknown"
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return "unknown", "unknown"
+
+        def _observed(value):
+            if isinstance(value, bool) or not isinstance(value, int):
+                return "unknown"
+            return value if value >= 0 else "unknown"
+
+        return _observed(usage.get("input_tokens")), _observed(usage.get("output_tokens"))
+
+    @staticmethod
     def _parse_output(stdout: str) -> Any:
         # 只信任 CLI 的 JSON 封装：当 stdout 解析为 {"result": ...}
         # 载荷时，result 文本即为调用输出。其余内容按原始文本原样
@@ -303,11 +329,14 @@ class ClaudeCodeAdapter:
         return text[:4096]
 
     @staticmethod
-    def _finish_trace(trace, status, started, exit_code=None, finished=None, error=None):
+    def _finish_trace(trace, status, started, exit_code=None, finished=None, error=None,
+                      input_tokens=None, output_tokens=None):
         finished = time.time() if finished is None else finished
         return InvocationTrace(
             trace.invocation_id, trace.task_id, trace.agent_id, trace.runtime,
             trace.provider, trace.model, trace.role, status, trace.started_at,
             finished, max(0, int((finished - started) * 1000)), exit_code,
-            trace.input_tokens, trace.output_tokens, error,
+            trace.input_tokens if input_tokens is None else input_tokens,
+            trace.output_tokens if output_tokens is None else output_tokens,
+            error,
         )

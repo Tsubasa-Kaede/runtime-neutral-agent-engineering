@@ -48,7 +48,7 @@ def agent(agent_id, runtime_id, capability=CapabilityName.CODING):
 class RuntimeIntegrationTests(unittest.TestCase):
     def test_ready_status_flows_through_selection_plan_and_execution(self):
         adapter = Mock()
-        adapter.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=Mock(invocation_id="inv-1"))
+        adapter.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=Mock(invocation_id="inv-1", input_tokens="unknown", output_tokens="unknown"))
         integration = RuntimeIntegration(
             adapters={"coder-agent": adapter},
             profiles=[agent("coder-agent", "runtime-a")],
@@ -80,7 +80,7 @@ class RuntimeIntegrationTests(unittest.TestCase):
 
     def test_status_report_is_non_secret_and_preserves_trace(self):
         adapter = Mock()
-        trace = Mock(invocation_id="inv-1", runtime="runtime-a", provider="provider", model="model")
+        trace = Mock(invocation_id="inv-1", runtime="runtime-a", provider="provider", model="model", input_tokens="unknown", output_tokens="unknown")
         adapter.invoke.return_value = InvocationResult(InvocationStatus.SUCCESS, ImplementationPacket("task-1", "coder", ("file.py",), "summary", (), (), (), ()), trace=trace)
         integration = RuntimeIntegration(
             adapters={"coder-agent": adapter},

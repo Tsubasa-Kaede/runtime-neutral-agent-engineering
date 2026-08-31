@@ -279,10 +279,12 @@ class PiAdapter:
                     error=error,
                     trace=self._finish_trace(trace, InvocationStatus.FAILED, started, process.returncode, finished, error),
                 )
+            input_tokens, output_tokens = self._parse_usage(stdout)
             return InvocationResult(
                 InvocationStatus.SUCCESS,
                 output=self._parse_output(stdout),
-                trace=self._finish_trace(trace, InvocationStatus.SUCCESS, started, process.returncode, finished),
+                trace=self._finish_trace(trace, InvocationStatus.SUCCESS, started, process.returncode, finished,
+                                         input_tokens=input_tokens, output_tokens=output_tokens),
             )
         except (subprocess.TimeoutExpired, TimeoutError):
             # 在锁下复查 cancellation 集合：在超时过程中被取消的调用
@@ -329,6 +331,35 @@ class PiAdapter:
                 self._cancelled.discard(invocation_id)
             return InvocationResult(InvocationStatus.UNAVAILABLE, error="invocation is no longer active")
         return InvocationResult(InvocationStatus.CANCELLED)
+
+    @staticmethod
+    def _parse_usage(stdout: str) -> tuple[int | str, int | str]:
+        # 10H-I usage capture（defensive）：JSON-lines 事件流中最后
+        # 一个携带 usage 键的 agent_end 事件的 usage 为准（多
+        # agent_end 是续跑，usage 是终值不是增量）；usage 键缺失、
+        # 值不是非负 int、流不可解析一律保持 "unknown"。与
+        # _parse_output 的既有惯例一致：解析失败绝不影响调用本身。
+        usage: Any = None
+        for line in (stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "agent_end" \
+                    and isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+        if not isinstance(usage, dict):
+            return "unknown", "unknown"
+
+        def _observed(value):
+            if isinstance(value, bool) or not isinstance(value, int):
+                return "unknown"
+            return value if value >= 0 else "unknown"
+
+        return _observed(usage.get("input_tokens")), _observed(usage.get("output_tokens"))
 
     @staticmethod
     def _parse_output(stdout: str) -> Any:
@@ -429,6 +460,8 @@ class PiAdapter:
         exit_code: int | None = None,
         finished: float | None = None,
         error: str | None = None,
+        input_tokens: int | str | None = None,
+        output_tokens: int | str | None = None,
     ) -> InvocationTrace:
         finished = time.time() if finished is None else finished
         return InvocationTrace(
@@ -444,7 +477,7 @@ class PiAdapter:
             finished,
             max(0, int((finished - started) * 1000)),
             exit_code,
-            trace.input_tokens,
-            trace.output_tokens,
+            trace.input_tokens if input_tokens is None else input_tokens,
+            trace.output_tokens if output_tokens is None else output_tokens,
             error,
         )

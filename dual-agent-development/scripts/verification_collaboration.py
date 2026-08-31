@@ -120,6 +120,11 @@ class VerificationCollaboration:
             timeout_seconds=self.budget.timeout_seconds or 120))
         if tester_result.trace is not None:
             traces.append(sanitize_trace(tester_result.trace))
+            # 10H-I：观测到的 token 用量进入既有核算；"unknown"
+            # 原样透传（record_tokens 只累计观测到的非负整数）。
+            self.usage.record_tokens(
+                tester_result.trace.input_tokens,
+                tester_result.trace.output_tokens, self.budget)
         if tester_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "test", tester_address,
                                            "tester_invoke_failed")
@@ -157,6 +162,10 @@ class VerificationCollaboration:
             timeout_seconds=self.budget.timeout_seconds or 120))
         if reviewer_result.trace is not None:
             traces.append(sanitize_trace(reviewer_result.trace))
+            # 10H-I：同 tester 阶段的用量传播语义。
+            self.usage.record_tokens(
+                reviewer_result.trace.input_tokens,
+                reviewer_result.trace.output_tokens, self.budget)
         if reviewer_result.status is not InvocationStatus.SUCCESS:
             self.loop_guard.record_failure(task_id, "review", reviewer_address,
                                            "reviewer_invoke_failed")

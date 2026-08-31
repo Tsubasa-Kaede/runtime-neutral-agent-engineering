@@ -100,6 +100,11 @@ class ExecutionEngine:
             ))
             if result.trace is not None:
                 traces.append(result.trace)
+                # 10H-I：观测到的 token 用量进入既有核算；"unknown"
+                # 原样透传（record_tokens 只累计观测到的非负整数）。
+                self.usage.record_tokens(
+                    result.trace.input_tokens,
+                    result.trace.output_tokens, self.budget)
             if result.status is InvocationStatus.SUCCESS:
                 outputs.append(result.output)
                 # 输出只有在通过 packet 验证后才被接受；无法解析进
