@@ -87,6 +87,7 @@ ADAPTER_DECLARATIONS = {
     "claude_code_adapter": {"level": L2, "usage": CAPTURE},
     "pi_adapter": {"level": L2, "usage": CAPTURE},
     "codex_adapter": {"level": L2, "usage": HONEST_UNKNOWN},
+    "gemini_adapter": {"level": L2, "usage": CAPTURE},
     "tiny_agents_adapter": {"level": L0, "usage": HONEST_UNKNOWN},
 }
 
@@ -835,6 +836,66 @@ class CodexConformanceTests(Level1HealthSurfaceMixin,
     usage_expected = None  # not used under HONEST_UNKNOWN
 
 
+class GeminiConformanceTests(Level1HealthSurfaceMixin,
+                             Level0InvocationContractMixin, unittest.TestCase):
+    module_name = "gemini_adapter"
+    runtime_label = "gemini-cli"
+
+    @classmethod
+    def make_adapter(cls):
+        from gemini_adapter import GeminiAdapter
+        profile = RuntimeProfile("coding-agent", "gemini-cli", "google",
+                                 None, "coder", frozenset())
+        return GeminiAdapter(profile=profile, executable="gemini")
+
+    @classmethod
+    def from_environment_absent(cls):
+        from gemini_adapter import GeminiAdapter
+        with patch("gemini_adapter.shutil.which", return_value=None):
+            return GeminiAdapter.from_environment()
+
+    @staticmethod
+    def _gemini_json(result_text="ok", usage=None):
+        import json
+        payload = {"response": result_text}
+        if usage is not None:
+            payload["usage"] = usage
+        return json.dumps(payload) + "\n"
+
+    @classmethod
+    def _build_fixtures(cls):
+        cls.stdout_ok = cls._gemini_json("ok")
+        cls.stdout_nonascii = cls._gemini_json("résumé → 中文 ✓")
+        cls.stdout_usage_valid = cls._gemini_json(
+            "ok", usage={"input_tokens": 150, "output_tokens": 70})
+        cls.stdout_usage_missing = cls._gemini_json("ok")
+        cls.stdout_usage_malformed = cls._gemini_json(
+            "ok", usage={"input_tokens": "lots", "output_tokens": -5})
+        cls.stdout_usage_partial = cls._gemini_json(
+            "ok", usage={"input_tokens": 90})
+        cls.stdout_usage_bool = cls._gemini_json(
+            "ok", usage={"input_tokens": True, "output_tokens": False})
+
+    # health fixtures: gemini auth status text vocabulary
+    auth_ready_stdout = "logged in\n"
+    auth_not_ready_stdout = "not logged in\n"
+
+    @property
+    def auth_state_ready(self):
+        from runtime_status import AuthenticationState
+        return AuthenticationState.AUTHENTICATED
+
+    @property
+    def auth_state_not_ready(self):
+        from runtime_status import AuthenticationState
+        return AuthenticationState.AUTH_REQUIRED
+
+    usage_expected = (150, 70)
+
+
+GeminiConformanceTests._build_fixtures()
+
+
 class TinyAgentsConformanceTests(Level0InvocationContractMixin,
                                  unittest.TestCase):
     module_name = "tiny_agents_adapter"
@@ -981,6 +1042,7 @@ _FIXTURE_BY_MODULE = {
     "claude_code_adapter": ClaudeConformanceTests,
     "pi_adapter": PiConformanceTests,
     "codex_adapter": CodexConformanceTests,
+    "gemini_adapter": GeminiConformanceTests,
     "tiny_agents_adapter": TinyAgentsConformanceTests,
 }
 
