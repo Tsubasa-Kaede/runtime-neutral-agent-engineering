@@ -22,6 +22,7 @@ from collaboration_session import CollaborationOutcome, CollaborationStatus, col
 from content_safety import contains_unsafe_content
 from execution_engine import ExecutionResult
 from mode_gate import Mode
+from role_assignment import ConvergingAssigner
 from verified_selection_bridge import VerifiedSelectionBridge
 from verified_stage_selector import _ROLE_REQUIREMENTS
 from verification_collaboration import VerificationCollaboration
@@ -63,7 +64,7 @@ class ProductionFacade:
     """Composes orchestrator (architect+coder) -> verification (tester+reviewer)."""
 
     def __init__(self, orchestrator, verification_adapters, pool, current_health,
-                 budget, usage, loop_guard):
+                 budget, usage, loop_guard, role_assigner=None):
         self._orchestrator = orchestrator
         self._verification_adapters = dict(verification_adapters)
         self._pool = pool
@@ -71,6 +72,10 @@ class ProductionFacade:
         self._budget = budget
         self._usage = usage
         self._loop_guard = loop_guard
+        # 10H-F: tester/reviewer assignment joins the policy layer; the
+        # default (ConvergingAssigner) reproduces the historical
+        # candidates[0] fold verbatim, so absent injection nothing changes.
+        self._role_assigner = role_assigner if role_assigner is not None else ConvergingAssigner()
         self._final_state = orchestrator.state
 
     @property
@@ -101,8 +106,17 @@ class ProductionFacade:
                 safe_summary={"task_id": task_id, "provenance": provenance,
                               "stage_counts": {}})
 
-        tester = self._role_candidate("test")
-        reviewer = self._role_candidate("review")
+        # 10H-F: tester/reviewer are chosen JOINTLY through the injected
+        # role-assignment policy (default = historical candidates[0]
+        # fold), mirroring the orchestrator's dual-role assignment.
+        candidate_sets = {
+            role: VerifiedSelectionBridge().candidates_for(
+                self._pool, self._current_health, role, _ROLE_REQUIREMENTS[role])
+            for role in ("test", "review")
+        }
+        assignment = self._role_assigner.assign(candidate_sets, "COMPLEX")
+        tester = assignment.assignments.get("test")
+        reviewer = assignment.assignments.get("review")
         if tester is None or reviewer is None:
             return FacadeResult(
                 status="NO_VERIFICATION_CAPABILITY", mode=mode.value, path="DUAL",
@@ -138,12 +152,6 @@ class ProductionFacade:
             failure_category=failure,
             safe_summary={"task_id": task_id, "provenance": provenance,
                           "stage_counts": stage_counts})
-
-    def _role_candidate(self, role):
-        candidate_set = VerifiedSelectionBridge().candidates_for(
-            self._pool, self._current_health, role, _ROLE_REQUIREMENTS[role])
-        candidates = candidate_set.candidates
-        return candidates[0] if candidates else None
 
     @staticmethod
     def _identity(candidate):

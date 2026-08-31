@@ -52,6 +52,8 @@ SECRET_MARKERS = ("token", "secret", "api_key", "authorization", "bearer", "stdo
 _ROLE_REQUIREMENTS = {
     "architect": ("architecture",),
     "coder": ("coding",),
+    "review": ("review",),
+    "test": ("testing",),
 }
 
 
@@ -212,6 +214,114 @@ class DiversityAssignerTests(unittest.TestCase):
             assignment = assigner.assign(sets, Complexity.COMPLEX)
             for candidate in assignment.assignments.values():
                 self.assertIsNone(candidate.score)
+
+
+class FourRoleDiversityTests(unittest.TestCase):
+    """Phase 10H-F: round-robin spread over any injected role collection.
+
+    sorted role keys 是确定性的单一来源：双 runtime 池下按
+    architect/coder/review/test（字母序）交替分配到两个 runtime。"""
+
+    def four_sets(self, pool_entries=None):
+        return make_candidate_sets(
+            pool_entries if pool_entries is not None
+            else [(IDENTITY_X, ALL_CAPS), (IDENTITY_Y, ALL_CAPS)])
+
+    def test_four_role_spread_dual_runtime_complex(self):
+        assignment = DiversityAssigner().assign(self.four_sets(), Complexity.COMPLEX)
+
+        a = assignment.assignments
+        self.assertEqual(a["architect"].runtime_id, IDENTITY_X[0])
+        self.assertEqual(a["coder"].runtime_id, IDENTITY_Y[0])
+        self.assertEqual(a["review"].runtime_id, IDENTITY_X[0])
+        self.assertEqual(a["test"].runtime_id, IDENTITY_Y[0])
+        self.assertEqual(assignment.reason, "POLICY_SPREAD")
+
+    def test_four_role_single_runtime_converges(self):
+        sets = self.four_sets([(IDENTITY_X, ALL_CAPS)])
+        assignment = DiversityAssigner().assign(sets, Complexity.COMPLEX)
+
+        for role, candidate in assignment.assignments.items():
+            self.assertEqual(candidate.runtime_id, IDENTITY_X[0])
+        self.assertEqual(assignment.reason, "POLICY_CONVERGED")
+
+    def test_four_role_simple_task_converges(self):
+        assignment = DiversityAssigner().assign(self.four_sets(), Complexity.SIMPLE)
+
+        for candidate in assignment.assignments.values():
+            self.assertEqual(candidate.runtime_id, IDENTITY_X[0])
+        self.assertEqual(assignment.reason, "POLICY_CONVERGED")
+
+    def test_partial_role_set_empty_candidate_returns_none(self):
+        # test 角色无候选（池中无人有 testing 能力）→ 该角色 None，
+        # 其余角色照常 spread；绝不扩集、绝不伪造。
+        sets = self.four_sets([
+            (IDENTITY_X, ("architecture", "coding", "review")),
+            (IDENTITY_Y, ("architecture", "coding", "review")),
+        ])
+        assignment = DiversityAssigner().assign(sets, Complexity.COMPLEX)
+
+        self.assertIsNone(assignment.assignments["test"])
+        self.assertEqual(assignment.assignments["coder"].runtime_id, IDENTITY_Y[0])
+
+    def test_four_role_deterministic_across_calls(self):
+        assigner = DiversityAssigner()
+        sets = self.four_sets()
+        first = assigner.assign(sets, Complexity.COMPLEX)
+        second = assigner.assign(sets, Complexity.COMPLEX)
+        self.assertEqual(first, second)
+
+    def test_four_role_candidates_come_only_from_bridge_sets(self):
+        sets = self.four_sets()
+        assignment = DiversityAssigner().assign(sets, Complexity.COMPLEX)
+        for role, candidate in assignment.assignments.items():
+            if candidate is not None:
+                self.assertIn(candidate, sets[role].candidates)
+
+    def test_four_role_score_is_always_none(self):
+        for assigner in (ConvergingAssigner(), DiversityAssigner()):
+            assignment = assigner.assign(self.four_sets(), Complexity.COMPLEX)
+            for candidate in assignment.assignments.values():
+                if candidate is not None:
+                    self.assertIsNone(candidate.score)
+
+    def test_two_role_backward_compatibility(self):
+        # 只注入 architect/coder 两键（10H-E 调用形态）时，输出与
+        # 10H-E 轮逐字一致：architect→X、coder→Y、POLICY_SPREAD。
+        sets = {
+            role: make_candidate_sets(
+                [(IDENTITY_X, ALL_CAPS), (IDENTITY_Y, ALL_CAPS)])[role]
+            for role in ("architect", "coder")
+        }
+        assignment = DiversityAssigner().assign(sets, Complexity.COMPLEX)
+
+        self.assertEqual(assignment.assignments["architect"].runtime_id, IDENTITY_X[0])
+        self.assertEqual(assignment.assignments["coder"].runtime_id, IDENTITY_Y[0])
+        self.assertEqual(assignment.reason, "POLICY_SPREAD")
+        self.assertEqual(sorted(assignment.assignments), ["architect", "coder"])
+
+    def test_capability_differentiated_four_roles_like_current(self):
+        # 能力天然差异化（X 有 architecture/review，Y 有 coding/testing）
+        # 时 spread 与现行 candidates[0] 行为一致。
+        sets = self.four_sets([
+            (IDENTITY_X, ("architecture", "review")),
+            (IDENTITY_Y, ("coding", "testing")),
+        ])
+        assignment = DiversityAssigner().assign(sets, Complexity.COMPLEX)
+
+        self.assertEqual(assignment.assignments["architect"].runtime_id, IDENTITY_X[0])
+        self.assertEqual(assignment.assignments["coder"].runtime_id, IDENTITY_Y[0])
+        self.assertEqual(assignment.assignments["review"].runtime_id, IDENTITY_X[0])
+        self.assertEqual(assignment.assignments["test"].runtime_id, IDENTITY_Y[0])
+        self.assertEqual(assignment.reason, "POLICY_SPREAD")
+
+    def test_converging_assigner_four_roles_all_first(self):
+        # 默认策略对任意角色集合都是 candidates[0]（全局序折叠）。
+        assignment = ConvergingAssigner().assign(self.four_sets(), Complexity.COMPLEX)
+
+        for candidate in assignment.assignments.values():
+            self.assertEqual(candidate.runtime_id, IDENTITY_X[0])
+        self.assertEqual(assignment.reason, "POLICY_CONVERGED")
 
 
 class RoleAssignmentValueTests(unittest.TestCase):

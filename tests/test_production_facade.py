@@ -33,11 +33,16 @@ from verified_runtime_pool import VerifiedRuntimePool
 from verification_collaboration import VerificationStatus
 
 IDENTITY = ("rt-x", "provider-x", "model-x", "fp-x")
+IDENTITY_Y = ("rt-y", "provider-y", "model-y", "fp-y")
 ALL_CAPS = ("architecture", "coding", "testing", "review")
 ARCH_ADDR = collab_agent_address(IDENTITY, "architect")
 CODER_ADDR = collab_agent_address(IDENTITY, "coder")
 TESTER_ADDR = collab_agent_address(IDENTITY, "tester")
 REVIEWER_ADDR = collab_agent_address(IDENTITY, "reviewer")
+ARCH_ADDR_Y = collab_agent_address(IDENTITY_Y, "architect")
+CODER_ADDR_Y = collab_agent_address(IDENTITY_Y, "coder")
+TESTER_ADDR_Y = collab_agent_address(IDENTITY_Y, "tester")
+REVIEWER_ADDR_Y = collab_agent_address(IDENTITY_Y, "reviewer")
 TASK = "redesign architecture across modules"
 
 
@@ -104,41 +109,133 @@ def health_ready(runtime_id):
                          checked_at=1.0, expires_at=2.0)
 
 
-def make_pool(caps=ALL_CAPS):
+def make_pool(caps=ALL_CAPS, identities=(IDENTITY,)):
     pool = VerifiedRuntimePool(clock=lambda: 1.0)
-    result = CandidateValidationResult(
-        identity=IDENTITY, status=CandidateValidationStatus.VERIFIED,
-        gates_passed=frozenset(ValidationGate),
-        gate_results=tuple(GateResult(g, GateVerdict.PASS) for g in ValidationGate),
-        block_reason=None, failure_point=None, experiment_id="exp-1", executed_at=1.0,
-        validated_capabilities=caps, evidence={})
-    pool.admit(result, caps, health_now="READY")
+    for identity in identities:
+        result = CandidateValidationResult(
+            identity=identity, status=CandidateValidationStatus.VERIFIED,
+            gates_passed=frozenset(ValidationGate),
+            gate_results=tuple(GateResult(g, GateVerdict.PASS) for g in ValidationGate),
+            block_reason=None, failure_point=None, experiment_id="exp-1", executed_at=1.0,
+            validated_capabilities=caps, evidence={})
+        pool.admit(result, caps, health_now="READY")
     return pool
 
 
+def dual_health():
+    return {IDENTITY[0]: health_ready(IDENTITY[0]),
+            IDENTITY_Y[0]: health_ready(IDENTITY_Y[0])}
+
+
 def compose_facade(arch_result=None, coder_result=None, tester_result=None,
-                   reviewer_result=None, caps=ALL_CAPS):
+                   reviewer_result=None, caps=ALL_CAPS, role_assigner=None,
+                   pool_identities=(IDENTITY,), health=None):
     budget = TaskBudget(4, 4, timeout_seconds=30.0)
     usage = BudgetUsage()
     guard = LoopGuard()
     arch_adapters = {
         ARCH_ADDR: RepeatingAdapter(arch_result if arch_result is not None else ok(arch_dict())),
         CODER_ADDR: RepeatingAdapter(coder_result if coder_result is not None else ok(impl_dict())),
+        ARCH_ADDR_Y: RepeatingAdapter(arch_result if arch_result is not None else ok(arch_dict())),
+        CODER_ADDR_Y: RepeatingAdapter(coder_result if coder_result is not None else ok(impl_dict())),
     }
 
     def session_factory():
         return CollaborationSession(LoopbackRemoteTransport(), arch_adapters, budget, usage, guard)
 
     orchestrator = CollaborationOrchestrator(
-        StubVO(), make_pool(caps), {IDENTITY[0]: health_ready(IDENTITY[0])},
-        budget, usage, guard, session_factory)
+        StubVO(), make_pool(caps, pool_identities), health or {IDENTITY[0]: health_ready(IDENTITY[0])},
+        budget, usage, guard, session_factory, role_assigner=role_assigner)
     verify_adapters = {
         TESTER_ADDR: RepeatingAdapter(tester_result if tester_result is not None else ok(test_dict())),
         REVIEWER_ADDR: RepeatingAdapter(reviewer_result if reviewer_result is not None else ok(review_dict())),
+        TESTER_ADDR_Y: RepeatingAdapter(tester_result if tester_result is not None else ok(test_dict())),
+        REVIEWER_ADDR_Y: RepeatingAdapter(reviewer_result if reviewer_result is not None else ok(review_dict())),
     }
-    facade = ProductionFacade(orchestrator, verify_adapters, make_pool(caps),
-                              {IDENTITY[0]: health_ready(IDENTITY[0])}, budget, usage, guard)
+    facade = ProductionFacade(orchestrator, verify_adapters, make_pool(caps, pool_identities),
+                              health or {IDENTITY[0]: health_ready(IDENTITY[0])}, budget, usage, guard,
+                              role_assigner=role_assigner)
     return facade, verify_adapters, budget, usage, guard
+
+
+class RoleAssignerInjectionTests(unittest.TestCase):
+    """Phase 10H-F: tester/reviewer join the policy-driven assignment."""
+
+    def test_default_no_injection_keeps_current_behavior(self):
+        # 无注入：tester/reviewer 仍为 candidates[0] 折叠（单 runtime
+        # 池 = 既有全部行为）。
+        facade, _, _, usage, _ = compose_facade()
+        result = facade.run(task_id="T1", task=TASK, prompt="p", mode=Mode.ON)
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(usage.total_agent_calls, 4)
+
+    def test_diversity_assigner_dual_runtime_spreads_tester_reviewer(self):
+        from role_assignment import DiversityAssigner
+
+        facade, _, _, usage, _ = compose_facade(
+            role_assigner=DiversityAssigner(),
+            pool_identities=(IDENTITY, IDENTITY_Y), health=dual_health())
+        result = facade.run(task_id="T1", task=TASK, prompt="p", mode=Mode.ON)
+
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(result.path, "FOUR_STAGE")
+        # sorted role keys (architect/coder/review/test) 交替：
+        # architect→X、coder→Y、review→X、test→Y。
+        history = facade.state.history("T1")
+        test_record = next(r for r in history if r.payload_type == "TEST")
+        review_record = next(r for r in history if r.payload_type == "REVIEW")
+        self.assertEqual(test_record.source_agent, TESTER_ADDR_Y)
+        self.assertEqual(test_record.target_agent, collab_agent_address(IDENTITY, "reviewer"))
+        self.assertEqual(review_record.source_agent, collab_agent_address(IDENTITY, "reviewer"))
+        # dual 路径同样 spread（10H-E 语义在四角色泛化下不回归）。
+        request = next(r for r in history if r.payload_type == "ARCHITECTURE")
+        self.assertEqual(request.source_agent, ARCH_ADDR)
+        self.assertEqual(request.target_agent, CODER_ADDR_Y)
+        self.assertEqual(usage.total_agent_calls, 4)
+
+    def test_diversity_assigner_single_runtime_converges(self):
+        from role_assignment import DiversityAssigner
+
+        facade, _, _, usage, _ = compose_facade(
+            role_assigner=DiversityAssigner())
+        result = facade.run(task_id="T1", task=TASK, prompt="p", mode=Mode.ON)
+
+        self.assertEqual(result.status, "SUCCESS")
+        history = facade.state.history("T1")
+        test_record = next(r for r in history if r.payload_type == "TEST")
+        self.assertEqual(test_record.source_agent, TESTER_ADDR)
+        self.assertEqual(usage.total_agent_calls, 4)
+
+    def test_diversity_assigner_missing_capability_is_honest(self):
+        from role_assignment import DiversityAssigner
+
+        facade, verify_adapters, _, _, _ = compose_facade(
+            role_assigner=DiversityAssigner(),
+            caps=("architecture", "coding"),
+            pool_identities=(IDENTITY, IDENTITY_Y), health=dual_health())
+        result = facade.run(task_id="T1", task=TASK, prompt="p", mode=Mode.ON)
+
+        self.assertEqual(result.status, "NO_VERIFICATION_CAPABILITY")
+        for adapters in verify_adapters.values():
+            self.assertEqual(adapters.requests, [])
+
+    def test_diversity_assigner_ledger_and_usage_invariants_hold(self):
+        from role_assignment import DiversityAssigner
+
+        facade, _, _, usage, _ = compose_facade(
+            role_assigner=DiversityAssigner(),
+            pool_identities=(IDENTITY, IDENTITY_Y), health=dual_health())
+        facade.run(task_id="T1", task=TASK, prompt="p", mode=Mode.ON)
+
+        history = facade.state.history("T1")
+        self.assertEqual([r.sequence for r in history], [1, 2, 3, 4, 5])
+        self.assertEqual([r.payload_type for r in history],
+                         ["", "ARCHITECTURE", "IMPLEMENTATION", "TEST", "REVIEW"])
+        c1 = history[1].correlation_id
+        self.assertEqual(history[2].correlation_id, c1)
+        self.assertNotEqual(history[3].correlation_id, c1)
+        self.assertNotEqual(history[4].correlation_id, history[3].correlation_id)
+        self.assertEqual(usage.total_agent_calls, 4)
 
 
 class ContractTests(unittest.TestCase):
