@@ -42,8 +42,15 @@ def real_registry():
 
     Runtime-specific knowledge lives here (the adapter-layer boundary);
     no fake adapters, no fabricated results — descriptors whose runtime is
-    absent simply never register."""
+    absent simply never register. Registration means ONLY "the adapter is
+    implemented and the production chain knows this runtime"; it never
+    means READY, never means VERIFIED, and never fabricates qualification
+    evidence (health, validation and admission stay owned by their own
+    layers downstream of discovery)."""
     from claude_code_adapter import ClaudeCodeAdapter
+    from codex_adapter import CodexAdapter
+    from gemini_adapter import GeminiAdapter
+    from pi_adapter import PiAdapter
     from tiny_agents_adapter import TinyAgentsAdapter
 
     registry = AdapterRegistry()
@@ -54,6 +61,33 @@ def real_registry():
             runtime_id="claude-cli", provider_id="anthropic", model_id=None,
             runtime_type="coding-agent", display_name="Claude Code",
             adapter_factory=lambda: claude,
+            config_fingerprint="installed",
+        ))
+
+    pi = PiAdapter.from_environment()
+    if pi is not None:
+        registry.register(AdapterDescriptor(
+            runtime_id="pi-cli", provider_id="deepseek", model_id=None,
+            runtime_type="coding-agent", display_name="Pi",
+            adapter_factory=lambda: pi,
+            config_fingerprint="installed",
+        ))
+
+    codex = CodexAdapter.from_environment()
+    if codex is not None:
+        registry.register(AdapterDescriptor(
+            runtime_id="codex-cli", provider_id="openai", model_id=None,
+            runtime_type="coding-agent", display_name="Codex",
+            adapter_factory=lambda: codex,
+            config_fingerprint="installed",
+        ))
+
+    gemini = GeminiAdapter.from_environment()
+    if gemini is not None:
+        registry.register(AdapterDescriptor(
+            runtime_id="gemini-cli", provider_id="google", model_id=None,
+            runtime_type="coding-agent", display_name="Gemini CLI",
+            adapter_factory=lambda: gemini,
             config_fingerprint="installed",
         ))
 
