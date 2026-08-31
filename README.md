@@ -257,7 +257,7 @@ from the qualification evidence, so a real run can never be mislabeled
 OFFLINE at the CLI seam. To drive the same facade from the `dual-agent`
 CLI, inject it — `cli.main._facade = facade` — see [Modes](#modes).
 
-For any other runtime, implement the three-method adapter contract — see
+For any other runtime, implement the six-method adapter contract — see
 [Extending Runtime](#extending-runtime).
 
 ## Agent Runtime Support
@@ -300,7 +300,7 @@ qualification in your own environment.
 | Claude Code CLI | Supported today (REAL VERIFIED) — [Integration](#integration) → "Run with Claude Code" |
 | tiny-agents | Adapter is ready: install the executable, set both `TINY_AGENTS_*` variables, then REAL-verify it in your environment before production use |
 | Codex CLI | Adapter is ready: install the CLI yourself, log in through its own flow, then REAL-verify it in your environment before production use |
-| Your own CLI or runtime | Implement the three-method `ExternalAgentAdapter` contract; the orchestrator never needs modification |
+| Your own CLI or runtime | Implement the six-method `ExternalAgentAdapter` contract; the orchestrator never needs modification |
 
 ### Current Support Boundary
 
@@ -600,12 +600,24 @@ Adding a runtime means implementing the adapter contract — the
 architecture allows it, and you own the adapter and its verification.
 
 New runtimes integrate through the `ExternalAgentAdapter` protocol
-(`dual-agent-development/scripts/external_agent_adapter.py`) with three
-methods:
+(`dual-agent-development/scripts/external_agent_adapter.py`) with six
+methods — three core invocation methods plus three health methods:
+
+Core invocation:
 
 - `discover()` → `RuntimeDiscovery` — is the runtime present?
 - `invoke(request)` → `InvocationResult` — run one agent request
 - `cancel(invocation_id)` → `InvocationResult` — cancel an in-flight invocation
+
+Health (required to pass the health pipeline and G1-G14 qualification):
+
+- `check_authentication()` → `AuthenticationCheck` — observe the runtime's own read-only auth state
+- `check_provider_model()` → `ProviderModelCheck` — gated on observed authentication, never guessed
+- `minimal_health_check(timeout_seconds)` → `MinimalHealthCheck` — honest `skipped`/`unsupported` without the REAL gate
+
+A runtime whose CLI has no observable authentication surface cannot be
+faked into this shape — see the runtime's adapter notes for its declared
+conformance level.
 
 Adapters own all runtime specifics — executable resolution, authentication
 state, subprocess environment (whitelisted: `PATH` / `HOME` / `USERPROFILE` /

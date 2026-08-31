@@ -100,6 +100,8 @@ class TinyAgentsAdapter:
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 shell=False,
                 env=self._minimal_env(),
@@ -133,6 +135,8 @@ class TinyAgentsAdapter:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 shell=False,
                 env=self._minimal_env(),
             )

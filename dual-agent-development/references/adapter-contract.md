@@ -3,13 +3,36 @@
 This document defines the boundary between the V2 orchestrator and a real
 CLI-backed runtime adapter (for example the Claude Code CLI). The engine is
 runtime-neutral: it routes by verified capabilities, never by runtime,
-provider, or model name. Any concrete adapter (Claude Code, Codex, others) is
-one implementation of this contract — none of them is a required or hardcoded
-runtime.
+provider, or model name. Any concrete adapter (Claude Code, Codex, Pi,
+tiny-agents, others) is one implementation of this contract — none of them
+is a required or hardcoded runtime.
 
 ---
 
-## 1. Invocation contract
+## 0. The contract surface: six methods
+
+The production adapter contract is SIX methods. Three are the core
+invocation surface; three are the health surface. The health methods are
+not optional: the health pipeline (`RuntimeHealthController` /
+`GenericRuntimeHealth`) and the G1-G14 qualification chain call them
+directly, so an adapter implementing only the core three cannot pass
+discovery bootstrap.
+
+- `discover()` → `RuntimeDiscovery`
+- `invoke(request)` → `InvocationResult`
+- `cancel(invocation_id)` → `InvocationResult`
+- `check_authentication()` → `AuthenticationCheck`
+- `check_provider_model()` → `ProviderModelCheck`
+- `minimal_health_check(timeout_seconds)` → `MinimalHealthCheck`
+
+"Having the six methods" is not REAL VERIFIED — qualification evidence is
+granted only by a gated real validation run (see §7). A runtime whose CLI
+has no observable authentication surface must not fake one; such an
+adapter is declared discovery-only (L0) and stays there honestly.
+
+---
+
+## 1. Core invocation contract
 
 Adapters launch real CLIs as subprocesses. The following are **normative**:
 
@@ -35,29 +58,75 @@ Adapters launch real CLIs as subprocesses. The following are **normative**:
 - **Bounded execution.** Every subprocess is bounded by a wall-clock timeout;
   the adapter reports a structured `TIMEOUT` result instead of hanging.
 
+- **Explicit UTF-8 decoding.** Every `Popen`/`run` that reads child output
+  passes `encoding="utf-8", errors="replace"` — including the discovery
+  probe. Without it, a GBK-default console raises `UnicodeDecodeError` out
+  of `communicate()`, which the subprocess error handlers do not catch.
+
 - **Cancellation.** `cancel(invocation_id)` terminates a tracked in-flight
-  process and reports `CANCELLED`. Timeout expiry kills the process tree, not
-  just the direct child.
+  process and reports `CANCELLED`. An unknown invocation id reports
+  `UNAVAILABLE` — a fake cancel success is never fabricated. Timeout expiry
+  and cancellation stay distinct: a call cancelled during timeout handling
+  reports `CANCELLED`, not `TIMEOUT`.
 
 - **Normalized results.** The adapter returns a frozen `InvocationResult`
-  (status / output / error / trace with exit code and duration). Raw stdout
-  and stderr never become structured packets or ledger records — the
-  collaboration layer scans every packet with `content_safety` (the single
-  secret-scan source) and redacts unsafe trace errors before they reach any
-  public outcome.
+  (status / output / error / trace with exit code and duration).
+  `invocation_id` is non-empty, `duration >= 0`, the `runtime` label is the
+  adapter's runtime id, identity fields (agent/provider/model/role) stay
+  separate from runtime execution facts, and token counts default to the
+  literal `"unknown"`. Raw stdout and stderr never become structured packets
+  or ledger records — the collaboration layer scans every packet with
+  `content_safety` (the single secret-scan source) and redacts unsafe trace
+  errors before they reach any public outcome.
 
-## 2. Health and unavailable semantics
+---
 
-Discovery and health never invent a capability, cost, availability, or result.
+## 2. Health surface contract
 
-- `READY` is reported only when discovery, read-only authentication
-  diagnostics, provider/model checks, and a minimal health invocation all
-  pass. `DISCOVERED` is not `READY`; a CLI existing on disk is not `READY`.
+Health and unavailable semantics never invent a capability, cost,
+availability, or result.
+
+### `check_authentication()`
+
+- Authentication is **observed**, never executed: only the runtime's own
+  official, read-only diagnostic surface (status commands) may be used.
+- The engine never reads, stores, prints, or modifies credentials, never
+  logs in or out, and never touches runtime configuration.
+- Credential-printing surfaces (API key / bearer token print commands) are
+  forbidden.
+- When the runtime has no reliable, read-only, machine-observable
+  authentication surface, the adapter reports `UNSUPPORTED`/`UNKNOWN`
+  honestly — it never guesses success.
+
+### `check_provider_model()`
+
+- Provider/model availability is gated on authentication that was actually
+  observed by a prior `check_authentication()` call; unobserved auth means
+  "cannot vouch", never "available by default".
+- The adapter never guesses provider or model, and never infers
+  authentication success from unrelated strings.
+
+### `minimal_health_check(timeout_seconds)`
+
+- The only health invocation is opt-in: without the REAL gate
+  (`RUN_REAL_PROVIDER_TESTS=1`) it reports an honest
+  `UNSUPPORTED_HEALTH_CHECK` / `skipped` — never a silent skip, never a
+  fabricated pass.
+- With the gate, health success requires the exact `OK` output; anything
+  else (`timeout`, `unavailable`, non-OK output, failed invoke) is an
+  honest failure with a structured reason.
+
+### `discover()`
+
+- Discovery answers existence only: `DISCOVERED` is not `READY`; a CLI
+  existing on disk is not `READY`.
+- When the runtime is not installed, `from_environment()` returns `None` —
+  no auto-install, no auto-configuration, no guessed paths, no half
+  configured adapter, no fabricated discovery success.
 - `AUTH_REQUIRED` / `UNAVAILABLE` / `ERROR` are reported honestly with a
   structured reason. An unavailable runtime never becomes a candidate.
-- Authentication state is observed through the runtime's own official,
-  read-only diagnostics. The engine never reads, stores, prints, or modifies
-  credentials, never logs in or out, and never touches runtime configuration.
+
+---
 
 ## 3. Runtime Validation Gate and provenance
 
@@ -76,6 +145,8 @@ string). Results carry `provenance`:
 Offline verification is not real verification, `provenance` keeps the two
 honest, and nothing in the engine can upgrade one to the other.
 
+---
+
 ## 4. Result as untrusted data
 
 - The orchestrator never executes text coming back from a runtime.
@@ -84,13 +155,63 @@ honest, and nothing in the engine can upgrade one to the other.
 - Evidence of availability always names its source and never fabricates a
   passing result.
 
-## 5. Real-provider tests are opt-in
+---
+
+## 5. Usage honesty (token accounting)
+
+Token counts on the trace are **observed values only**:
+
+- `CAPTURE` — if the runtime provides a machine-readable usage surface, the
+  adapter parses its OWN CLI output format and reports exact integers.
+- `HONEST_UNKNOWN` — if the runtime has no machine-readable usage surface,
+  the trace keeps the literal `"unknown"`. Even if raw stdout happens to
+  contain token-shaped text (`token_usage=123`), the adapter must not guess
+  that this is real usage.
+
+Missing usage → `"unknown"`. Malformed usage → `"unknown"` (never `0`,
+never an estimate). A usage parser failure never fails the invocation
+itself.
+
+---
+
+## 6. Offline conformance vs REAL qualification
+
+These two are strictly separated and must never be conflated:
+
+- **Offline conformance** proves the *adapter* obeys the Adapter Contract —
+  argv discipline, minimal env, UTF-8, bounded timeout, cancellation
+  semantics, redaction, honest discovery, usage honesty. It runs against
+  fake processes and fixture stdout/stderr, needs no installed runtime,
+  and can run on any machine at any time.
+- **REAL qualification** proves a *runtime* actually runs on this machine
+  and earns `VERIFIED` status with `REAL` provenance, through the gated
+  G1-G14 chain.
+
+In particular:
+
+- Conformance PASS does not mean the runtime is READY.
+- Runtime READY does not mean VERIFIED.
+- Offline fixtures produce no REAL provenance.
+- Offline test results never enter the Verified Runtime Pool.
+- Offline test results never influence RoleAssignment, Routing, Budget,
+  Trust, or Admission.
+
+Adapters can be developed and offline-verified on machines where the
+runtime is not installed, not logged in, and not configured. Installation,
+authentication, and REAL verification are separate later steps, each under
+explicit authorization.
+
+---
+
+## 7. Real-provider tests are opt-in
 
 The default unit suite is fully offline: no file, process, or network side
 effects. Tests that would launch a real runtime are gated behind
 `RUN_REAL_PROVIDER_TESTS=1` and skipped by default.
 
-## 6. Packaging metadata
+---
+
+## 8. Packaging metadata
 
 `agents/openai.yaml` describes the Skill for a packaging/discovery surface. It
 carries **discovery metadata only**: an `interface` block with `display_name`,
