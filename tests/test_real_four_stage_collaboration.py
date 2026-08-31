@@ -212,22 +212,53 @@ class RealFourStageCollaborationTests(unittest.TestCase):
 
         # Counting + recording wrappers: count every real invocation
         # and capture raw stage outputs for failure diagnosis only.
+        # Evidence channel (10H-F forensic repair): for EVERY invocation
+        # print the adapter's own honest failure facts — InvocationStatus,
+        # sanitized trace.error, trace.exit_code, and stage duration —
+        # so a failed run leaves its diagnosis in stdout even when
+        # assertions fire before the summary block. trace.error is
+        # already sanitized by the adapters (_safe_error); outputs are
+        # passed through the shared credential-shape scanner before
+        # printing, keeping the channel secret-safe.
+        import time as _time
+
         claude_calls = {"n": 0}
         pi_calls = {"n": 0}
         real_claude_invoke = claude.invoke
         real_pi_invoke = pi.invoke
         stage_outputs = {}
 
+        def _safe_text(value, limit=400):
+            text = value if isinstance(value, str) else repr(value)
+            if _surface_has_credential_shape(text):
+                return "<redacted:credential-shape>"
+            return text.replace("\n", " ")[:limit]
+
+        def _print_invocation_evidence(runtime_name, request, result, started):
+            duration = round(_time.monotonic() - started, 1)
+            status = getattr(result.status, "value", str(result.status))
+            trace = getattr(result, "trace", None)
+            exit_code = getattr(trace, "exit_code", None) if trace else None
+            error = getattr(trace, "error", None) if trace else None
+            print(f"INVOCATION_EVIDENCE: {runtime_name}:{request.role} "
+                  f"status={status} exit_code={exit_code} "
+                  f"duration_s={duration} "
+                  f"error={_safe_text(error) if error else None}")
+
         def recording_claude(request):
             claude_calls["n"] += 1
+            started = _time.monotonic()
             result = real_claude_invoke(request)
+            _print_invocation_evidence("claude", request, result, started)
             if request.role in ("architect", "coder", "tester", "reviewer"):
                 stage_outputs[("claude", request.role)] = result.output
             return result
 
         def recording_pi(request):
             pi_calls["n"] += 1
+            started = _time.monotonic()
             result = real_pi_invoke(request)
+            _print_invocation_evidence("pi", request, result, started)
             if request.role in ("architect", "coder", "tester", "reviewer"):
                 stage_outputs[("pi", request.role)] = result.output
             return result
@@ -330,6 +361,12 @@ class RealFourStageCollaborationTests(unittest.TestCase):
         history = facade.state.history(TASK_ID)
         if history:
             print("LEDGER_DECISION:", history[0].reason)
+            # Ledger failure records carry the same category the facade
+            # projected — printed here so a failed run's terminal state
+            # is visible before any assertion can fire.
+            for failed in facade.state.failures(TASK_ID):
+                print("LEDGER_FAILURE:", failed.task_id,
+                      failed.status, failed.reason)
         if result.status != "SUCCESS":
             for (runtime_name, role), raw in sorted(stage_outputs.items()):
                 _print_failure_diagnosis(f"{runtime_name}:{role}", raw)
