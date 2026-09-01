@@ -24,6 +24,11 @@ from enum import Enum
 from typing import Any, ClassVar
 from uuid import uuid4
 
+from content_safety import (
+    ValidationDiagnostic,
+    contains_unsafe_content,
+    record_validation_diagnostic,
+)
 from structured_packets import (
     ArchitecturePacket,
     ImplementationPacket,
@@ -104,14 +109,28 @@ class CollaborationPacket:
             _assert_clean_text(getattr(self, field_name), field_name)
         if not isinstance(self.acceptance_criteria, tuple):
             raise PacketValidationError("acceptance_criteria must be a tuple")
-        for item in self.acceptance_criteria:
+        for index, item in enumerate(self.acceptance_criteria):
             if not isinstance(item, str):
                 raise PacketValidationError("acceptance_criteria items must be strings")
-            lowered = item.lower()
-            for marker in _SECRET_MARKERS:
-                if marker in lowered:
-                    raise PacketValidationError(
-                        "acceptance_criteria must not contain secret-shaped content")
+            # R6-C10: criteria items are MODEL PROSE copied from the
+            # architect/coder packet, which already rejected credential
+            # shapes and already ran the whole-packet scan. They follow
+            # the shared G15 two-tier authority (shape in values), not
+            # the historical bare-substring word ban — otherwise legal
+            # technical prose ("no token input") dies here and surfaces
+            # as an unexplained ARCHITECT_PACKET_INVALID. The header
+            # fields above keep the strict scan: they are
+            # protocol-generated, never model prose.
+            if contains_unsafe_content(item):
+                # R6-C11: the REJECT stays a REJECT; it is now observable
+                # as layer/field/index/rule — the rejected text itself
+                # never leaves the scanner.
+                record_validation_diagnostic(
+                    ValidationDiagnostic(
+                        "envelope", "acceptance_criteria", index,
+                        "UNSAFE_SHAPE"))
+                raise PacketValidationError(
+                    "acceptance_criteria must not contain secret-shaped content")
         if self.protocol_version != PROTOCOL_VERSION:
             raise PacketValidationError("unsupported protocol version")
         if self.provenance not in ("OFFLINE", "REAL"):

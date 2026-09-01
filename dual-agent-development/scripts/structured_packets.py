@@ -14,10 +14,14 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar
 
+from content_safety import (
+    ValidationDiagnostic,
+    record_validation_diagnostic,
+)
+
 
 class PacketValidationError(ValueError):
     """封闭的验证失败；可作为 reason 安全上报。"""
-
     pass
 
 
@@ -29,17 +33,31 @@ _SECRET_PATTERN = re.compile(
 )
 
 
-def _clean(value: Any) -> Any:
+def _clean(value: Any, layer: str = "packet", field: str = "") -> Any:
+    # R6-C11: REJECT 语义不变；拒绝点现在记录 secret-safe 的结构化
+    # 坐标（layer/field/index/rule，绝不含被拒值本身）。field 只在
+    # 顶层调用处传入（_tuple 知道自己的字段名）；嵌套结构由
+    # content_safety 的路径拼接补齐。
     if isinstance(value, str):
         if _SECRET_PATTERN.search(value):
+            record_validation_diagnostic(
+                ValidationDiagnostic(layer, field, None, "UNSAFE_SHAPE"))
             raise PacketValidationError("packet contains secret-shaped content")
         return value
     if isinstance(value, dict):
-        if any(_SECRET_PATTERN.search(str(key)) for key in value):
-            raise PacketValidationError("packet contains secret-shaped field")
-        return {str(key): _clean(item) for key, item in value.items()}
+        for key in value:
+            if _SECRET_PATTERN.search(str(key)):
+                record_validation_diagnostic(
+                    ValidationDiagnostic(layer, field, None, "UNSAFE_KEY"))
+                raise PacketValidationError("packet contains secret-shaped field")
+        return {str(key): _clean(item, layer, field) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
-        return tuple(_clean(item) for item in value)
+        # R6-C11: 记录 list index（"field[i]" 诊断坐标，绝不含值）；
+        # 归一化语义与 HEAD 一致 —— 重建为 tuple（list -> tuple 的
+        # 历史契约，transport 变异防护依赖它）。
+        for index, item in enumerate(value):
+            _clean(item, layer=layer, field=f"{field}[{index}]")
+        return tuple(value)
     return value
 
 
@@ -49,10 +67,27 @@ def _required(data: dict[str, Any], fields: tuple[str, ...]) -> None:
         raise PacketValidationError(f"missing required fields: {', '.join(missing)}")
 
 
+def _clean_packet(packet, layer: str = "packet") -> None:
+    """R6-C11: the __post_init__ whole-packet pass, field-aware.
+
+    Same verdicts as the historical _clean(asdict(packet)) — one
+    top-level field at a time so a REJECT records which field (and,
+    for list fields, which index) offended. Never records the value."""
+    for field_name, value in asdict(packet).items():
+        _clean(value, layer=layer, field=field_name)
+
+
 def _tuple(value: Any, field: str) -> tuple:
     if not isinstance(value, (list, tuple)):
         raise PacketValidationError(f"{field} must be a list")
-    return tuple(_clean(item) for item in value)
+    # R6-C11: 逐元素调用 _clean —— 既做校验（list index 精确记入
+    # diagnostic），也保留 _clean 重建后的结构（from_dict 的历史
+    # 归一化契约：任意层级的 list 都归一为 tuple；transport 的
+    # 静默变异防护依赖 decoded != sent 的这一语义）。
+    cleaned = []
+    for index, item in enumerate(value):
+        cleaned.append(_clean(item, field=f"{field}[{index}]"))
+    return tuple(cleaned)
 
 
 @dataclass(frozen=True)
@@ -80,7 +115,7 @@ class ArchitecturePacket:
         for field in ("goal", "constraints", "architecture", "acceptance_criteria"):
             if not isinstance(getattr(self, field), tuple):
                 raise PacketValidationError(f"{field} must be a tuple")
-        _clean(asdict(self))
+        _clean_packet(self)
 
     def _validate_identity(self, expected_role: str):
         if not isinstance(self.task_id, str) or not self.task_id.strip():
@@ -131,7 +166,7 @@ class ImplementationPacket:
     def _validate(self):
         if not isinstance(self.task_id, str) or not self.task_id.strip() or self.role != self.required_role():
             raise PacketValidationError("ImplementationPacket requires task_id and coder role")
-        _clean(asdict(self))
+        _clean_packet(self)
 
     @classmethod
     def from_dict(cls, data):
@@ -164,7 +199,7 @@ class ReviewPacket:
     def __post_init__(self):
         if not isinstance(self.task_id, str) or not self.task_id.strip() or self.role != self.required_role():
             raise PacketValidationError("ReviewPacket requires task_id and reviewer role")
-        _clean(asdict(self))
+        _clean_packet(self)
 
     @classmethod
     def from_dict(cls, data):
@@ -197,7 +232,7 @@ class TestPacket:
     def __post_init__(self):
         if not isinstance(self.task_id, str) or not self.task_id.strip() or self.role != self.required_role():
             raise PacketValidationError("TestPacket requires task_id and tester role")
-        _clean(asdict(self))
+        _clean_packet(self)
 
     @classmethod
     def from_dict(cls, data):

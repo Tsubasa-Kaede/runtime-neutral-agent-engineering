@@ -21,6 +21,12 @@ from collaboration_packet import (
     new_correlation_id,
     serialize_collaboration_packet,
 )
+from content_safety import (
+    diagnose_packet_reject,
+    last_validation_diagnostic as last_packet_diagnostic,
+    packet_has_unsafe_content,
+    reset_validation_diagnostic,
+)
 from structured_packets import (
     ArchitecturePacket,
     ImplementationPacket,
@@ -232,6 +238,189 @@ class SecretSafetyTests(unittest.TestCase):
     def test_secret_shaped_acceptance_criteria_is_rejected(self):
         with self.assertRaises(PacketValidationError):
             envelope(acceptance_criteria=("api_key=1",))
+
+    def test_bare_marker_mention_in_criteria_is_accepted(self):
+        # R6-C10 forensics (the G15 semantic split, applied to the one
+        # remaining old-scan site): acceptance_criteria are MODEL PROSE
+        # copied from the architect packet, whose own layer already
+        # rejects credential SHAPES and whose whole-packet scan already
+        # ran. The envelope's historical bare-substring scan rejected
+        # legitimate technical prose ("no token input",
+        # "the parser tokenizes input once") — the exact false-positive
+        # class G15 removed everywhere else, and a live REAl-scenario
+        # risk (a legal architect packet dies at envelope construction
+        # and surfaces as ARCHITECT_PACKET_INVALID with a valid-looking
+        # diagnosis). Criteria items must be SHAPE-scanned, not
+        # word-banned.
+        for legal in ("no clock, no random, no token input",
+                      "the parser tokenizes input once",
+                      "must not write to stdout during tests",
+                      "logs contain no authorization header"):
+            with self.subTest(legal=legal):
+                packet = envelope(acceptance_criteria=(legal,))
+                self.assertEqual(packet.acceptance_criteria, (legal,))
+
+    def test_credential_shaped_criteria_are_still_rejected(self):
+        # The fix must not weaken true positives: every credential
+        # SHAPE stays fatal at the envelope, same vocabulary as the
+        # packet layer (assignment / bearer / sk- material).
+        for bad in ("api_key=1", "token: deadbeef", "bearer abc123",
+                    "authorization: Bearer x", "sk-abcdefgh1234"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(PacketValidationError):
+                    envelope(acceptance_criteria=(bad,))
+
+
+class PacketValidationDiagnosticTests(unittest.TestCase):
+    """R6-C11: secret-safe, field-level, rule-level failure diagnostics.
+
+    Contract (fixed fixtures, independently expected — never derived
+    from production code): every validation REJECT carries a structured
+    diagnostic naming LAYER / FIELD / INDEX (when the value lives in a
+    list) / RULE — and NOTHING ELSE. The rejected raw value, the
+    prompt, any credential material: never present, never substrings.
+    The acceptance semantics are unchanged; only observability grew.
+
+    E1-E5 (the R6-C10 failure-space enumeration):
+      E1 packet _clean: credential shape in a string VALUE
+      E2 packet _clean: credential shape in a dict KEY
+      E3 whole-packet scan: credential shape in a value
+      E4 whole-packet scan: marker substring in a dict key
+      E5 envelope criteria scan: credential shape in an item
+    """
+
+    def setUp(self):
+        # The diagnostic slot is one global "last REJECT" observation;
+        # every test starts from a clean observation.
+        reset_validation_diagnostic()
+
+    def test_safe_criteria_has_no_diagnostic(self):
+        # Test 1 (authorization §七): a safe criteria item ACCEPTS and
+        # produces NO diagnostic (nothing to observe).
+        packet = envelope(acceptance_criteria=("no token input is used",))
+        self.assertEqual(packet.acceptance_criteria, ("no token input is used",))
+        self.assertIsNone(last_packet_diagnostic())
+
+    def test_shaped_criteria_diagnostic_names_field_index_rule(self):
+        # Test 2: a credential-shaped criteria item REJECTS with the
+        # full structured diagnostic — layer, field, index, rule.
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=(
+                "deterministic under varied PYTHONHASHSEED",
+                "api_key=deadbeef"))
+        diagnostic = last_packet_diagnostic()
+        self.assertIsNotNone(diagnostic)
+        self.assertEqual(diagnostic.layer, "envelope")
+        self.assertEqual(diagnostic.field, "acceptance_criteria")
+        self.assertEqual(diagnostic.index, 1)
+        self.assertEqual(diagnostic.rule, "UNSAFE_SHAPE")
+
+    def test_unsafe_key_rejects_with_diagnostic(self):
+        # Test 3: a marker substring in a dict KEY (E2/E4 family). The
+        # packet layer itself allows marker keys; the whole-packet scan
+        # is the rejecting authority — its REJECT must be observable
+        # with field + rule (the walker names the key path too).
+        packet = ArchitecturePacket(
+            task_id="T1", role="architect", goal=("g",),
+            constraints=("c",), architecture=("a",),
+            interfaces=({"stdout": "raw"},),
+            implementation_steps=({},),
+            acceptance_criteria=("ac1",), risks=({},))
+        self.assertTrue(packet_has_unsafe_content(packet))
+        diagnostic = diagnose_packet_reject(packet, "packet")
+        self.assertIsNotNone(diagnostic)
+        self.assertEqual(diagnostic.layer, "packet")
+        self.assertEqual(diagnostic.field, "interfaces.stdout")
+        self.assertEqual(diagnostic.rule, "UNSAFE_KEY")
+
+    def test_unsafe_value_rejects_with_diagnostic(self):
+        # Test 4: a credential shape in a string VALUE (E1/E3 family)
+        # is still REJECTED, with the value's field/index/rule named.
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket(
+                task_id="T1", role="architect", goal=("g",),
+                constraints=("token=leak",),
+                architecture=("a",), interfaces=({},),
+                implementation_steps=({},),
+                acceptance_criteria=("ac1",), risks=({},))
+        diagnostic = last_packet_diagnostic()
+        self.assertIsNotNone(diagnostic)
+        self.assertEqual(diagnostic.layer, "packet")
+        self.assertEqual(diagnostic.field, "constraints[0]")
+        self.assertEqual(diagnostic.rule, "UNSAFE_SHAPE")
+
+    def test_diagnostic_carries_no_secret_material(self):
+        # Test 5: the diagnostic surface (all fields + str/repr) must
+        # not contain the rejected raw value or credential material.
+        secret = "sk-supersecretmaterial99"
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=(secret,))
+        diagnostic = last_packet_diagnostic()
+        surface = (str(diagnostic) + repr(diagnostic)).lower()
+        self.assertNotIn(secret, surface)
+        self.assertNotIn("deadbeef", surface)
+        for fragment in ("supersecret", "sk-", "material"):
+            self.assertNotIn(fragment, surface, surface)
+
+    def test_e1_to_e5_diagnostics_do_not_collapse(self):
+        # Test 6: the five exit families must remain DISTINGUISHABLE —
+        # not one generic "invalid" code. Independently expected pairs.
+        expected = {
+            "E1_packet_value_shape": ("packet", "UNSAFE_SHAPE"),
+            "E2_packet_key_shape": ("packet", "UNSAFE_KEY"),
+            "E3_envelope_value_shape": ("envelope", "UNSAFE_SHAPE"),
+            "E4_whole_packet_key": ("packet", "UNSAFE_KEY"),
+            "E5_envelope_criteria_shape": ("envelope", "UNSAFE_SHAPE"),
+        }
+        observed = {}
+        # E1: value shape at the packet layer (constraints list item).
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket(
+                task_id="T1", role="architect", goal=("g",),
+                constraints=("password=hunter2",),
+                architecture=("a",), interfaces=({},),
+                implementation_steps=({},),
+                acceptance_criteria=("ac1",), risks=({},))
+        d = last_packet_diagnostic()
+        observed["E1_packet_value_shape"] = (d.layer, d.rule)
+        # E2: KEY carrying a credential SHAPE (api_key=x as a key).
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket(
+                task_id="T1", role="architect", goal=("g",),
+                constraints=("c",), architecture=("a",),
+                interfaces=({"api_key=x": "v"},),
+                implementation_steps=({},),
+                acceptance_criteria=("ac1",), risks=({},))
+        d = last_packet_diagnostic()
+        observed["E2_packet_key_shape"] = (d.layer, d.rule)
+        # E3: value shape surfacing at the ENVELOPE criteria layer.
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=("token: deadbeef",))
+        d = last_packet_diagnostic()
+        observed["E3_envelope_value_shape"] = (d.layer, d.rule)
+        # E4: whole-packet key marker (stderr) in risks dicts — the
+        # packet layer itself allows marker keys; the whole-packet scan
+        # is the rejecting authority, diagnosed via the walker.
+        packet = ArchitecturePacket(
+            task_id="T1", role="architect", goal=("g",),
+            constraints=("c",), architecture=("a",),
+            interfaces=({},), implementation_steps=({},),
+            acceptance_criteria=("ac1",),
+            risks=({"stderr": "dump"},))
+        self.assertTrue(packet_has_unsafe_content(packet))
+        d = diagnose_packet_reject(packet, "packet")
+        self.assertIsNotNone(d)
+        observed["E4_whole_packet_key"] = (d.layer, d.rule)
+        # E5: envelope criteria shape (already covered; distinct fixture).
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=("bearer abc123",))
+        d = last_packet_diagnostic()
+        observed["E5_envelope_criteria_shape"] = (d.layer, d.rule)
+        # The layer/rule pairs must match the independently fixed
+        # fixtures, and the five observed codes must not all be equal.
+        self.assertEqual(observed, expected)
+        codes = {(layer, rule) for layer, rule in observed.values()}
+        self.assertGreater(len(codes), 1)
 
     def test_repr_and_exception_messages_stay_clean(self):
         packet = envelope()

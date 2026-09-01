@@ -63,7 +63,11 @@ class CodexAdapterTests(unittest.TestCase):
     def adapter(self):
         return CodexAdapter(profile=self.profile(), executable="codex")
 
-    def test_invoke_uses_exec_argv_with_positional_prompt(self):
+    def test_invoke_sends_prompt_through_stdin_not_argv(self):
+        # R6-C5 contract: the instructions ride via stdin (the CLI's
+        # documented non-interactive form — "instructions are read from
+        # stdin"; also the pi/gemini family shape). argv carries ONLY the
+        # exec subcommand and optional flags, never the prompt payload.
         process = FakeProcess()
         with patch("codex_adapter.subprocess.Popen", return_value=process) as popen:
             result = self.adapter().invoke(self.request())
@@ -73,11 +77,34 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.trace.runtime, "codex-cli")
         self.assertEqual(result.trace.status, InvocationStatus.SUCCESS)
         self.assertEqual(result.trace.exit_code, 0)
-        # The prompt rides in argv, never through stdin.
-        self.assertEqual(process.calls, [(None, 3)])
+        # The prompt rides through stdin: communicate() must pass it.
+        self.assertEqual(process.calls, [("Return exactly OK.", 3)])
+        # argv never contains the prompt text.
         argv = popen.call_args.args[0]
-        self.assertEqual(argv, ["codex", "exec", "Return exactly OK."])
+        self.assertEqual(argv, ["codex", "exec"])
+        self.assertNotIn("Return exactly OK.", argv)
         self.assertFalse(popen.call_args.kwargs["shell"])
+        # stdin must be a pipe for the stdin shape to hold.
+        self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
+
+    def test_invoke_stdin_carries_prompt_verbatim(self):
+        # Long, non-ASCII, newline-bearing prompt text must arrive at the
+        # child EXACTLY as written — one source, one wire, no mangling.
+        prompt = ("Design 确定性 slug 工具\nline two\nline three "
+                  + "padding " * 40 + "end")
+        process = FakeProcess()
+        with patch("codex_adapter.subprocess.Popen", return_value=process) as popen:
+            self.adapter().invoke(
+                ExternalAgentRequest(
+                    task_id="task-1", prompt=prompt, agent_id="coding-agent",
+                    role="coder", provider="test-provider", model=None,
+                    timeout_seconds=3))
+
+        self.assertEqual(process.calls[0][0], prompt)
+        argv = popen.call_args.args[0]
+        for item in argv:
+            self.assertNotIn("确定性", item)
+            self.assertNotIn("padding", item)
 
     def test_invoke_appends_model_flag_when_requested(self):
         process = FakeProcess()
@@ -86,8 +113,9 @@ class CodexAdapterTests(unittest.TestCase):
 
         self.assertEqual(result.status, InvocationStatus.SUCCESS)
         argv = popen.call_args.args[0]
-        self.assertEqual(
-            argv, ["codex", "exec", "--model", "test-model", "Return exactly OK."])
+        self.assertEqual(argv, ["codex", "exec", "--model", "test-model"])
+        # The model flag stays in argv; the prompt still rides stdin.
+        self.assertEqual(process.calls, [("Return exactly OK.", 3)])
 
     def test_invoke_decodes_child_streams_as_utf_8(self):
         process = FakeProcess()

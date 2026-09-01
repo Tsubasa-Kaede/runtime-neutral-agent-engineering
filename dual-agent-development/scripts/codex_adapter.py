@@ -130,12 +130,15 @@ class CodexAdapter:
             started_at=started,
         )
         process: subprocess.Popen[str] | None = None
-        # codex exec 的文档化非交互形态：提示词是位置参数（不经
-        # stdin 传递）；--model 仅在请求显式指定时附加。
+        # codex exec 的文档化非交互形态（R6-C5 修复）：instructions 从
+        # stdin 读取（--help 明文 "instructions are read from stdin"）。
+        # prompt 单一来源、只走 stdin，argv 不携带 prompt 载荷；--model
+        # 仅在请求显式指定时附加。此前 prompt 作为 argv 位置参数 +
+        # PIPE-stdin 不写入不关闭的形态，会让 CLI 在 stdin 等待语义上
+        # 秒退（R6-C2 exit=1/0s/空 stdout 的 REAL 失败证据）。
         argv = [self.executable, "exec"]
         if request.model:
             argv.extend(["--model", request.model])
-        argv.append(request.prompt)
         try:
             process = subprocess.Popen(
                 argv,
@@ -152,7 +155,7 @@ class CodexAdapter:
                 self._processes[invocation_id] = process
                 self.last_invocation_id = invocation_id
             trace = self._finish_trace(trace, InvocationStatus.INVOKED, started)
-            stdout, stderr = process.communicate(timeout=request.timeout_seconds)
+            stdout, stderr = process.communicate(request.prompt, timeout=request.timeout_seconds)
             finished = time.time()
             with self._state_lock:
                 cancelled = invocation_id in self._cancelled
