@@ -13,6 +13,7 @@ only; that coverage trade is recorded in every DUAL decision.
 from __future__ import annotations
 
 from collaboration_packet import new_correlation_id
+from collaboration_policy import PolicyConstrainedAssigner
 from collaboration_session import (
     CollaborationOutcome,
     CollaborationStatus,
@@ -61,7 +62,8 @@ class CollaborationOrchestrator:
     def state(self):
         return self._state
 
-    def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance="OFFLINE"):
+    def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance="OFFLINE",
+            policy=None):
         decision = ModeGate().decide(mode, task)
         if decision.mode is Mode.OFF:
             self._state = self._state.append_decision(
@@ -71,7 +73,8 @@ class CollaborationOrchestrator:
             return self._verified_orchestrator.execute(task_id, task, prompt, mode)
         forced = decision.mode is Mode.ON
         if forced or decision.complexity is Complexity.COMPLEX:
-            return self._run_dual(task_id, task, prompt, mode, decision, provenance)
+            return self._run_dual(task_id, task, prompt, mode, decision,
+                                  provenance, policy)
         self._state = self._state.append_decision(
             task_id, mode=decision.mode.value,
             complexity=decision.complexity.value, path="SINGLE",
@@ -92,12 +95,17 @@ class CollaborationOrchestrator:
             for role in ("architect", "coder")
         }
 
-    def _run_dual(self, task_id, task, prompt, mode, decision, provenance):
+    def _run_dual(self, task_id, task, prompt, mode, decision, provenance,
+                  policy=None):
         # 10H-E: architect/coder joint choice goes through the injected
         # role-assignment policy (default = historical candidates[0]
-        # fold). Candidates come only from the bridge sets.
+        # fold). Candidates come only from the bridge sets. A per-run
+        # policy (R7-A2) switches to a PolicyConstrainedAssigner for this
+        # run only; policy=None keeps the historical assigner verbatim.
         candidate_sets = self._role_candidate_sets()
-        assignment = self._role_assigner.assign(candidate_sets, decision.complexity)
+        assigner = self._role_assigner if policy is None else \
+            PolicyConstrainedAssigner(policy)
+        assignment = assigner.assign(candidate_sets, decision.complexity)
         architect = assignment.assignments.get("architect")
         coder = assignment.assignments.get("coder")
         if architect is None or coder is None:

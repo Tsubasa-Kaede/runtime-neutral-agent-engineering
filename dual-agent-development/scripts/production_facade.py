@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from collaboration_session import CollaborationOutcome, CollaborationStatus, collab_agent_address
+from collaboration_policy import PolicyConstrainedAssigner
 from content_safety import contains_unsafe_content
 from execution_engine import ExecutionResult
 from mode_gate import Mode
@@ -83,9 +84,11 @@ class ProductionFacade:
         """The latest shared ledger (four-stage after a successful run)."""
         return self._final_state
 
-    def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance="OFFLINE"):
+    def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance="OFFLINE",
+            policy=None):
         mode = Mode(mode)
-        outcome = self._orchestrator.run(task_id, task, prompt, mode, provenance)
+        outcome = self._orchestrator.run(task_id, task, prompt, mode, provenance,
+                                         policy)
         self._final_state = self._orchestrator.state
 
         if isinstance(outcome, ExecutionResult):
@@ -108,13 +111,17 @@ class ProductionFacade:
 
         # 10H-F: tester/reviewer are chosen JOINTLY through the injected
         # role-assignment policy (default = historical candidates[0]
-        # fold), mirroring the orchestrator's dual-role assignment.
+        # fold), mirroring the orchestrator's dual-role assignment. A
+        # per-run policy (R7-A2) switches to a PolicyConstrainedAssigner
+        # for this run only; policy=None keeps the historical assigner.
         candidate_sets = {
             role: VerifiedSelectionBridge().candidates_for(
                 self._pool, self._current_health, role, _ROLE_REQUIREMENTS[role])
             for role in ("test", "review")
         }
-        assignment = self._role_assigner.assign(candidate_sets, "COMPLEX")
+        assigner = self._role_assigner if policy is None else \
+            PolicyConstrainedAssigner(policy)
+        assignment = assigner.assign(candidate_sets, "COMPLEX")
         tester = assignment.assignments.get("test")
         reviewer = assignment.assignments.get("review")
         if tester is None or reviewer is None:

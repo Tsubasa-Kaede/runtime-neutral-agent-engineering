@@ -2,7 +2,11 @@
 
 Parses args, calls an injected (pre-configured) facade, and emits a safe JSON
 summary. The CLI understands no runtimes and mints no budget/guard/state/
-adapter — it only forwards mode + task and renders the closed FacadeResult.
+adapter — it forwards mode + task and the parsed CollaborationPolicy
+(R7-A2 entry surface), then renders the closed FacadeResult.
+
+Policy construction fails here, honestly and before any facade access:
+argparse exits non-zero and no adapter is ever invoked.
 """
 from __future__ import annotations
 
@@ -10,6 +14,8 @@ import argparse
 import json
 import sys
 
+from collaboration_policy import CollaborationPolicy
+from host import DEFAULT_MIN_DISTINCT_RUNTIMES
 from mode_gate import Mode
 
 try:  # installed-package mode: dual_agent.cli -> package shim
@@ -27,8 +33,44 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Run a collaboration task")
     run.add_argument("--mode", choices=("off", "auto", "on"), default="auto",
                      help="off: no orchestration; auto: route by complexity; on: force dual")
+    run.add_argument("--runtimes", default=None, metavar="RUNTIME_ID[,RUNTIME_ID...]",
+                     help="runtime allowlist; comma-separated, deduplicated, sorted deterministically")
+    run.add_argument("--min-runtimes", type=int, default=None, metavar="N",
+                     help="desired minimum distinct runtimes (default: host deployment constant)")
+    run.add_argument("--max-runtimes", type=int, default=None, metavar="N",
+                     help="maximum distinct runtimes")
+    run.add_argument("--no-runtime-reuse", action="store_true", default=False,
+                     help="forbid one runtime serving multiple roles (injective assignment)")
     run.add_argument("task", help="the task to collaborate on")
     return parser
+
+
+def policy_from_args(args) -> CollaborationPolicy:
+    """Build the run-level CollaborationPolicy from parsed CLI flags.
+
+    The deployment-default minimum (host constant, single source — never a
+    magic number copied here) applies only when the user set NEITHER bound:
+    an explicit --max-runtimes alone is a pure upper bound (min stays None),
+    so "max only" combinations are never rejected for clashing with the
+    default. Every invalid combination the user DID express is rejected by
+    CollaborationPolicy's constructor BEFORE any facade access.
+    """
+    allowlist = None
+    if args.runtimes is not None:
+        entries = [entry.strip() for entry in args.runtimes.split(",")]
+        if any(not entry for entry in entries):
+            raise SystemExit(f"dual-agent: error: --runtimes entries must be non-empty")
+        allowlist = tuple(entries)
+    if args.min_runtimes is not None or args.max_runtimes is not None:
+        min_runtimes = args.min_runtimes
+    else:
+        min_runtimes = DEFAULT_MIN_DISTINCT_RUNTIMES
+    return CollaborationPolicy(
+        runtime_allowlist=allowlist,
+        min_distinct_runtimes=min_runtimes,
+        max_distinct_runtimes=args.max_runtimes,
+        allow_runtime_reuse=not args.no_runtime_reuse,
+    )
 
 
 def render_summary(result) -> str:
@@ -49,7 +91,13 @@ def run_cli(facade, argv=None) -> str:
     """Drive one run from argv; returns the safe JSON summary string."""
     args = build_parser().parse_args(argv)
     mode = _MODE_MAP[args.mode]
-    result = facade.run(task_id=args.task, task=args.task, prompt=args.task, mode=mode)
+    try:
+        policy = policy_from_args(args)
+    except ValueError as error:  # construction-time rejection: honest exit,
+        # non-zero, before any facade access and any adapter invocation.
+        raise SystemExit(f"dual-agent: error: invalid policy: {error}") from error
+    result = facade.run(task_id=args.task, task=args.task, prompt=args.task,
+                        mode=mode, policy=policy)
     return render_summary(result)
 
 

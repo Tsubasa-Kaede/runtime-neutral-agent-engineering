@@ -28,6 +28,13 @@ from verified_runtime_pool import VerifiedRuntimePool
 
 _CAPS_ALL = ("architecture", "coding", "review", "testing")
 
+# R7-A2 deployment default: the host-side desired minimum of distinct
+# runtimes for CLI-driven runs. A deployment constant ONLY — it lives here
+# (and is re-used by the CLI), never inside the runtime-neutral policy
+# core, and it never expands the pool: with a single admitted runtime the
+# policy honestly reports POLICY_COUNT_UNSATISFIED.
+DEFAULT_MIN_DISTINCT_RUNTIMES = 2
+
 
 _SINGLE_CODER_INSTRUCTION = (
     "You are the coder for one small, read-only task. "
@@ -102,11 +109,13 @@ class HostFacade(ProductionFacade):
 
     _evidence_provenance = "OFFLINE"
 
-    def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance=None):
+    def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance=None,
+            policy=None):
         return super().run(
             task_id, task, prompt, mode=mode,
             provenance=self._evidence_provenance if provenance is None
-            else provenance)
+            else provenance,
+            policy=policy)
 
 
 def build_facade(
