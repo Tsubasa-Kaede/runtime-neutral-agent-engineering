@@ -22,6 +22,7 @@ from collaboration_packet import (
     new_correlation_id,
 )
 from content_safety import packet_has_unsafe_content, sanitize_trace
+from execution_observation import ExecutionEventType
 from external_runtime import ExternalAgentRequest, InvocationStatus
 from handoff_context import HandoffError
 from structured_packets import ReviewPacket, TestPacket, serialize_packet
@@ -90,7 +91,7 @@ class VerificationCollaboration:
         self.state = state if state is not None else SharedCollaborationState()
 
     def run(self, task_id, tester_address, reviewer_address, architect_address,
-            provenance="OFFLINE"):
+            provenance="OFFLINE", correlation_id="", observation_emit=None):
         traces: list = []
 
         def outcome(status, test_envelope=None, review_envelope=None):
@@ -98,6 +99,37 @@ class VerificationCollaboration:
                 status=status, task_id=task_id, provenance=provenance,
                 test_envelope=test_envelope, review_envelope=review_envelope,
                 traces=tuple(traces))
+
+        def observe(event_type, stage, runtime_id, status, reason,
+                    duration_ms=None):
+            """R7-D2: verification 半场 STAGE/INVOCATION/HANDOFF 的唯一
+            权威发射缝。correlation 用 dual 半场结果（执行级关联）。"""
+            if observation_emit is None:
+                return
+            correlation = correlation_id or "UNCORRELATED"
+            observation_emit(event_type, stage=stage, runtime_id=runtime_id,
+                             status=status, reason=reason,
+                             correlation_id=correlation,
+                             duration_ms=duration_ms)
+
+        def runtime_of(address):
+            import json as _json
+            try:
+                parsed = _json.loads(address)
+            except (TypeError, ValueError):
+                return "UNKNOWN"
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], str):
+                return parsed[0]
+            return "UNKNOWN"
+
+        def invocation_finished(stage, runtime_id, result):
+            trace = getattr(result, "trace", None)
+            duration_ms = (getattr(trace, "duration_ms", None)
+                           if trace is not None else None)
+            status = getattr(result, "status", None)
+            value = getattr(status, "value", "UNKNOWN") if status is not None else "UNKNOWN"
+            observe(ExecutionEventType.INVOCATION_FINISHED, stage, runtime_id,
+                    value, value, duration_ms=duration_ms)
 
         # -- tester stage -------------------------------------------------
         try:
@@ -114,10 +146,16 @@ class VerificationCollaboration:
             self.state = self.state.append_failure(task_id, status="BUDGET_EXHAUSTED")
             return outcome(VerificationStatus.BUDGET_EXHAUSTED)
         self.loop_guard.record(task_id, "test", tester_address)
+        observe(ExecutionEventType.STAGE_STARTED, "tester",
+                runtime_of(tester_address), "STARTED", "ALLOW")
+        observe(ExecutionEventType.INVOCATION_STARTED, "tester",
+                runtime_of(tester_address), "STARTED", "ALLOW")
         tester_result = self.adapters[tester_address].invoke(ExternalAgentRequest(
             task_id=task_id, prompt=TESTER_INSTRUCTION + serialize_packet(impl_packet),
             agent_id=tester_address, role="tester",
             timeout_seconds=self.budget.timeout_seconds or 120))
+        invocation_finished("tester", runtime_of(tester_address),
+                            tester_result)
         if tester_result.trace is not None:
             traces.append(sanitize_trace(tester_result.trace))
             # 10H-I：观测到的 token 用量进入既有核算；"unknown"
@@ -138,6 +176,10 @@ class VerificationCollaboration:
             task_id, tester_address, reviewer_address,
             CollaborationPayloadType.TEST, test_packet, "tester", "reviewer", provenance)
         self.state = self.state.append_envelope(task_id, test_envelope, "REQUEST", "DELIVERED")
+        # R7-D2: HANDOFF（tester->reviewer）在真实 envelope 发送缝发射；
+        # 事件只携带生命周期事实，绝不复制 packet 内容。
+        observe(ExecutionEventType.HANDOFF, "tester",
+                runtime_of(reviewer_address), "DELIVERED", "DELIVERED")
 
         # -- reviewer stage ------------------------------------------------
         try:
@@ -154,12 +196,18 @@ class VerificationCollaboration:
             self.state = self.state.append_failure(task_id, status="BUDGET_EXHAUSTED")
             return outcome(VerificationStatus.BUDGET_EXHAUSTED, test_envelope)
         self.loop_guard.record(task_id, "review", reviewer_address)
+        observe(ExecutionEventType.STAGE_STARTED, "reviewer",
+                runtime_of(reviewer_address), "STARTED", "ALLOW")
+        observe(ExecutionEventType.INVOCATION_STARTED, "reviewer",
+                runtime_of(reviewer_address), "STARTED", "ALLOW")
         reviewer_result = self.adapters[reviewer_address].invoke(ExternalAgentRequest(
             task_id=task_id,
             prompt=REVIEWER_INSTRUCTION + serialize_packet(review_inputs[1])
                   + "\n\nTest packet:\n" + serialize_packet(review_inputs[2]),
             agent_id=reviewer_address, role="reviewer",
             timeout_seconds=self.budget.timeout_seconds or 120))
+        invocation_finished("reviewer", runtime_of(reviewer_address),
+                             reviewer_result)
         if reviewer_result.trace is not None:
             traces.append(sanitize_trace(reviewer_result.trace))
             # 10H-I：同 tester 阶段的用量传播语义。

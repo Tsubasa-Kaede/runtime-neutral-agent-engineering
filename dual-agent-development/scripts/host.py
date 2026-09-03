@@ -110,12 +110,13 @@ class HostFacade(ProductionFacade):
     _evidence_provenance = "OFFLINE"
 
     def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance=None,
-            policy=None):
+            observation_sink=None, policy=None):
+        # R7-D2: 旁路观察 sink 原样透传（默认 None = 零行为漂移）。
         return super().run(
             task_id, task, prompt, mode=mode,
             provenance=self._evidence_provenance if provenance is None
             else provenance,
-            policy=policy)
+            observation_sink=observation_sink, policy=policy)
 
 
 def build_facade(

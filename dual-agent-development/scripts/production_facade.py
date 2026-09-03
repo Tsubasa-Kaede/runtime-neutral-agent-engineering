@@ -22,6 +22,11 @@ from collaboration_session import CollaborationOutcome, CollaborationStatus, col
 from collaboration_policy import PolicyConstrainedAssigner
 from content_safety import contains_unsafe_content
 from execution_engine import ExecutionResult
+from execution_observation import (
+    ExecutionEvent,
+    ExecutionEventType,
+    ObservationError,
+)
 from mode_gate import Mode
 from role_assignment import ConvergingAssigner
 from verified_selection_bridge import VerifiedSelectionBridge
@@ -31,10 +36,57 @@ from verification_collaboration import VerificationCollaboration
 # Role-address suffix vocabulary (collab_agent_address uses tester/reviewer).
 _ADDRESS_ROLE = {"test": "tester", "review": "reviewer"}
 
+# R7-D2: 非协作路径（OFF/SINGLE）没有 correlation —— 事件 correlation_id
+# 的诚实占位（封闭常量，非空、无信息泄漏）。
+_UNCORRELATED = "UNCORRELATED"
+
+# 终态事件的 runtime 作用域占位：无协作发生（OFF/SINGLE 路径）时没有
+# 任何 runtime 拥有该终态事实 —— 封闭常量如实声明这一点。
+_ORCHESTRATION_SCOPE = "ORCHESTRATION"
+
 
 def _assert_clean(value: Any, field_name: str) -> None:
     if isinstance(value, str) and contains_unsafe_content(value):
         raise ValueError(f"{field_name} must not contain unsafe content")
+
+
+def _observation_channel(task_id, sink):
+    """R7-D2: execution-local 观察通道 —— 一次 facade.run 一个闭包。
+
+    序号 execution-scoped（从 0 严格递增，跨 execution 零共享、零模块
+    级状态）；sink 故障被 try/except 隔离（观察失败绝不影响执行流，
+    绝不 retry/reinvoke）。返回 emit(event_type, stage=..., runtime_id=...,
+    status=..., reason=..., correlation_id=..., duration_ms=None) callable；
+    事件构造期的 ObservationError 同样被隔离（旁路契约问题不是执行
+    问题）。sink=None 时返回 None（零发射、零行为漂移）。
+
+    runtime_id=None 语义：协作级事件（TERMINAL）不点名单一 runtime ——
+    通道回填本次 execution 的主 runtime（DECISION 记录的 architect
+    runtime）；没有协作发生时用 _ORCHESTRATION_SCOPE 占位。"""
+    counter = [0]
+    primary_runtime = [None]
+
+    def emit(event_type, *, stage, runtime_id, status, reason,
+             correlation_id, duration_ms=None):
+        if event_type is ExecutionEventType.DECISION:
+            primary_runtime[0] = runtime_id
+        resolved_runtime = (runtime_id if runtime_id is not None
+                            else (primary_runtime[0] or _ORCHESTRATION_SCOPE))
+        sequence = counter[0]
+        counter[0] += 1
+        try:
+            event = ExecutionEvent(
+                event_type=event_type, sequence=sequence,
+                task_id=task_id, correlation_id=correlation_id,
+                stage=stage, runtime_id=resolved_runtime, status=status,
+                reason=reason, duration_ms=duration_ms)
+        except ObservationError:
+            return  # 契约拒绝：旁路观察放弃该事件，执行流不受影响
+        try:
+            sink.on_event(event)
+        except Exception:
+            return  # sink 故障：隔离，绝不传播进执行控制流
+    return emit
 
 
 @dataclass(frozen=True)
@@ -85,15 +137,26 @@ class ProductionFacade:
         return self._final_state
 
     def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance="OFFLINE",
-            policy=None):
+            observation_sink=None, policy=None):
+        # R7-D2: observation sink 是旁路通道。sink=None（默认）时 emit 为
+        # None，全部发射点短路 —— 执行行为与 D1 之前逐字一致。sink 给定时
+        # 也绝不改变返回值/异常/重试/回退/预算/ledger/终态（emit 内部隔离
+        # sink 故障与契约拒绝）。
+        emit = _observation_channel(task_id, observation_sink) \
+            if observation_sink is not None else None
         mode = Mode(mode)
-        outcome = self._orchestrator.run(task_id, task, prompt, mode, provenance,
-                                         policy)
+        outcome = self._orchestrator.run(task_id, task, prompt, mode,
+                                         provenance,
+                                         observation_emit=emit, policy=policy)
         self._final_state = self._orchestrator.state
 
         if isinstance(outcome, ExecutionResult):
             path = "OFF" if mode is Mode.OFF else "SINGLE"
             status = outcome.status.value
+            if emit is not None:
+                emit(ExecutionEventType.TERMINAL, stage=path, runtime_id=None,
+                     status=status, reason=status,
+                     correlation_id=_UNCORRELATED)
             return FacadeResult(
                 status=status, mode=mode.value, path=path, task_id=task_id,
                 provenance=provenance, stages=(), failure_category=status,
@@ -107,6 +170,14 @@ class ProductionFacade:
         # the status value and every downstream field are unchanged.
         outcome_status = getattr(outcome.status, "value", outcome.status)
         if outcome_status != "SUCCESS":
+            # correlation：session outcome 携带（no-capable 路径为空串，
+            # 用诚实占位常量）。
+            failure_correlation = outcome.correlation_id or _UNCORRELATED
+            if emit is not None:
+                emit(ExecutionEventType.TERMINAL, stage="DUAL",
+                     runtime_id=None, status=outcome_status,
+                     reason=outcome_status,
+                     correlation_id=failure_correlation)
             return FacadeResult(
                 status=outcome_status, mode=mode.value, path="DUAL",
                 task_id=task_id, provenance=provenance, stages=(),
@@ -142,6 +213,12 @@ class ProductionFacade:
                 runtime_mode="",
                 reason=f"NO_VERIFICATION_CAPABILITY/ROLE_ASSIGNMENT={assignment.reason}")
             self._final_state = self._orchestrator._state
+            if emit is not None:
+                emit(ExecutionEventType.TERMINAL, stage="DUAL",
+                     runtime_id=None,
+                     status="NO_VERIFICATION_CAPABILITY",
+                     reason="NO_VERIFICATION_CAPABILITY",
+                     correlation_id=outcome.correlation_id or _UNCORRELATED)
             return FacadeResult(
                 status="NO_VERIFICATION_CAPABILITY", mode=mode.value, path="DUAL",
                 task_id=task_id, provenance=provenance,
@@ -158,7 +235,9 @@ class ProductionFacade:
             self._verification_adapters, self._budget, self._usage, self._loop_guard,
             state=self._orchestrator.state)
         voutcome = verification.run(task_id, tester_address, reviewer_address,
-                                    architect_address, provenance)
+                                    architect_address, provenance,
+                                    correlation_id=outcome.correlation_id,
+                                    observation_emit=emit)
         self._final_state = verification.state
 
         if voutcome.status.value == "SUCCESS":
@@ -170,6 +249,11 @@ class ProductionFacade:
                 ("architect", "coder") if "REVIEWER" in voutcome.status.value else ("architect", "coder"))
             stage_counts = {"architect": 1, "coder": 1}
             failure = voutcome.status.value
+        if emit is not None:
+            emit(ExecutionEventType.TERMINAL, stage="FOUR_STAGE",
+                 runtime_id=None, status=voutcome.status.value,
+                 reason=voutcome.status.value,
+                 correlation_id=outcome.correlation_id or _UNCORRELATED)
         return FacadeResult(
             status=voutcome.status.value, mode=mode.value, path="FOUR_STAGE",
             task_id=task_id, provenance=provenance, stages=stages,

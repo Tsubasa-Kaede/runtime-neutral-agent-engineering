@@ -20,6 +20,7 @@ from collaboration_session import (
     collab_agent_address,
 )
 from collaboration_state import TraceSummary
+from execution_observation import ExecutionEventType
 from mode_gate import Mode, ModeGate
 from role_assignment import ConvergingAssigner
 from task_classifier import Complexity
@@ -63,7 +64,7 @@ class CollaborationOrchestrator:
         return self._state
 
     def run(self, task_id, task, prompt, mode=Mode.AUTO, provenance="OFFLINE",
-            policy=None):
+            observation_emit=None, policy=None):
         decision = ModeGate().decide(mode, task)
         if decision.mode is Mode.OFF:
             self._state = self._state.append_decision(
@@ -74,7 +75,7 @@ class CollaborationOrchestrator:
         forced = decision.mode is Mode.ON
         if forced or decision.complexity is Complexity.COMPLEX:
             return self._run_dual(task_id, task, prompt, mode, decision,
-                                  provenance, policy)
+                                  provenance, policy, observation_emit)
         self._state = self._state.append_decision(
             task_id, mode=decision.mode.value,
             complexity=decision.complexity.value, path="SINGLE",
@@ -96,7 +97,7 @@ class CollaborationOrchestrator:
         }
 
     def _run_dual(self, task_id, task, prompt, mode, decision, provenance,
-                  policy=None):
+                  policy=None, observation_emit=None):
         # 10H-E: architect/coder joint choice goes through the injected
         # role-assignment policy (default = historical candidates[0]
         # fold). Candidates come only from the bridge sets. A per-run
@@ -148,6 +149,16 @@ class CollaborationOrchestrator:
             runtime_mode=runtime_mode,
             reason=f"{decision.reason}/COVERAGE=ARCHITECT_CODER"
                    f"/ROLE_ASSIGNMENT={assignment.reason}")
+        # R7-D2: DECISION 事件在真实 dual 决策缝（correlation 已铸造、
+        # 决策记录已 append）同步发射 —— 唯一权威发射者；sink 故障被
+        # emit helper 隔离，绝不影响执行流（旁路观察，不是控制流）。
+        if observation_emit is not None:
+            observation_emit(
+                ExecutionEventType.DECISION, stage="dual",
+                runtime_id=architect.runtime_id, status=decision.mode.value,
+                reason=f"{decision.reason}/COVERAGE=ARCHITECT_CODER"
+                       f"/ROLE_ASSIGNMENT={assignment.reason}",
+                correlation_id=correlation_id)
 
         usage_before = self._usage.total_agent_calls
         session = self._session_factory()
@@ -155,7 +166,7 @@ class CollaborationOrchestrator:
             task_id=task_id, task=task,
             architect_address=architect_address, coder_address=coder_address,
             correlation_id=correlation_id, provenance=provenance,
-            runtime_mode=runtime_mode)
+            runtime_mode=runtime_mode, observation_emit=observation_emit)
         calls_made = self._usage.total_agent_calls - usage_before
         self._record_outcome(task_id, correlation_id, outcome)
 

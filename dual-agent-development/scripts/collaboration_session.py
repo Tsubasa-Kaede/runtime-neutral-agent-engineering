@@ -22,6 +22,7 @@ from collaboration_packet import (
     serialize_packet,
 )
 from content_safety import SECRET_MARKERS, packet_has_unsafe_content, sanitize_trace
+from execution_observation import ExecutionEventType
 from external_runtime import ExternalAgentRequest, InvocationStatus
 from remote_transport import RemoteDeliveryStatus
 from structured_packets import ArchitecturePacket, ImplementationPacket
@@ -81,6 +82,18 @@ def _assert_outcome_text_clean(value, field_name: str) -> None:
     for marker in SECRET_MARKERS:
         if marker in lowered:
             raise ValueError(f"{field_name} must not contain secret-shaped content")
+
+
+def _runtime_of_address(address: str):
+    """地址抽象的第一元素（runtime id 投影）——runtime-neutral，无
+    runtime 名硬编码；非地址形状返回占位符（观察绝不抛错进执行流）。"""
+    try:
+        parsed = json.loads(address)
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], str):
+        return parsed[0]
+    return "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -161,7 +174,8 @@ class CollaborationSession:
         self.loop_guard = loop_guard
 
     def run(self, task_id, task, architect_address, coder_address,
-            correlation_id=None, provenance="OFFLINE", runtime_mode=""):
+            correlation_id=None, provenance="OFFLINE", runtime_mode="",
+            observation_emit=None):
         correlation = correlation_id or new_correlation_id()
         traces: list = []
         receipts: list = []
@@ -173,6 +187,19 @@ class CollaborationSession:
                 reply_envelope=reply_envelope,
                 receipts=tuple(receipts), traces=tuple(traces))
 
+        def observe(event_type, stage, runtime_id, status, reason,
+                    duration_ms=None):
+            """R7-D2: STAGE/INVOCATION/HANDOFF 的唯一权威发射缝。
+            仅真正进入 stage/adapter.invoke 时发射；guard/budget 拒绝在
+            发射之前返回（stage 从未开始，如实零事件）。emit helper
+            自身隔离 sink 故障。"""
+            if observation_emit is None:
+                return
+            observation_emit(event_type, stage=stage, runtime_id=runtime_id,
+                             status=status, reason=reason,
+                             correlation_id=correlation,
+                             duration_ms=duration_ms)
+
         # --- architect stage ---
         if self.loop_guard.check(task_id, "architect", architect_address) != "ALLOW":
             return outcome(CollaborationStatus.LOOP_GUARD_REJECTED)
@@ -181,12 +208,19 @@ class CollaborationSession:
         except BudgetExceeded:
             return outcome(CollaborationStatus.BUDGET_EXHAUSTED)
         self.loop_guard.record(task_id, "architect", architect_address)
+        observe(ExecutionEventType.STAGE_STARTED, "architect",
+                _runtime_of_address(architect_address), "STARTED", "ALLOW")
+        observe(ExecutionEventType.INVOCATION_STARTED, "architect",
+                _runtime_of_address(architect_address), "STARTED", "ALLOW")
         architect_result = self.adapters[architect_address].invoke(ExternalAgentRequest(
             task_id=task_id,
             prompt=ARCHITECT_INSTRUCTION + f'task_id must be exactly "{task_id}".\n\nTask: ' + task,
             agent_id=architect_address, role="architect",
             timeout_seconds=self.budget.timeout_seconds or 120,
         ))
+        _observe_invocation_finished("architect",
+                                 _runtime_of_address(architect_address),
+                                 architect_result, observe)
         if architect_result.trace is not None:
             traces.append(sanitize_trace(architect_result.trace))
             # 10H-I：观测到的 token 用量进入既有核算；"unknown"
@@ -217,6 +251,9 @@ class CollaborationSession:
         receipts.append(receipt)
         if receipt.status is not RemoteDeliveryStatus.DELIVERED:
             return outcome(CollaborationStatus.TRANSPORT_FAILED, envelope)
+        observe(ExecutionEventType.HANDOFF, "architect",
+                _runtime_of_address(coder_address), "DELIVERED",
+                "DELIVERED")
 
         # --- coder stage ---
         coder_envelope = self.transport.receive(coder_address)
@@ -231,12 +268,19 @@ class CollaborationSession:
         except BudgetExceeded:
             return outcome(CollaborationStatus.BUDGET_EXHAUSTED, envelope)
         self.loop_guard.record(task_id, "coder", coder_address)
+        observe(ExecutionEventType.STAGE_STARTED, "coder",
+                _runtime_of_address(coder_address), "STARTED", "ALLOW")
+        observe(ExecutionEventType.INVOCATION_STARTED, "coder",
+                _runtime_of_address(coder_address), "STARTED", "ALLOW")
         coder_result = self.adapters[coder_address].invoke(ExternalAgentRequest(
             task_id=task_id,
             prompt=CODER_INSTRUCTION + serialize_packet(coder_envelope.payload),
             agent_id=coder_address, role="coder",
             timeout_seconds=self.budget.timeout_seconds or 120,
         ))
+        _observe_invocation_finished("coder",
+                                 _runtime_of_address(coder_address),
+                                 coder_result, observe)
         if coder_result.trace is not None:
             traces.append(sanitize_trace(coder_result.trace))
             # 10H-I：同 architect 阶段的用量传播语义。
@@ -271,4 +315,19 @@ class CollaborationSession:
             return outcome(CollaborationStatus.TRANSPORT_FAILED, envelope, reply)
         if final.correlation_id != correlation:
             return outcome(CollaborationStatus.CORRELATION_MISMATCH, envelope, reply)
+        observe(ExecutionEventType.HANDOFF, "coder",
+                _runtime_of_address(architect_address), "DELIVERED",
+                "DELIVERED")
         return outcome(CollaborationStatus.SUCCESS, envelope, reply)
+
+
+def _observe_invocation_finished(stage, runtime_id, result, observe):
+    """INVOCATION_FINISHED：invoke 返回后立即发射（真实 invocation 结束）。
+    status 复用既有 InvocationStatus 词表；duration_ms 透传 trace 的
+    合法 deterministic 值（无则 None）——绝不引入时间 API。"""
+    trace = getattr(result, "trace", None)
+    duration_ms = getattr(trace, "duration_ms", None) if trace is not None else None
+    status = getattr(result, "status", None)
+    status_value = getattr(status, "value", "UNKNOWN") if status is not None else "UNKNOWN"
+    observe(ExecutionEventType.INVOCATION_FINISHED, stage, runtime_id,
+            status_value, status_value, duration_ms=duration_ms)
