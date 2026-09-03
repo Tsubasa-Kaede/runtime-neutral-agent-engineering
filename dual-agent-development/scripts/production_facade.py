@@ -101,11 +101,16 @@ class ProductionFacade:
                               "stage_counts": {}})
 
         # outcome is a CollaborationOutcome (DUAL architect+coder)
-        if outcome.status is not CollaborationStatus.SUCCESS:
+        # R7-A3: the ON-mode no-capable-agent terminal returns a bare
+        # string status (DUAL_NO_CAPABLE_AGENT is deliberately not a
+        # session status); normalize it for the closed FacadeResult —
+        # the status value and every downstream field are unchanged.
+        outcome_status = getattr(outcome.status, "value", outcome.status)
+        if outcome_status != "SUCCESS":
             return FacadeResult(
-                status=outcome.status.value, mode=mode.value, path="DUAL",
+                status=outcome_status, mode=mode.value, path="DUAL",
                 task_id=task_id, provenance=provenance, stages=(),
-                failure_category=outcome.status.value,
+                failure_category=outcome_status,
                 safe_summary={"task_id": task_id, "provenance": provenance,
                               "stage_counts": {}})
 
@@ -124,7 +129,19 @@ class ProductionFacade:
         assignment = assigner.assign(candidate_sets, "COMPLEX")
         tester = assignment.assignments.get("test")
         reviewer = assignment.assignments.get("review")
+        # R7-A3: the verification-half assignment reason surfaces through the
+        # existing DECISION channel (no new record type, additive only). The
+        # path/mode/complexity mirror the orchestrator's DUAL decision so the
+        # ledger stays a homogeneous decision sequence; without a per-run
+        # policy the record is emitted with the assignment reason verbatim,
+        # which keeps the DUAL/FOUR_STAGE outcomes identical — only the
+        # ledger gains one DECISION record.
         if tester is None or reviewer is None:
+            self._orchestrator._state = self._orchestrator.state.append_decision(
+                task_id, mode=mode.value, complexity="COMPLEX", path="DUAL",
+                runtime_mode="",
+                reason=f"NO_VERIFICATION_CAPABILITY/ROLE_ASSIGNMENT={assignment.reason}")
+            self._final_state = self._orchestrator._state
             return FacadeResult(
                 status="NO_VERIFICATION_CAPABILITY", mode=mode.value, path="DUAL",
                 task_id=task_id, provenance=provenance,

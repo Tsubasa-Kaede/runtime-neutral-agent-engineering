@@ -109,10 +109,18 @@ class CollaborationOrchestrator:
         architect = assignment.assignments.get("architect")
         coder = assignment.assignments.get("coder")
         if architect is None or coder is None:
+            # R7-A3: preserve the assignment reason on the no-capable-agent
+            # terminal — additive observability only. The DUAL_NO_CAPABLE_AGENT
+            # status, the failure record and the fallback rules are verbatim;
+            # without a per-run policy the reason stays the exact historical
+            # string (zero drift).
+            none_reason = DUAL_NO_CAPABLE_AGENT
+            if policy is not None and assignment.reason:
+                none_reason = f"{DUAL_NO_CAPABLE_AGENT}/ROLE_ASSIGNMENT={assignment.reason}"
             self._state = self._state.append_decision(
                 task_id, mode=decision.mode.value,
                 complexity=decision.complexity.value, path="DUAL",
-                runtime_mode="", reason=DUAL_NO_CAPABLE_AGENT)
+                runtime_mode="", reason=none_reason)
             self._state = self._state.append_failure(
                 task_id, status=DUAL_NO_CAPABLE_AGENT)
             if decision.mode is Mode.ON:
