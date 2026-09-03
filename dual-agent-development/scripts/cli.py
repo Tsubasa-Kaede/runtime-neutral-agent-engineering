@@ -25,6 +25,14 @@ except ImportError:  # source-tree flat-import mode (tests/examples)
 
 _MODE_MAP = {"off": Mode.OFF, "auto": Mode.AUTO, "on": Mode.ON}
 
+# R7-A2 advisory precheck: the four-stage pipeline has exactly four role
+# slots (architect/coder/tester/reviewer), so a min/max distinct-runtime
+# bound above the slot count is a pure configuration error — rejected at
+# the entry layer BEFORE any facade access. The engine never learns this
+# rule (collaboration_policy.py stays slot-count-agnostic); the precheck
+# reads no health, no auth, no pool, and touches no runtime.
+MAX_ROLE_SLOTS = 4
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dual-agent", description="Dual-agent collaboration entrypoint")
@@ -65,6 +73,12 @@ def policy_from_args(args) -> CollaborationPolicy:
         min_runtimes = args.min_runtimes
     else:
         min_runtimes = DEFAULT_MIN_DISTINCT_RUNTIMES
+    for name, value in (("--min-runtimes", min_runtimes),
+                        ("--max-runtimes", args.max_runtimes)):
+        if value is not None and value > MAX_ROLE_SLOTS:
+            raise SystemExit(
+                f"dual-agent: error: {name} {value} exceeds the four "
+                f"collaboration role slots (max {MAX_ROLE_SLOTS})")
     return CollaborationPolicy(
         runtime_allowlist=allowlist,
         min_distinct_runtimes=min_runtimes,
