@@ -88,6 +88,7 @@ ADAPTER_DECLARATIONS = {
     "pi_adapter": {"level": L2, "usage": CAPTURE},
     "codex_adapter": {"level": L2, "usage": HONEST_UNKNOWN},
     "gemini_adapter": {"level": L2, "usage": CAPTURE},
+    "qwen_adapter": {"level": L2, "usage": CAPTURE},
     "tiny_agents_adapter": {"level": L0, "usage": HONEST_UNKNOWN},
 }
 
@@ -896,6 +897,74 @@ class GeminiConformanceTests(Level1HealthSurfaceMixin,
 GeminiConformanceTests._build_fixtures()
 
 
+class QwenConformanceTests(Level1HealthSurfaceMixin,
+                           Level0InvocationContractMixin, unittest.TestCase):
+    module_name = "qwen_adapter"
+    runtime_label = "qwen-code"
+
+    @classmethod
+    def make_adapter(cls):
+        from qwen_adapter import QwenCodeAdapter
+        profile = RuntimeProfile("coding-agent", "qwen-code", "qwen",
+                                 None, "coder", frozenset())
+        return QwenCodeAdapter(profile=profile, executable="qwen")
+
+    @classmethod
+    def from_environment_absent(cls):
+        from qwen_adapter import QwenCodeAdapter
+        with patch("qwen_adapter.shutil.which", return_value=None):
+            return QwenCodeAdapter.from_environment()
+
+    @staticmethod
+    def _qwen_array(result_text="ok", usage=None):
+        import json
+        payload = [
+            {"type": "system", "subtype": "session_start",
+             "model": "qwen3-coder-plus"},
+            {"type": "assistant",
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": result_text}]}},
+            {"type": "result", "subtype": "success", "is_error": False,
+             "duration_ms": 12, "result": result_text},
+        ]
+        if usage is not None:
+            payload[-1]["usage"] = usage
+        return json.dumps(payload) + "\n"
+
+    @classmethod
+    def _build_fixtures(cls):
+        cls.stdout_ok = cls._qwen_array("ok")
+        cls.stdout_nonascii = cls._qwen_array("résumé → 中文 ✓")
+        cls.stdout_usage_valid = cls._qwen_array(
+            "ok", usage={"input_tokens": 160, "output_tokens": 60})
+        cls.stdout_usage_missing = cls._qwen_array("ok")
+        cls.stdout_usage_malformed = cls._qwen_array(
+            "ok", usage={"input_tokens": "lots", "output_tokens": -5})
+        cls.stdout_usage_partial = cls._qwen_array(
+            "ok", usage={"input_tokens": 90})
+        cls.stdout_usage_bool = cls._qwen_array(
+            "ok", usage={"input_tokens": True, "output_tokens": False})
+
+    # health fixtures: qwen auth status text vocabulary
+    auth_ready_stdout = "logged in\n"
+    auth_not_ready_stdout = "not logged in\n"
+
+    @property
+    def auth_state_ready(self):
+        from runtime_status import AuthenticationState
+        return AuthenticationState.AUTHENTICATED
+
+    @property
+    def auth_state_not_ready(self):
+        from runtime_status import AuthenticationState
+        return AuthenticationState.AUTH_REQUIRED
+
+    usage_expected = (160, 60)
+
+
+QwenConformanceTests._build_fixtures()
+
+
 class TinyAgentsConformanceTests(Level0InvocationContractMixin,
                                  unittest.TestCase):
     module_name = "tiny_agents_adapter"
@@ -1043,6 +1112,7 @@ _FIXTURE_BY_MODULE = {
     "pi_adapter": PiConformanceTests,
     "codex_adapter": CodexConformanceTests,
     "gemini_adapter": GeminiConformanceTests,
+    "qwen_adapter": QwenConformanceTests,
     "tiny_agents_adapter": TinyAgentsConformanceTests,
 }
 
