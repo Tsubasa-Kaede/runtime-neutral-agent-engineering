@@ -387,9 +387,10 @@ class SourceDisciplineTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+# R7-D4 时代的 4 文件保护集中，agent_identity.py / test_agent_identity.py
+# 已在 V3.0-A checkpoint（d152d4c）合法转为 tracked —— 当前受保护
+# untracked 集合只剩 R7-B / R7-C 两个测试文件。
 _PROTECTED = (
-    "dual-agent-development/scripts/agent_identity.py",
-    "tests/test_agent_identity.py",
     "tests/test_policy_boundary_qualification.py",
     "tests/test_real_cli_policy_collaboration.py",
 )
