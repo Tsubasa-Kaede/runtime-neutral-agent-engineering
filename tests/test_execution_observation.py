@@ -607,12 +607,16 @@ class ArchitectureInvariantTests(unittest.TestCase):
         # session/verification —— 各自独占的生命周期事实的唯一权威发射
         # 者）。其余 scripts 模块零引用（零 import、零提及），防止接线
         # 蠕变到 adapter/pool/health/ledger 等禁改组件。
+        # R7-D4 扩展：第一个授权消费者（console projection 本体 + CLI
+        # 组合点）加入授权集 —— 消费端只引用契约，绝不反向影响执行。
         authorized = {
             "execution_observation.py",  # 契约本体
             "collaboration_orchestrator.py",   # DECISION
             "collaboration_session.py",        # STAGE/INVOCATION/HANDOFF(dual)
             "verification_collaboration.py",   # STAGE/INVOCATION/HANDOFF(verify)
             "production_facade.py",            # TERMINAL + execution 通道
+            "console_observation.py",          # R7-D4 消费者本体
+            "cli.py",                          # R7-D4 CLI 组合点
         }
         for path in sorted(SCRIPTS.glob("*.py")):
             if path.name in authorized:

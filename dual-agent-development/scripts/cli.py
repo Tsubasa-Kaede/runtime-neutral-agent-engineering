@@ -15,6 +15,7 @@ import json
 import sys
 
 from collaboration_policy import CollaborationPolicy
+from console_observation import ConsoleObservationSink
 from host import DEFAULT_MIN_DISTINCT_RUNTIMES
 from mode_gate import Mode
 
@@ -49,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="maximum distinct runtimes")
     run.add_argument("--no-runtime-reuse", action="store_true", default=False,
                      help="forbid one runtime serving multiple roles (injective assignment)")
+    run.add_argument("--observe", action="store_true", default=False,
+                     help="stream human-readable execution observation "
+                          "events to stderr (stdout JSON stays unchanged)")
     run.add_argument("task", help="the task to collaborate on")
     return parser
 
@@ -110,8 +114,11 @@ def run_cli(facade, argv=None) -> str:
     except ValueError as error:  # construction-time rejection: honest exit,
         # non-zero, before any facade access and any adapter invocation.
         raise SystemExit(f"dual-agent: error: invalid policy: {error}") from error
+    # R7-D4: observation 是旁路消费，默认 OFF = 零行为漂移；projection
+    # 格式化住在 console_observation 模块 —— CLI 只做 parse -> compose。
+    sink = ConsoleObservationSink(sys.stderr) if args.observe else None
     result = facade.run(task_id=args.task, task=args.task, prompt=args.task,
-                        mode=mode, policy=policy)
+                        mode=mode, observation_sink=sink, policy=policy)
     return render_summary(result)
 
 
