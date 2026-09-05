@@ -219,7 +219,7 @@ class TinyAgentsAdapter:
         # 的变量；父环境中任何携带凭据的内容都到不了子进程。
         return {
             key: value
-            for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT")
+            for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP")
             if (value := os.environ.get(key))
         }
 

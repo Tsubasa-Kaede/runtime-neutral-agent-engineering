@@ -110,7 +110,7 @@ class DiscoverySemanticsTests(unittest.TestCase):
         # Never a shell string.
         self.assertFalse(args.kwargs.get("shell", False))
         # Environment is a minimal, explicitly constructed dict with the
-        # documented well-defined variables (PATH/HOME/USERPROFILE).
+        # documented well-defined variables (PATH/HOME/USERPROFILE/TEMP/TMP).
         env = args.kwargs.get("env")
         self.assertIsInstance(env, dict)
         self.assertIn("PATH", env)
@@ -118,6 +118,9 @@ class DiscoverySemanticsTests(unittest.TestCase):
             self.assertIn("HOME", env)
         if os.environ.get("USERPROFILE"):
             self.assertIn("USERPROFILE", env)
+        for var in ("TEMP", "TMP"):
+            if os.environ.get(var):
+                self.assertIn(var, env)
         # Bounded subprocess timeout was forwarded into communicate().
         self.assertEqual(fake_process.timeout, adapter_probe.DISCOVERY_TIMEOUT)
         # Probe reports a discovered executable and parsed version.

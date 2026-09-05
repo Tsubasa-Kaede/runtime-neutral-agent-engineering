@@ -354,7 +354,7 @@ class GeminiAdapter:
         # 白名单，而非黑名单：子进程只收到它执行与定位自身状态
         # 所需的变量 —— 父环境中的其余内容（尤其是携带凭据的
         # 变量）一概不转发。
-        return {key: value for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT")
+        return {key: value for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP")
                 if (value := os.environ.get(key))}
 
     @staticmethod

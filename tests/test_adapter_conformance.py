@@ -94,13 +94,16 @@ ADAPTER_DECLARATIONS = {
 }
 
 # Host variables every adapter may forward (locating/executing only).
+# TEMP/TMP are the Windows temp-dir convention: without them a native
+# child resolves its temp dir onto USERPROFILE (GetTempPath fallback
+# chain) and refuses to write helper binaries under the user's home.
 # Adapters may additionally inject their OWN documented safety
 # disable-flags — owned by the adapter, never forwarded from the
 # parent environment (e.g. opencode's autoupdate kill-switch, whose
 # default-on self-update side effect a single invocation must not
 # trigger).
 ENV_WHITELIST = {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
-                 "OPENCODE_DISABLE_AUTOUPDATE"}
+                 "TEMP", "TMP", "OPENCODE_DISABLE_AUTOUPDATE"}
 PROVIDER_KEY_VARS = (
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY",
 )
@@ -236,6 +239,11 @@ class Level0InvocationContractMixin:
         env = popen.call_args.kwargs.get("env")
         self.assertIsInstance(env, dict)
         self.assertIn("PATH", env)
+        # Present host TEMP/TMP must reach the child: without them a
+        # native CLI resolves its temp dir onto USERPROFILE.
+        for var in ("TEMP", "TMP"):
+            if os.environ.get(var):
+                self.assertIn(var, env)
         self.assertLessEqual(set(env), ENV_WHITELIST)
         for var in PROVIDER_KEY_VARS:
             self.assertNotIn(var, env)
@@ -275,6 +283,9 @@ class Level0InvocationContractMixin:
         env = run.call_args.kwargs.get("env")
         self.assertIsInstance(env, dict)
         self.assertIn("PATH", env)
+        for var in ("TEMP", "TMP"):
+            if os.environ.get(var):
+                self.assertIn(var, env)
         self.assertLessEqual(set(env), ENV_WHITELIST)
         for var in PROVIDER_KEY_VARS:
             self.assertNotIn(var, env)
@@ -484,6 +495,9 @@ class Level1HealthSurfaceMixin:
         self.assertIsInstance(argv, list)
         self.assertFalse(run.call_args.kwargs.get("shell", False))
         env = run.call_args.kwargs.get("env") or {}
+        for var in ("TEMP", "TMP"):
+            if os.environ.get(var):
+                self.assertIn(var, env)
         self.assertLessEqual(set(env), ENV_WHITELIST)
         for var in PROVIDER_KEY_VARS:
             self.assertNotIn(var, env)

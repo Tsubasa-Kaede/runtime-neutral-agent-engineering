@@ -299,7 +299,8 @@ class PiAdapterTests(unittest.TestCase):
         self.assertIn("PATH", kwargs["env"])
         self.assertLessEqual(
             set(kwargs["env"]),
-            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_probe_failure_redacts_secret_material(self):
         completed = subprocess.CompletedProcess(
@@ -358,7 +359,8 @@ class PiAdapterTests(unittest.TestCase):
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(
             set(kwargs["env"]),
-            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_check_authentication_not_ready_maps_to_auth_required(self):
         completed = subprocess.CompletedProcess(

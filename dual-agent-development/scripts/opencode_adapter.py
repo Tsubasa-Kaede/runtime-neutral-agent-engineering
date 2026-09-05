@@ -43,7 +43,7 @@ stored in the credentials file"）"观测"：文本优先分类化，输出
 打开 ~/.local/share/opencode/auth.json。
 
 环境边界：_minimal_env 白名单（PATH/HOME/USERPROFILE/
-SYSTEMROOT）之外仅注入一个 adapter 自有的安全旋钮
+SYSTEMROOT/TEMP/TMP）之外仅注入一个 adapter 自有的安全旋钮
 OPENCODE_DISABLE_AUTOUPDATE=1 —— 官方文档 autoupdate 默认开，
 一次调用绝不应触发 runtime 自更新副作用。--dir 是官方工作目录
 flag，但冻结的 ExternalAgentRequest 不携带 cwd 字段，本模块不
@@ -480,7 +480,7 @@ class OpenCodeAdapter:
         # 一概不转发。唯一的额外项是 adapter 自有的安全旋钮
         # OPENCODE_DISABLE_AUTOUPDATE=1：官方文档 autoupdate 默认
         # 开，一次调用绝不应触发 runtime 自更新副作用。
-        env = {key: value for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT")
+        env = {key: value for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP")
                if (value := os.environ.get(key))}
         env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         return env

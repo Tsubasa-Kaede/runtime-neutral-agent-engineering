@@ -247,7 +247,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertIn("PATH", env)
         self.assertLessEqual(set(env), {
             "PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
-            "OPENCODE_DISABLE_AUTOUPDATE",
+            "TEMP", "TMP", "OPENCODE_DISABLE_AUTOUPDATE",
         })
         self.assertEqual(env.get("OPENCODE_DISABLE_AUTOUPDATE"), "1")
 
@@ -694,7 +694,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(set(kwargs["env"]), {
             "PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
-            "OPENCODE_DISABLE_AUTOUPDATE",
+            "TEMP", "TMP", "OPENCODE_DISABLE_AUTOUPDATE",
         })
         self.assertEqual(kwargs.get("encoding"), "utf-8")
         self.assertEqual(kwargs.get("errors"), "replace")
@@ -746,7 +746,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(set(kwargs["env"]), {
             "PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
-            "OPENCODE_DISABLE_AUTOUPDATE",
+            "TEMP", "TMP", "OPENCODE_DISABLE_AUTOUPDATE",
         })
 
     def test_check_authentication_not_authenticated_is_auth_required(self):

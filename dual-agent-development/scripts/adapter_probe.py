@@ -60,11 +60,11 @@ def _build_minimal_env() -> Dict[str, str]:
     """Construct a minimal child environment with only well-defined variables.
 
     The child does not inherit the parent environment wholesale. Only PATH,
-    HOME/USERPROFILE, and SYSTEMROOT (Windows) are copied when present. No
-    secret-bearing variables are ever forwarded for discovery.
+    HOME/USERPROFILE, TEMP/TMP, and SYSTEMROOT (Windows) are copied when
+    present. No secret-bearing variables are ever forwarded for discovery.
     """
     env: Dict[str, str] = {}
-    for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT"):
+    for key in ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP"):
         value = os.environ.get(key)
         if value:
             env[key] = value

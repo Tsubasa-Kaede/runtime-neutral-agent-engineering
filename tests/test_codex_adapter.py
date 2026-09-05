@@ -273,7 +273,8 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertIn("PATH", kwargs["env"])
         self.assertLessEqual(
             set(kwargs["env"]),
-            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_probe_decodes_child_streams_as_utf_8(self):
         completed = subprocess.CompletedProcess(
@@ -435,7 +436,8 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(
             set(kwargs["env"]),
-            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_check_authentication_raw_output_never_leaves_adapter(self):
         stdout = "Logged in using an API key - SENTINEL-raw-stdout-98765"

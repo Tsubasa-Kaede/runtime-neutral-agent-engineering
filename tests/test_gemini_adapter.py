@@ -132,7 +132,8 @@ class GeminiAdapterTests(unittest.TestCase):
         self.assertIsInstance(env, dict)
         self.assertIn("PATH", env)
         self.assertLessEqual(
-            set(env), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            set(env), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
         for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
                     "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"):
             self.assertNotIn(var, env)
@@ -373,7 +374,8 @@ class GeminiAdapterTests(unittest.TestCase):
         self.assertEqual(argv, ["gemini", "--version"])
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(
-            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
         self.assertEqual(kwargs.get("encoding"), "utf-8")
         self.assertEqual(kwargs.get("errors"), "replace")
 
@@ -423,7 +425,8 @@ class GeminiAdapterTests(unittest.TestCase):
         self.assertIsInstance(argv, list)
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(
-            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_check_authentication_not_logged_in_is_auth_required(self):
         completed = subprocess.CompletedProcess(

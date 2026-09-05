@@ -151,7 +151,8 @@ class QwenCodeAdapterTests(unittest.TestCase):
         self.assertIsInstance(env, dict)
         self.assertIn("PATH", env)
         self.assertLessEqual(
-            set(env), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            set(env), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_invoke_does_not_forward_credential_or_qwen_env(self):
         # 即使父环境带着凭据/CLI 配置变量，子进程也一概收不到：
@@ -610,7 +611,8 @@ class QwenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(argv, ["qwen", "--version"])
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(
-            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
         self.assertEqual(kwargs.get("encoding"), "utf-8")
         self.assertEqual(kwargs.get("errors"), "replace")
 
@@ -672,7 +674,8 @@ class QwenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(argv, ["qwen", "auth", "status"])
         self.assertFalse(kwargs["shell"])
         self.assertLessEqual(
-            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            set(kwargs["env"]), {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_check_authentication_not_logged_in_is_auth_required(self):
         completed = subprocess.CompletedProcess(

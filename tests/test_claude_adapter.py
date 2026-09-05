@@ -144,7 +144,8 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertIn("PATH", kwargs["env"])
         self.assertLessEqual(
             set(kwargs["env"]),
-            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
 
     def test_probe_decodes_child_streams_as_utf_8(self):
         completed = subprocess.CompletedProcess(
@@ -212,7 +213,8 @@ class ClaudeCodeAdapterTests(unittest.TestCase):
         self.assertIn("PATH", kwargs["env"])
         self.assertLessEqual(
             set(kwargs["env"]),
-            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"})
+            {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+             "TEMP", "TMP"})
         self.assertEqual(kwargs.get("encoding"), "utf-8")
         self.assertEqual(kwargs.get("errors"), "replace")
         from runtime_status import AuthenticationState
