@@ -15,7 +15,7 @@ What this suite is NOT (hard boundary, locked by ConformanceBoundaryTests):
 
 Declaration levels (the intended design, not a test omission):
 
-- L0 = invocation contract only (tiny-agents: its runner CLI has no
+- L0 = invocation contract only (tiny-agents, cline: their CLIs have no
   observable read-only auth surface, so health methods must NOT be faked)
 - L1 = invocation + health surface
 - L2 = invocation + health + a declared usage behavior
@@ -90,6 +90,7 @@ ADAPTER_DECLARATIONS = {
     "gemini_adapter": {"level": L2, "usage": CAPTURE},
     "qwen_adapter": {"level": L2, "usage": CAPTURE},
     "opencode_adapter": {"level": L2, "usage": CAPTURE},
+    "cline_adapter": {"level": L0, "usage": HONEST_UNKNOWN},
     "tiny_agents_adapter": {"level": L0, "usage": HONEST_UNKNOWN},
 }
 
@@ -1073,6 +1074,47 @@ class OpenCodeConformanceTests(Level1HealthSurfaceMixin,
 OpenCodeConformanceTests._build_fixtures()
 
 
+class ClineConformanceTests(Level0InvocationContractMixin,
+                             unittest.TestCase):
+    # L0 by evidence (official apps/cli/README): the CLI exposes no
+    # read-only auth status face (`cline auth` is an interactive login
+    # action, `--key` is credential material) — so the health trio must
+    # stay absent rather than faked. NDJSON usage field shapes are
+    # unverified pre-REAL, hence HONEST_UNKNOWN.
+    module_name = "cline_adapter"
+    runtime_label = "cline-cli"
+
+    @classmethod
+    def make_adapter(cls):
+        from cline_adapter import ClineAdapter
+        profile = RuntimeProfile("coding-agent", "cline-cli", "cline",
+                                 None, "coder", frozenset())
+        return ClineAdapter(profile=profile, executable="cline")
+
+    @classmethod
+    def from_environment_absent(cls):
+        from cline_adapter import ClineAdapter
+        with patch("cline_adapter.shutil.which", return_value=None):
+            return ClineAdapter.from_environment()
+
+    @staticmethod
+    def _cline_stream(texts=("ok",)):
+        import json
+        if isinstance(texts, str):
+            texts = (texts,)
+        lines = [json.dumps({"type": "agent_event", "event": {"text": text}})
+                 for text in texts]
+        return "\n".join(lines) + "\n"
+
+    @classmethod
+    def _build_fixtures(cls):
+        cls.stdout_ok = cls._cline_stream("ok")
+        cls.stdout_nonascii = cls._cline_stream("résumé → 中文 ✓")
+
+
+ClineConformanceTests._build_fixtures()
+
+
 class TinyAgentsConformanceTests(Level0InvocationContractMixin,
                                  unittest.TestCase):
     module_name = "tiny_agents_adapter"
@@ -1222,6 +1264,7 @@ _FIXTURE_BY_MODULE = {
     "gemini_adapter": GeminiConformanceTests,
     "qwen_adapter": QwenConformanceTests,
     "opencode_adapter": OpenCodeConformanceTests,
+    "cline_adapter": ClineConformanceTests,
     "tiny_agents_adapter": TinyAgentsConformanceTests,
 }
 
