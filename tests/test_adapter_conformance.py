@@ -89,10 +89,18 @@ ADAPTER_DECLARATIONS = {
     "codex_adapter": {"level": L2, "usage": HONEST_UNKNOWN},
     "gemini_adapter": {"level": L2, "usage": CAPTURE},
     "qwen_adapter": {"level": L2, "usage": CAPTURE},
+    "opencode_adapter": {"level": L2, "usage": CAPTURE},
     "tiny_agents_adapter": {"level": L0, "usage": HONEST_UNKNOWN},
 }
 
-ENV_WHITELIST = {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT"}
+# Host variables every adapter may forward (locating/executing only).
+# Adapters may additionally inject their OWN documented safety
+# disable-flags — owned by the adapter, never forwarded from the
+# parent environment (e.g. opencode's autoupdate kill-switch, whose
+# default-on self-update side effect a single invocation must not
+# trigger).
+ENV_WHITELIST = {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT",
+                 "OPENCODE_DISABLE_AUTOUPDATE"}
 PROVIDER_KEY_VARS = (
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY",
 )
@@ -965,6 +973,92 @@ class QwenConformanceTests(Level1HealthSurfaceMixin,
 QwenConformanceTests._build_fixtures()
 
 
+class OpenCodeConformanceTests(Level1HealthSurfaceMixin,
+                               Level0InvocationContractMixin, unittest.TestCase):
+    module_name = "opencode_adapter"
+    runtime_label = "opencode"
+
+    @classmethod
+    def make_adapter(cls):
+        from opencode_adapter import OpenCodeAdapter
+        profile = RuntimeProfile("coding-agent", "opencode", "anthropic",
+                                 None, "coder", frozenset())
+        return OpenCodeAdapter(profile=profile, executable="opencode")
+
+    @classmethod
+    def from_environment_absent(cls):
+        from opencode_adapter import OpenCodeAdapter
+        with patch("opencode_adapter.shutil.which", return_value=None):
+            return OpenCodeAdapter.from_environment()
+
+    @staticmethod
+    def _opencode_stream(texts=("ok",), steps=None):
+        """`opencode run --format json` stdout: one JSON object per line,
+        {type, timestamp, sessionID, ...data}; each text event is followed
+        by a step_finish whose part.tokens carry per-step usage (schema
+        per the community cheatsheet, REAL verification pending)."""
+        import json
+        if isinstance(texts, str):
+            texts = (texts,)
+
+        def event(kind, **data):
+            payload = {"type": kind, "timestamp": 1, "sessionID": "ses_1"}
+            payload.update(data)
+            return json.dumps(payload)
+
+        lines = [event("step_start", part={"type": "step-start"})]
+        for index, text in enumerate(texts):
+            lines.append(event("text", part={"type": "text", "text": text}))
+            if steps and index < len(steps):
+                tokens = {}
+                if steps[index][0] is not None:
+                    tokens["input"] = steps[index][0]
+                if steps[index][1] is not None:
+                    tokens["output"] = steps[index][1]
+                part = {"type": "step-finish"}
+                if tokens:
+                    part["tokens"] = tokens
+                lines.append(event("step_finish", part=part))
+        return "\n".join(lines) + "\n"
+
+    @classmethod
+    def _build_fixtures(cls):
+        cls.stdout_ok = cls._opencode_stream("ok")
+        cls.stdout_nonascii = cls._opencode_stream("résumé → 中文 ✓")
+        # usage is the per-step sum across step_finish events
+        cls.stdout_usage_valid = cls._opencode_stream(
+            ("ok", "more"), steps=[(100, 40), (60, 20)])
+        cls.stdout_usage_missing = cls._opencode_stream(
+            "ok", steps=[(None, None)])
+        cls.stdout_usage_malformed = cls._opencode_stream(
+            "ok", steps=[("lots", -5)])
+        cls.stdout_usage_partial = cls._opencode_stream(
+            "ok", steps=[(90, None)])
+        cls.stdout_usage_bool = cls._opencode_stream(
+            "ok", steps=[(True, False)])
+
+    # health fixtures: opencode auth list text vocabulary (provisional
+    # pending REAL — the docs say the command "Lists all the
+    # authenticated providers as stored in the credentials file")
+    auth_ready_stdout = "authenticated providers:\n- anthropic (oauth)\n"
+    auth_not_ready_stdout = "no authenticated providers\n"
+
+    @property
+    def auth_state_ready(self):
+        from runtime_status import AuthenticationState
+        return AuthenticationState.AUTHENTICATED
+
+    @property
+    def auth_state_not_ready(self):
+        from runtime_status import AuthenticationState
+        return AuthenticationState.AUTH_REQUIRED
+
+    usage_expected = (160, 60)
+
+
+OpenCodeConformanceTests._build_fixtures()
+
+
 class TinyAgentsConformanceTests(Level0InvocationContractMixin,
                                  unittest.TestCase):
     module_name = "tiny_agents_adapter"
@@ -1113,6 +1207,7 @@ _FIXTURE_BY_MODULE = {
     "codex_adapter": CodexConformanceTests,
     "gemini_adapter": GeminiConformanceTests,
     "qwen_adapter": QwenConformanceTests,
+    "opencode_adapter": OpenCodeConformanceTests,
     "tiny_agents_adapter": TinyAgentsConformanceTests,
 }
 
