@@ -105,7 +105,7 @@ Install the published package from PyPI — Python >= 3.10, zero runtime
 dependencies, no clone needed:
 
 ```bash
-pip install dual-agent-development==2.2.0
+pip install dual-agent-development==2.2.1
 dual-agent --version
 dual-agent --help
 ```
@@ -394,7 +394,7 @@ library with zero runtime dependencies. Published on PyPI as
 The published distribution — no clone, no build step:
 
 ```bash
-pip install dual-agent-development==2.2.0
+pip install dual-agent-development==2.2.1
 ```
 
 - Distribution [`dual-agent-development` on PyPI](https://pypi.org/project/dual-agent-development/) — note the GitHub repository name (`runtime-neutral-agent-engineering`) and the PyPI package name are different
@@ -751,8 +751,11 @@ python -m unittest discover -s tests           # equivalent stdlib runner
 python -m compileall -q dual-agent-development # syntax gate
 ```
 
-Offline baseline: **2176 passed / 24 skipped / 520 subtests**. Every skip
-is an opt-in REAL-gated test entry.
+Offline baseline: **2177 passed / 24 skipped / 520 subtests** in the
+development workspace, which carries two protected local test assets;
+a clean checkout reports **2150 passed / 31 skipped / 520 subtests**.
+Skips are opt-in REAL-gated entries, plus — on a clean checkout —
+missing protected local test assets.
 
 ### REAL Runtime Tests
 
@@ -809,11 +812,11 @@ credential-file invariance across the run.
 
 ## Release
 
-Distribution version: **2.2.0** (`dual-agent --version`; single source of
+Distribution version: **2.2.1** (`dual-agent --version`; single source of
 truth `dual_agent.__version__`, read dynamically by the build). Latest
 tagged GitHub release:
-**[Runtime-Neutral Agent Engineering v2.0.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.0.0)**.
-The 2.2.0 distribution carries the product-entry work — self-contained
+**[Runtime-Neutral Agent Engineering v2.2.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.2.0)**.
+The 2.2.1 distribution carries the product-entry work — self-contained
 `dual-agent` CLI (`qualify` / `run` / `--observe`), persisted
 qualification evidence, semantic exit codes — ahead of the next tagged
 release.
