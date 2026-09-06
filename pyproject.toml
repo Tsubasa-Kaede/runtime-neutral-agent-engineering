@@ -32,6 +32,7 @@ test = [
   "pytest>=8",
   "tomli>=2; python_version < '3.11'",
   "build>=1",
+  "setuptools>=61",
 ]
 
 [project.scripts]
