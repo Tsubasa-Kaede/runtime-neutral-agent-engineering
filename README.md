@@ -43,16 +43,31 @@ other runtime by name.
 - **Provenance** — every validation result carries OFFLINE or REAL evidence
 - **Security Boundary** — no-secrets contract, content scanning, protected paths
 
+**Product flow** — one local product entry, two strictly separated commands:
+
+```text
+dual-agent qualify   Discovery → Health → gated G1–G14 Qualification
+                     → VERIFIED+REAL Evidence persisted to disk
+dual-agent run       Verified Runtime selection → four-stage execution
+                     (architect → coder → tester → reviewer) → Collaboration
+                     packets over the ledger → closed JSON summary
+dual-agent run --observe   + execution observation events streamed to stderr
+```
+
+`run` reads persisted evidence and never automatically qualifies; `qualify`
+is the only command that performs qualification. See [Modes](#modes).
+
 **What it supports** — support is reported at two strictly separated
-levels: **REAL verified** · **adapter implemented**. The
+levels: **REAL VERIFIED** · **adapter implemented**. The
 [Agent Runtime Support](#agent-runtime-support) section defines each level,
 and [Agent Runtime Ecosystem](#agent-runtime-ecosystem) lists the runtimes
 with actual integration evidence in this repository.
 
 **Current Runtime Integration**
 
-- 1 REAL-verified — Claude Code CLI
-- 2 adapter-level — tiny-agents, Codex CLI
+- 3 REAL VERIFIED — Claude Code CLI, Codex CLI, Pi (audited multi-runtime
+  four-stage E2E, 2026-09)
+- 5 adapter-level — Gemini CLI, Qwen Code, OpenCode, Cline, tiny-agents
 - + more via the `ExternalAgentAdapter` contract
 
 These counts describe this repository's integrations, not the size of the
@@ -79,11 +94,28 @@ dependencies, no clone needed:
 ```bash
 pip install dual-agent-development==2.1.0
 dual-agent --version
+dual-agent --help
 ```
 
 > Name map: the GitHub repository is `runtime-neutral-agent-engineering`;
 > the PyPI distribution is `dual-agent-development` (import `dual_agent`,
 > console script `dual-agent`).
+
+First real run — qualify once, then run tasks (both commands are part of
+the installed CLI; no source checkout needed):
+
+```bash
+dual-agent qualify                                       # gated G1–G14 qualification; persists VERIFIED+REAL evidence
+dual-agent run "Add a slug helper and its test"          # reads persisted evidence
+dual-agent run --observe "Add a slug helper and its test" # + execution events on stderr
+```
+
+On a machine with no persisted evidence, `run` exits `2` with a
+machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) and a human hint
+pointing at `dual-agent qualify` — it never automatically qualifies and
+never falls back to offline execution. REAL qualification requires
+`RUN_REAL_PROVIDER_TESTS=1`; offline qualification results are reported
+honestly and are never persisted.
 
 Or try it in 30 seconds from a fresh clone — offline, no runtime, login, or
 configuration needed:
@@ -101,7 +133,7 @@ Expected output — a closed, secret-free JSON summary:
 ```
 
 To run real tasks through the CLI, see [Installation](#installation)
-(environment setup) and [Modes](#modes) (CLI usage and facade injection).
+(environment setup) and [Modes](#modes) (CLI usage).
 To connect a real runtime or your own application, see
 [Integration](#integration).
 
@@ -278,8 +310,13 @@ and support is reported at two strictly separated levels:
 | Agent Runtime / Tool | Adapter | Discovery | Offline Tests | REAL Verification |
 |---|---|---|---|---|
 | Claude Code CLI | `claude_code_adapter.py` | `claude` executable available on PATH | ✅ `tests/test_claude_health.py` | ✅ REAL VERIFIED — Discovery → Health → G1–G14 qualification → Verified Pool admission → REAL dual-agent collaboration (v2.1.227) |
+| Codex CLI | `codex_adapter.py` | `codex` executable available on PATH | ✅ `tests/test_codex_adapter.py` | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
+| Pi | `pi_adapter.py` | `pi` executable available on PATH | ✅ `tests/test_pi_adapter.py` | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
+| Gemini CLI | `gemini_adapter.py` | `gemini` executable available on PATH | ✅ `tests/test_gemini_adapter.py` | ❌ Not run on the reference machine (no `gemini` installed); gated REAL test assets ship in the suite |
+| Qwen Code | `qwen_adapter.py` | `qwen` executable available on PATH | ✅ `tests/test_qwen_adapter.py` | ❌ Not performed |
+| OpenCode | `opencode_adapter.py` | `opencode` executable available on PATH | ✅ `tests/test_opencode_adapter.py` | ❌ Not performed |
+| Cline | `cline_adapter.py` | `cline` executable available on PATH | ✅ `tests/test_cline_adapter.py` | ❌ Not performed |
 | tiny-agents | `tiny_agents_adapter.py` | Runtime entry provided by `TINY_AGENTS_AGENT_PATH` / `TINY_AGENTS_COMMAND` | ✅ `tests/test_tiny_agents_adapter.py` | ❌ Not performed |
-| Codex CLI | `codex_adapter.py` | `codex` executable available on PATH | ✅ `tests/test_codex_adapter.py` | ❌ Not performed |
 
 ### What "Supported" Means
 
@@ -298,16 +335,19 @@ qualification in your own environment.
 | If you use… | Do this |
 |---|---|
 | Claude Code CLI | Supported today (REAL VERIFIED) — [Integration](#integration) → "Run with Claude Code" |
+| Codex CLI / Pi | REAL VERIFIED in the audited multi-runtime E2E — install the CLI yourself, log in through its own flow, then `dual-agent qualify` in your environment |
+| Gemini CLI / Qwen Code / OpenCode / Cline | Adapter is ready: install the CLI yourself, log in through its own flow, then REAL-verify it in your environment before production use |
 | tiny-agents | Adapter is ready: install the executable, set both `TINY_AGENTS_*` variables, then REAL-verify it in your environment before production use |
-| Codex CLI | Adapter is ready: install the CLI yourself, log in through its own flow, then REAL-verify it in your environment before production use |
 | Your own CLI or runtime | Implement the six-method `ExternalAgentAdapter` contract; the orchestrator never needs modification |
 
 ### Current Support Boundary
 
-Exactly one runtime — Claude Code CLI — holds REAL-proven capability
-evidence in this repository. Nothing else is supported in the verified
-sense, and the boundary is enforced by the engine itself: no admission
-without `VERIFIED` + `REAL` evidence, and no fallback to weaker paths.
+Three runtimes — Claude Code CLI, Codex CLI, and Pi — hold REAL-proven
+capability evidence in this repository (Claude Code individually and in
+the audited multi-runtime four-stage E2E). Nothing else is supported in
+the verified sense, and the boundary is enforced by the engine itself: no
+admission without `VERIFIED` + `REAL` evidence, and no fallback to weaker
+paths.
 
 ## Agent Runtime Ecosystem
 
@@ -318,12 +358,17 @@ verification. It makes no claim about tools not listed here.
 | Tool / Runtime | Category | Integration Status |
 |---|---|---|
 | Claude Code CLI | Coding Agent CLI | **REAL VERIFIED** |
+| Codex CLI | Coding Agent CLI | **REAL VERIFIED** (multi-runtime four-stage E2E, 2026-09 audit) |
+| Pi | Coding Agent CLI | **REAL VERIFIED** (multi-runtime four-stage E2E, 2026-09 audit) |
+| Gemini CLI | Coding Agent CLI | **Adapter implemented** |
+| Qwen Code | Coding Agent CLI | **Adapter implemented** |
+| OpenCode | Multi-provider coding agent harness | **Adapter implemented** |
+| Cline | Coding Agent CLI | **Adapter implemented** |
 | tiny-agents (Hugging Face) | Minimal Agent Runtime | **Adapter implemented** |
-| Codex CLI | Coding Agent CLI | **Adapter implemented** |
 
 The "Integration Status" column uses two fixed values: **REAL VERIFIED**
-and **Adapter implemented**. tiny-agents and Codex CLI are
-adapter-implemented, but not REAL-verified.
+and **Adapter implemented**. Gemini CLI, Qwen Code, OpenCode, Cline, and
+tiny-agents are adapter-implemented, but not REAL-verified.
 
 ## Installation
 
@@ -515,21 +560,46 @@ that, `BUDGET_EXHAUSTED`. A new task needs a new facade.
 
 ## Modes
 
-The CLI parses arguments and invokes a **host-injected** facade:
+The `dual-agent` console script is self-contained: it composes the default
+host stack (environment discovery → health observation → persisted
+evidence → Verified Runtime Pool → facade) and runs the task. Two
+commands, strictly separated:
 
 ```bash
+dual-agent qualify                                          # the only command that qualifies
 dual-agent run --mode off  "Implement a GitHub webhook"
 dual-agent run --mode auto "Implement a GitHub webhook"
 dual-agent run --mode on   "Implement a GitHub webhook"
 ```
 
-Honest limitation: the CLI never creates runtimes, adapters, credentials, or
-a default facade — without an injected facade it exits with a clear error. A
-host injects like this:
+- `qualify` performs the gated G1–G14 qualification over discovered
+  runtimes and persists `VERIFIED` + `REAL` evidence under
+  `~/.dual-agent/qualification/`. REAL invocation requires
+  `RUN_REAL_PROVIDER_TESTS=1`; offline results are reported honestly and
+  are never persisted.
+- `run` only reads persisted evidence. With no evidence it exits `2` with
+  a machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) and a human hint
+  pointing at `dual-agent qualify` — it never automatically qualifies and
+  never re-qualifies implicitly.
+
+Observation: `--observe` streams human-readable execution events to
+stderr while stdout stays exactly one machine-readable JSON line:
+
+```bash
+dual-agent run --observe "Implement a GitHub webhook"
+```
+
+stdout/stderr contract: the execution result is one closed, secret-free
+JSON line on stdout (exit `0` on `SUCCESS`, `2` on any closed failure
+word); human diagnostics and observation go to stderr.
+
+Honest limitation: the engine layer still never creates runtimes,
+adapters, or credentials. Embedding applications that want full control
+over the composition can inject a pre-configured facade directly:
 
 ```python
 from dual_agent import cli
-cli.main._facade = my_configured_facade   # build with your adapters/pool
+cli.main._facade = my_configured_facade   # embedding surface, unchanged
 ```
 
 See `examples/offline_mock_run.py` for constructing the facade from real
@@ -668,9 +738,8 @@ python -m unittest discover -s tests           # equivalent stdlib runner
 python -m compileall -q dual-agent-development # syntax gate
 ```
 
-Offline baseline: **979 passed / 15 skipped / 377 subtests** (945 before the
-Integration, bootstrap, Codex adapter, and transport E2E additions). Every
-skip is an opt-in REAL-gated test entry.
+Offline baseline: **2176 passed / 24 skipped / 520 subtests**. Every skip
+is an opt-in REAL-gated test entry.
 
 ### REAL Runtime Tests
 
@@ -716,22 +785,33 @@ credential-file invariance across the run.
 | Remote transport | Boundary contract with loopback implementation only — no remote peers |
 | Four-stage orchestration | Implemented; proven end-to-end offline |
 | Dual-agent collaboration (architect → coder) | ✅ Real verified — one REAL-verified runtime, two role-qualified agent invocations, `provenance=REAL` both directions (gated `tests/test_collaboration_session.py`) |
+| Multi-runtime four-stage execution (claude + codex + pi) | ✅ Real verified — audited multi-runtime E2E, each runtime qualified and admitted before execution (2026-09) |
 | Claude Code CLI REAL verification | ✅ Real verified — full chain, v2.1.227, all four capabilities, pool admission |
+| Codex CLI / Pi REAL verification | ✅ Real verified — audited multi-runtime four-stage E2E (2026-09) |
+| Gemini CLI / Qwen Code / OpenCode / Cline adapters | Implemented + offline-tested; REAL verification not performed |
 | tiny-agents REAL verification | Not performed (adapter implemented; offline-tested) |
-| Codex CLI adapter | Implemented + offline-tested; REAL verification not performed |
+| Installed CLI surface (`qualify` / `run` / `--observe`) | Implemented + offline-tested + packaging smoke (build → isolated venv install → console & module entries) |
 | Provenance enforcement | Implemented — the runner refuses REAL without real-call evidence |
 | Security boundary | Implemented + offline-tested (content safety, protected paths, env whitelist) |
 
 ## Release
 
-Current release: **[Runtime-Neutral Agent Engineering v2.0.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.0.0)**
-(Latest). An earlier release-candidate tag, `v2.0.0-rc.1`, also exists.
+Distribution version: **2.1.0** (`dual-agent --version`; single source of
+truth `dual_agent.__version__`, read dynamically by the build). Latest
+tagged GitHub release:
+**[Runtime-Neutral Agent Engineering v2.0.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.0.0)**.
+The 2.1.0 distribution carries the product-entry work — self-contained
+`dual-agent` CLI (`qualify` / `run` / `--observe`), persisted
+qualification evidence, semantic exit codes — ahead of the next tagged
+release.
 
 ## Limitations
 
-- Only **one runtime** (Claude Code CLI) holds REAL-proven capability
-  evidence; the tiny-agents and Codex adapters are implemented but not
-  REAL-verified, and no other adapter ships in this repository.
+- Three runtimes (Claude Code CLI, Codex CLI, Pi) hold REAL-proven
+  evidence from audited runs; the Gemini CLI, Qwen Code, OpenCode, Cline,
+  and tiny-agents adapters ship offline-tested but without
+  repository-run REAL verification. Treat every adapter as unverified
+  until you run `dual-agent qualify` in your own environment.
 - Runtime availability depends on your environment: PATH executables, login
   state, and (for tiny-agents) two environment variables. Missing pieces mean
   honest absence, never partial registration.
@@ -740,8 +820,10 @@ Current release: **[Runtime-Neutral Agent Engineering v2.0.0](https://github.com
   verification stages gated on dual-agent success.
 - Qualification is a point-in-time proof; stability over repeated runs is a
   separate measurement, not a guarantee.
-- Package maturity: source install only (no PyPI package); the CLI requires a
-  host-injected facade by design.
+- Package maturity: pre-1.0. The installed-CLI surface (`qualify`,
+  `run --observe`, the persisted evidence store under
+  `~/.dual-agent/qualification/`) is new (2026-09) and may still change
+  shape.
 - No remote collaboration in this release — the remote transport is a
   loopback boundary contract.
 
