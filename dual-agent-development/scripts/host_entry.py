@@ -143,6 +143,7 @@ try:  # installed-package mode: dependencies are package siblings
     from .cli import main as cli_main, run_cli
     from .discovery_bootstrap import bootstrap_runtime_session
     from .evidence_store import load_evidence, save_evidence
+    from .external_runtime import new_invocation_id
     from .generic_runtime_health import GenericRuntimeHealth
     from .host import build_facade_from_bootstrap
     from .real_validation_executor import run_real_validation
@@ -156,6 +157,7 @@ except ImportError:  # source-tree flat-import mode (tests/examples)
     from cli import main as cli_main, run_cli
     from discovery_bootstrap import bootstrap_runtime_session
     from evidence_store import load_evidence, save_evidence
+    from external_runtime import new_invocation_id
     from generic_runtime_health import GenericRuntimeHealth
     from host import build_facade_from_bootstrap
     from real_validation_executor import run_real_validation
@@ -295,9 +297,18 @@ def qualify_runtimes(*, factories=None, base_dir=DEFAULT_EVIDENCE_DIR,
     evidence, rejected = load_evidence(base_dir)
 
     if qualifier is None:
+        # 一次 qualification run 一个 experiment 标签（仓库语义：调用方
+        # 贴标签；复用既有 new_invocation_id 机制）。verified_selection_
+        # bridge 只消费非空 experiment_id 的池条目 —— REAL 资格若不带
+        # 标签，落盘证据会被所有 selection 路径滤除（2.2.0 用户态 REAL
+        # E2E 实测出的缺陷）。
+        experiment_id = f"qualify-{new_invocation_id()}"
+
         def _real_bridge(instance):
             result, _executor = run_real_validation(
-                instance, instance.probe, timeout_seconds=timeout_seconds)
+                instance, instance.probe,
+                experiment_id=experiment_id,
+                timeout_seconds=timeout_seconds)
             return result
 
         qualifier = _real_bridge

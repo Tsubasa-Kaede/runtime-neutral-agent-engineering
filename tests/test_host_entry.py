@@ -424,6 +424,30 @@ class QualifySurfaceTests(unittest.TestCase):
                 self.assertEqual(result.provenance, "REAL")
                 self.assertEqual(result.validated_capabilities, CAPS_ALL)
 
+    def test_default_real_bridge_provides_nonempty_experiment_id(self):
+        # P1 BUGFIX 特征测试（2.2.0 用户态 REAL E2E 实测缺陷）：
+        # 生产默认 qualifier（_real_bridge → run_real_validation）必须为
+        # qualification 提供非空 experiment_id —— verified_selection_bridge
+        # 对空 experiment_id 的池条目无条件滤除，落盘证据将无法被任何
+        # selection 路径消费（DUAL_NO_CAPABLE_AGENT / NO_CAPABLE_AGENT）。
+        # patch 掉真实 REAL 调用面，只验证接线契约（零 runtime/网络/凭据）。
+        captured = []
+
+        def stub_run_real_validation(instance, probe, **kwargs):
+            captured.append(kwargs.get("experiment_id"))
+            return (evidence_for(instance.runtime_id,
+                                 instance.provider_id), object())
+
+        with patch.object(host_entry, "run_real_validation",
+                          stub_run_real_validation):
+            with tempfile.TemporaryDirectory() as tmp:
+                code, out, err = self._qualify(tmp)  # qualifier=None → 默认桥
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(captured), 2)  # 两个家族各一次 qualification
+        for experiment_id in captured:
+            self.assertIsNotNone(experiment_id)
+            self.assertNotEqual(experiment_id, "")
+
     def test_qualify_offline_verified_not_saved_not_admitted(self):
         # 门未开（OFFLINE provenance）：诚实不落盘、不进池 —— 持久层
         # 绝不升级 provenance，admission 语义原样拒绝。
