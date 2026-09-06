@@ -1,6 +1,8 @@
 # Runtime-Neutral Agent Engineering
 
 [![CI](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dual-agent-development.svg)](https://pypi.org/project/dual-agent-development/)
+[![Downloads](https://img.shields.io/pypi/dm/dual-agent-development.svg)](https://pypi.org/project/dual-agent-development/)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -16,9 +18,20 @@ engineers the layer above them. It is **not** a chatbot, a model provider, a
 single-runtime wrapper, a remote agent network, an A2A implementation, a
 distributed execution platform, or a multi-agent network.
 
-**Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ⚠️ tiny-agents — adapter implemented, offline-tested (not REAL-verified) · ⚠️ Codex CLI — adapter implemented, offline-tested (not REAL-verified). Details in [Agent Runtime Support](#agent-runtime-support).
+**Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ✅ Codex CLI, Pi — REAL-verified in the audited multi-runtime four-stage E2E · ⚠️ Gemini CLI, Qwen Code, OpenCode, Cline, tiny-agents — adapter implemented, offline-tested (not REAL-verified in this repository). Details in [Agent Runtime Support](#agent-runtime-support).
 
-**Contents:** [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+## What's new in 2.2.0
+
+The installed CLI is now a self-contained product:
+
+- **`dual-agent qualify`** — explicit gated G1–G14 qualification; persists `VERIFIED` + `REAL` evidence under `~/.dual-agent/qualification/` (REAL invocation requires `RUN_REAL_PROVIDER_TESTS=1`)
+- **`dual-agent run`** — reads persisted evidence only and never auto-qualifies; no evidence exits `2` with a machine-readable reason and a human hint
+- **`dual-agent run --observe`** — execution observation streamed to stderr while stdout stays exactly one machine-readable JSON line
+- **Stable CLI semantics** — exit codes (`SUCCESS` → 0, closed failure words → 2), stdout machine JSON / stderr human diagnostics
+- **`python -m dual_agent`** — module entry alongside the console script
+- **Packaging** — dynamic single-truth version, product-only sdist/wheel, offline packaging smoke (build → isolated venv install)
+
+**Contents:** [What's new in 2.2.0](#whats-new-in-220) · [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
 
 ## Overview
 
