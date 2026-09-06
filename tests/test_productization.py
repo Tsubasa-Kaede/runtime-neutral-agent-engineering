@@ -155,12 +155,31 @@ class PackagingTests(unittest.TestCase):
         data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(data["project"]["name"], "dual-agent-development")
         scripts = data["project"]["scripts"]
-        self.assertEqual(scripts["dual-agent"], "dual_agent.cli:main")
+        # P1-U1: the console script points at the default host composition
+        # root (host_entry.main wires discovery -> bootstrap -> facade and
+        # injects it into the unchanged cli.main).
+        self.assertEqual(scripts["dual-agent"], "dual_agent.host_entry:main")
         package_dir = data["tool"]["setuptools"]["package-dir"]
         self.assertEqual(package_dir["dual_agent"], "dual-agent-development/scripts")
         carried = json.dumps(data["tool"]["setuptools"].get("data-files", {}))
         for asset in ("SKILL.md", "workflow.md", "templates", "agents", "offline_mock_run"):
             self.assertIn(asset, carried)
+
+    def test_pyproject_version_is_dynamic_single_truth(self):
+        # P1-U4 §5: 分布版本不允许在 pyproject 内二次硬编码 —— 唯一 truth
+        # 是 dual_agent.__version__（scripts/__init__.py），pyproject 通过
+        # dynamic attr 读取。两个数字必然漂移是打包面的经典事故。
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # Python 3.10: tomllib is 3.11+ stdlib
+            import tomli as tomllib
+        data = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertIn("version", data["project"].get("dynamic", []),
+                      "pyproject must declare version as dynamic")
+        self.assertNotIn("version", data["project"],
+                         "version literal in [project] would shadow the dynamic attr")
+        attr = data["tool"]["setuptools"]["dynamic"]["version"]["attr"]
+        self.assertEqual(attr, "dual_agent.__version__")
 
     def test_init_shim_exposes_flat_modules(self):
         namespace = {"__file__": str(SCRIPTS / "__init__.py"), "__name__": "dual_agent"}

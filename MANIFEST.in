@@ -1,0 +1,7 @@
+# P1-U4 §13 (packaging integrity): the sdist carries the product only.
+# The legacy distutils default file list globs tests/test*.py into every
+# sdist (122 files here, including two unreleased protected test files);
+# pyproject.toml has no native sdist-exclude surface, so the exclusion
+# lives here. Zero runtime impact: build configuration only.
+prune tests
+global-exclude *.py[cod] __pycache__ .env .env.* *.tmp

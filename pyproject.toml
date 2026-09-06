@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dual-agent-development"
-version = "2.1.0"
+# P1-U4 §5: single version truth lives in dual_agent.__version__
+# (dual-agent-development/scripts/__init__.py); the distribution reads it
+# dynamically so the two numbers can never drift apart.
+dynamic = ["version"]
 description = "Runtime-neutral dual-agent collaboration orchestrator: architect, coder, tester, reviewer with structured packets and an append-only ledger."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,15 +34,20 @@ test = [
 ]
 
 [project.scripts]
-# cli.main requires a host-injected facade and reports a clear error without
-# one; it never constructs runtimes, adapters, or credentials by itself.
-dual-agent = "dual_agent.cli:main"
+# host_entry.main is the default host composition root (P1-U1): it wires
+# environment discovery -> bootstrap -> facade and injects the result into
+# the unchanged cli.main; cli.main itself never constructs runtimes,
+# adapters, or credentials.
+dual-agent = "dual_agent.host_entry:main"
 
 [tool.setuptools]
 packages = ["dual_agent"]
 
 [tool.setuptools.package-dir]
 dual_agent = "dual-agent-development/scripts"
+
+[tool.setuptools.dynamic]
+version = { attr = "dual_agent.__version__" }
 
 [tool.setuptools.data-files]
 "share/dual-agent/skill" = ["dual-agent-development/SKILL.md"]
