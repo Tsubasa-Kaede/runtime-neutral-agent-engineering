@@ -3,7 +3,14 @@
 The CLI only parses args, calls an injected facade, and emits a safe JSON
 summary. It never emits raw stdout/stderr, secrets, runtime names, addresses,
 or reasoning. Offline only.
+
+P1-U3 note: CLI 语义稳定契约（exit 映射 exit_code_for、语义失败
+stdout JSON、--help/--version 预嗅探）住在 host_entry（产品边界组合根）
+—— cli.py 是 V2 冻结件（五个 zero-diff 纪律测试钉定工作树零修改），
+本文件只钉定其不变的渲染契约。
 """
+import contextlib
+import io
 import json
 import sys
 import unittest
@@ -12,7 +19,8 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "dual-agent-development" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from cli import build_parser, render_summary
+import cli
+from cli import build_parser, render_summary, run_cli
 from production_facade import FacadeResult
 
 
@@ -27,8 +35,10 @@ class StubFacade:
 
 
 def stub_result(status="SUCCESS", path="FOUR_STAGE", stages=("architect", "coder", "tester", "reviewer")):
+    # 真实 facade 语义：成功 failure_category=""，失败 = 终态词本身。
     return FacadeResult(status=status, mode="AUTO", path=path, task_id="T1",
-                        provenance="OFFLINE", stages=stages, failure_category="",
+                        provenance="OFFLINE", stages=stages,
+                        failure_category="" if status == "SUCCESS" else status,
                         safe_summary={"task_id": "T1", "provenance": "OFFLINE",
                                       "stage_counts": {"architect": 1, "coder": 1,
                                                        "tester": 1, "reviewer": 1}})
@@ -125,6 +135,41 @@ class RenderTests(unittest.TestCase):
         data = json.loads(render_summary(result))
         self.assertEqual(data["status"], "ARCHITECT_PACKET_INVALID")
         self.assertEqual(data["path"], "DUAL")
+
+
+class RunCliStabilityTests(unittest.TestCase):
+    """P1-U3：run_cli 渲染契约的稳定面（cli.py 冻结原状下仍成立的部分）。"""
+
+    def test_run_cli_output_is_canonical_single_machine_json_line(self):
+        summary = run_cli(StubFacade(stub_result()), ["run", "x"])
+        self.assertEqual(summary.count("\n"), 0)  # 单行（print 补换行）
+        payload = json.loads(summary)
+        self.assertEqual(payload["status"], "SUCCESS")
+        # 键序确定性：渲染即规范形（sorted + 紧凑）。
+        self.assertEqual(
+            summary, json.dumps(payload, sort_keys=True,
+                                separators=(",", ":")))
+
+    def test_run_cli_failure_status_rendered_verbatim(self):
+        summary = run_cli(
+            StubFacade(stub_result(status="CODER_PACKET_INVALID",
+                                   path="DUAL", stages=())), ["run", "x"])
+        payload = json.loads(summary)
+        self.assertEqual(payload["status"], "CODER_PACKET_INVALID")
+        self.assertEqual(payload["failure_category"], "CODER_PACKET_INVALID")
+
+    def test_main_no_facade_failure_shape_unchanged(self):
+        # 嵌入面误用（无 facade）：既有 stderr JSON + exit 2 原样
+        #（RELEASE-2A 钉定行为；产品入口 host_entry 不经过此路径）。
+        saved = cli.main.__dict__.pop("_facade", None)
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["run", "x"]), 2)
+        finally:
+            if saved is not None:
+                cli.main._facade = saved
+        self.assertIn("no facade configured", err.getvalue())
 
 
 if __name__ == "__main__":
