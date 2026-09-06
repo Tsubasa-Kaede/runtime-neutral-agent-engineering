@@ -800,7 +800,7 @@ Distribution version: **2.2.0** (`dual-agent --version`; single source of
 truth `dual_agent.__version__`, read dynamically by the build). Latest
 tagged GitHub release:
 **[Runtime-Neutral Agent Engineering v2.0.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.0.0)**.
-The 2.1.0 distribution carries the product-entry work — self-contained
+The 2.2.0 distribution carries the product-entry work — self-contained
 `dual-agent` CLI (`qualify` / `run` / `--observe`), persisted
 qualification evidence, semantic exit codes — ahead of the next tagged
 release.
