@@ -3,8 +3,10 @@
 # Hard rules baked into this workflow:
 # - Publishes ONLY on a pushed version tag (vX.Y.Z...). Branch pushes and
 #   pull requests can never publish; forks can never publish (no PR trigger).
-# - Version consistency gate: the tag MUST equal the pyproject version and
-#   the dual_agent.__version__ constant, or the run fails before building.
+# - Version consistency gate: the tag MUST equal the
+#   dual_agent.__version__ constant (the distribution's single version
+#   truth), and the pyproject dynamic-version wiring must point at that
+#   same constant, or the run fails before building.
 # - Trusted Publishing / OIDC only: NO PyPI API token, NO PYPI_TOKEN secret,
 #   NO passwords, NO ~/.pypirc — nothing long-lived is stored anywhere.
 # - Build and publish are separate jobs: the publish job uploads the exact
@@ -37,7 +39,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Version consistency gate (tag == pyproject == dual_agent)
+      - name: Version consistency gate (tag == dual_agent.__version__, dynamic wiring)
         run: |
           python - <<'PY'
           import os, pathlib, re, sys, tomllib
@@ -47,7 +49,20 @@ jobs:
               sys.exit(f"tag {tag!r} is not a strict vX.Y.Z[pre] tag; refusing to build")
 
           pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          name, declared = pyproject["project"]["name"], pyproject["project"]["version"]
+          name = pyproject["project"]["name"]
+
+          # The distribution version is dynamic (single truth =
+          # dual_agent.__version__); [project] carries no literal version,
+          # so the gate verifies the dynamic wiring instead.
+          dynamic = pyproject["project"].get("dynamic", [])
+          attr = (pyproject.get("tool", {}).get("setuptools", {})
+                  .get("dynamic", {}).get("version", {}).get("attr"))
+          if "version" not in dynamic:
+              sys.exit("pyproject does not declare 'version' as dynamic; "
+                       "expected dynamic version with dual_agent.__version__ truth")
+          if attr != "dual_agent.__version__":
+              sys.exit(f"dynamic version attr is {attr!r}; "
+                       "expected 'dual_agent.__version__'")
 
           # Read the shipped constant directly: importing the mapped package
           # from the source tree is ambiguous (scripts/ holds a legacy
@@ -59,12 +74,12 @@ jobs:
           pkg_version = match.group(1)
 
           tag_version = tag[1:]
-          if declared != tag_version or pkg_version != tag_version:
+          if pkg_version != tag_version:
               sys.exit(
-                  f"version mismatch: tag={tag_version} pyproject={declared} "
+                  f"version mismatch: tag={tag_version} "
                   f"dual_agent.__version__={pkg_version}"
               )
-          print(f"version gate OK: {name} {tag_version}")
+          print(f"version gate OK: {name} {tag_version} (dynamic: dual_agent.__version__)")
           PY
 
       - name: Build sdist + wheel
