@@ -116,8 +116,10 @@ self-construct. The ONE mechanism:
    - if `profile` is not None: `from external_runtime import RuntimeProfile`;
      `factory(profile=RuntimeProfile(**profile))`, else
      `factory(profile=None)`;
-   - a None or raising factory result → non-zero exit (honest construction
-     failure);
+   - a None result → one closed stderr diagnostic line ("remote adapter
+     construction failed") then non-zero exit; a raising result →
+     non-zero exit with its traceback (both honest construction
+     failures, observable through the B2 diagnostics seam);
    - `from remote_agent_endpoint import run_endpoint` and
      `run_endpoint(adapter, <remote_address>, sys.stdin.buffer,
      sys.stdout.buffer)`.
@@ -196,8 +198,10 @@ session` — NOT re-judging whether the agent is trustworthy or available.
   `ValueError` refusal classes, untagged-factory refusal, consistency
   check, glue text correctness (embedded module/attr/profile/address,
   path inserts, `run_endpoint` call).
-- Construction proof over a REAL child: a test-owned importable double
-  module (in `tests/`, reached via `source_path`) exposing a
+- Construction proof over a REAL child: a test-owned scripted double
+  module (source embedded in the offline test file, materialized at run
+  time to a temp directory reached via declared `source_path` — §17
+  three-file set preserved) exposing a
   `profile`-convention factory returning a scripted adapter whose invoke
   yields valid ImplementationPacket JSON — full
   declaration→glue→child→session→send→receive round trip.
