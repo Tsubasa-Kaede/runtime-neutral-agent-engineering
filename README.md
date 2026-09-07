@@ -18,20 +18,43 @@ engineers the layer above them. It is **not** a chatbot, a model provider, a
 single-runtime wrapper, a remote agent network, an A2A implementation, a
 distributed execution platform, or a multi-agent network.
 
+What it does provide today: **Remote Collaboration across a real process
+boundary** — you declare an agent (identity, role, runtime binding), compose
+a remote session with one call, and exchange verified task packets with an
+agent running in its own process, on your machine, under the same
+contract-first discipline as the local pipeline. See
+[Remote Collaboration (V3.1)](#remote-collaboration-v31).
+
 **Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ✅ Codex CLI, Pi — REAL-verified in the audited multi-runtime four-stage E2E · ⚠️ Gemini CLI, Qwen Code, OpenCode, Cline, tiny-agents — adapter implemented, offline-tested (not REAL-verified in this repository). Details in [Agent Runtime Support](#agent-runtime-support).
 
-## What's new in 2.2.0
+## What's new
 
-The installed CLI is now a self-contained product:
+**Remote Collaboration (V3.1)** — declared agents now collaborate across a
+real process boundary:
 
-- **`dual-agent qualify`** — explicit gated G1–G14 qualification; persists `VERIFIED` + `REAL` evidence under `~/.dual-agent/qualification/` (REAL invocation requires `RUN_REAL_PROVIDER_TESTS=1`)
-- **`dual-agent run`** — reads persisted evidence only and never auto-qualifies; no evidence exits `2` with a machine-readable reason and a human hint
-- **`dual-agent run --observe`** — execution observation streamed to stderr while stdout stays exactly one machine-readable JSON line
-- **Stable CLI semantics** — exit codes (`SUCCESS` → 0, closed failure words → 2), stdout machine JSON / stderr human diagnostics
-- **`python -m dual_agent`** — module entry alongside the console script
-- **Packaging** — dynamic single-truth version, product-only sdist/wheel, offline packaging smoke (build → isolated venv install)
+- Declare an agent (identity + role + runtime binding) → compose a remote
+  session → send a task packet → receive the result packet. One honest
+  round trip per interaction, verified end-to-end with the real Claude CLI.
+- Try it in 30 seconds — offline, no runtime, no login, no configuration:
 
-**Contents:** [What's new in 2.2.0](#whats-new-in-220) · [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python examples/remote_offline_demo.py
+```
+
+- With the Claude Code CLI installed and logged in,
+  `examples/remote_real_claude.py` runs the same flow against a real
+  provider. Details in [Remote Collaboration (V3.1)](#remote-collaboration-v31).
+
+Previously: the installed CLI became a self-contained product —
+`dual-agent qualify` (gated G1–G14 qualification, persisted `VERIFIED` +
+`REAL` evidence), `dual-agent run` / `run --observe` (reads persisted
+evidence only, never auto-qualifies), stable exit codes with
+stdout-machine-JSON / stderr-human-diagnostics, `python -m dual_agent`, and
+product-only packaging.
+
+**Contents:** [What's new](#whats-new) · [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Remote Collaboration (V3.1)](#remote-collaboration-v31) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
 
 ## Overview
 
@@ -144,6 +167,27 @@ Expected output — a closed, secret-free JSON summary:
 ```json
 {"path": "FOUR_STAGE", "status": "SUCCESS", "stages": ["architect","coder","tester","reviewer"], ...}
 ```
+
+### Remote Collaboration in 30 seconds
+
+Same clone, still offline — one declared agent, one real process boundary,
+one task packet round trip:
+
+```bash
+python examples/remote_offline_demo.py
+```
+
+Expected output — a closed JSON summary naming the composed agent, the
+derived remote address, and the packet it produced (scripted adapter,
+clearly labeled as an offline demonstration). With the Claude Code CLI
+installed and logged in, `examples/remote_real_claude.py` performs the same
+exchange with a real provider. See
+[Remote Collaboration (V3.1)](#remote-collaboration-v31).
+
+> Examples are **repository examples**: they come with a source checkout
+> and are not included in the wheel or `site-packages`. `pip install`
+> gives you the package and the `dual-agent` CLI; running the examples
+> requires a clone of this repository.
 
 To run real tasks through the CLI, see [Installation](#installation)
 (environment setup) and [Modes](#modes) (CLI usage).
@@ -571,6 +615,32 @@ and ledger are per-task and never reset between runs. SINGLE path: at most 1
 real invocation. Four-stage path: at most 4 (each role exactly once); beyond
 that, `BUDGET_EXHAUSTED`. A new task needs a new facade.
 
+### Remote collaboration layering
+
+Remote collaboration reuses the same engine discipline one level up: the
+local side declares and composes; the remote side runs in its own process
+and answers under the same packet contract. Five steps, one honest round
+trip:
+
+```text
+you                                          remote agent (own process)
+──                                          ─────────────────────────
+1  declare: identity + role + binding
+2  compose: build_remote_session(...)  ───► child process starts
+                                             3  endpoint reads the task packet
+                                             4  runtime CLI → real model
+                                                 (scripted adapter in the
+                                                 offline demo)
+                                             5  output parsed through the
+                                                 same packet contract
+6  receive: result packet              ◄───┘
+7  close: the interaction ends
+```
+
+The boundary carries packets only — never conversations, never
+credentials — and a delivery receipt never claims execution. See
+[Remote Collaboration (V3.1)](#remote-collaboration-v31).
+
 ## Modes
 
 The `dual-agent` console script is self-contained: it composes the default
@@ -671,11 +741,65 @@ Two layers that are easy to conflate but are not the same:
 
 - **`CollaborationPacket` is the protocol contract** — who owes what work, on
   a frozen envelope schema.
-- **Transport is the delivery mechanism** — an in-process mailbox today.
+- **Transport is the delivery mechanism** — an in-process mailbox for local
+  collaboration, or a real subprocess stdio boundary for remote
+  collaboration (single machine). There is **no** network transport, no
+  A2A protocol, no distributed execution, and no multi-agent network.
 
-The remote transport module defines a boundary contract with a loopback
-implementation only. This release contains **no** remote agent network, no
-A2A protocol, no distributed execution, and no multi-agent network.
+## Remote Collaboration (V3.1)
+
+Declared agents collaborating across a **real process boundary**, on one
+machine: the remote agent runs in its own process, receives one task
+packet, and answers with one result packet. The whole exchange is
+contract-driven — the remote side sees exactly the task packet, never a
+conversation, never your credentials.
+
+The user flow is five steps:
+
+```text
+declare   an agent: identity + role + runtime binding   (AgentManifest)
+compose   one call: build_remote_session(registry, agent_id, role, you)
+send      one task packet (session.send)
+receive   one result packet (session.receive)
+close     the session when the interaction ends          (session.close)
+```
+
+**Agent address.** Every participant has an opaque address of the form
+`agent:{agent-id}:{role}` — for example `agent:my-coder:coder`. Addresses
+are stable logical names: they contain no runtime, provider, or model
+facts, and they survive rebinding to a different runtime.
+
+**Delivery is not execution.** A `DELIVERED` receipt means the remote
+process received the task packet — nothing more. Execution success shows
+up as a valid, parsed result packet on `receive()`. The vocabulary never
+blurs the two.
+
+**Two experiences, one flow:**
+
+| | Offline demo | REAL example |
+|---|---|---|
+| Entry | `python examples/remote_offline_demo.py` | `python examples/remote_real_claude.py` |
+| Remote side | a scripted adapter module (`examples/scripted_coder.py`), clearly labeled | the real Claude Code CLI → real provider |
+| Prerequisites | Python only — no runtime, login, or configuration | Claude Code CLI installed on PATH and logged in through its own flow |
+| Result | closed JSON summary, provenance honestly `OFFLINE` | closed JSON summary from real model output |
+
+Both run from a source checkout (examples are repository examples — see
+the note in [Quick Start](#quick-start)). The remote collaboration flow is
+verified end-to-end with the real Claude CLI; the same declaration pattern
+works for the other adapters shipped by this project.
+
+### Common failures
+
+| Failure | What it means | What to do |
+|---|---|---|
+| `ValueError: unknown agent: …` | No agent with that id is registered | Check the id you pass to `build_remote_session` against your registry |
+| `ValueError: role not declared by agent: …` | The agent's declaration does not include that role | Declare the role in the manifest, or compose a role the agent declares |
+| `ValueError: adapter factory is not remotely constructible` | The manifest's factory cannot be carried across the process boundary | Build it with `importable_adapter_factory` |
+| `ValueError: profile conflicts with agent binding: …` | The adapter profile and the runtime binding declare different runtime facts | Make runtime/provider/model identical in both declarations |
+| `FAILED` receipt | The child process failed (bad import, adapter construction, or crash); diagnostics are captured from its stderr | Check the failure reason printed by the example; verify the module path |
+| `ModuleNotFoundError` in child diagnostics | The declared module was not importable by the remote process | For a custom adapter module, pass its directory as `source_path` |
+| Claude CLI not found | The real example requires the Claude Code CLI | Install it, log in through its own flow, retry — the example exits non-zero and never falls back |
+| `provenance: OFFLINE` on a real run | The composition did not carry REAL qualification evidence — reported honestly, never faked | Expected for plain example runs; REAL provenance requires the qualified path |
 
 ## Extending Runtime
 
@@ -798,7 +922,8 @@ credential-file invariance across the run.
 | Agent Selection (both paths) | Implemented + offline-tested |
 | Collaboration contract & packets | Implemented + offline-tested |
 | Local transport | Implemented + offline-tested |
-| Remote transport | Boundary contract with loopback implementation only — no remote peers |
+| Remote transport | Real subprocess stdio boundary (single machine) — no network transport |
+| Remote collaboration (declare → remote session → result packet) | ✅ Real verified — end-to-end with the real Claude CLI: real provider, real model output through the packet contract |
 | Four-stage orchestration | Implemented; proven end-to-end offline |
 | Dual-agent collaboration (architect → coder) | ✅ Real verified — one REAL-verified runtime, two role-qualified agent invocations, `provenance=REAL` both directions (gated `tests/test_collaboration_session.py`) |
 | Multi-runtime four-stage execution (claude + codex + pi) | ✅ Real verified — audited multi-runtime E2E, each runtime qualified and admitted before execution (2026-09) |
@@ -840,8 +965,8 @@ release.
   `run --observe`, the persisted evidence store under
   `~/.dual-agent/qualification/`) is new (2026-09) and may still change
   shape.
-- No remote collaboration in this release — the remote transport is a
-  loopback boundary contract.
+- Remote collaboration runs across a real process boundary on a single
+  machine — no network transport, no A2A, no cross-machine execution.
 
 ## Contributing
 
