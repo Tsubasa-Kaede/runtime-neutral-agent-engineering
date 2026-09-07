@@ -902,6 +902,62 @@ class FreshInstanceDeterminismTests(unittest.TestCase):
         self.assertEqual(first_received, second_received)
 
 
+class TransportCloseContractTests(unittest.TestCase):
+    """V3.1-B1b: the transport lifecycle seam — close() is contract, not
+    per-implementation luck. The Protocol must require it, the loopback must
+    provide it as an idempotent no-op, and the resource-bearing B2 transport
+    must keep satisfying the widened contract with its existing authority."""
+
+    def test_protocol_requires_close(self):
+        class SendReceiveOnly:
+            def send(self, envelope): ...
+            def receive(self, recipient): ...
+        # A transport without close() is NOT a RemoteEnvelopeTransport.
+        self.assertNotIsInstance(
+            SendReceiveOnly(), RemoteEnvelopeTransport)
+
+    def test_protocol_accepts_send_receive_close(self):
+        class FullTransport:
+            def send(self, envelope): ...
+            def receive(self, recipient): ...
+            def close(self): ...
+        self.assertIsInstance(FullTransport(), RemoteEnvelopeTransport)
+
+    def test_loopback_satisfies_widened_protocol(self):
+        self.assertIsInstance(
+            LoopbackEnvelopeTransport(), RemoteEnvelopeTransport)
+
+    def test_loopback_provides_callable_close(self):
+        transport = LoopbackEnvelopeTransport()
+        self.assertTrue(callable(getattr(transport, "close", None)))
+
+    def test_loopback_close_is_idempotent(self):
+        transport = LoopbackEnvelopeTransport()
+        transport.close()
+        transport.close()  # a second close must never raise
+
+    def test_loopback_close_changes_no_behavior(self):
+        # No-op semantics: no lifecycle state exists, so send/receive must
+        # behave exactly as the contract promises even after close calls.
+        transport = LoopbackEnvelopeTransport()
+        first = envelope()
+        transport.close()
+        receipt = transport.send(first)
+        self.assertIs(receipt.status, RemoteEnvelopeStatus.DELIVERED)
+        transport.close()
+        self.assertEqual(transport.receive(first.recipient), first)
+
+    def test_b2_subprocess_keeps_satisfying_protocol(self):
+        # B2 owns the real close() authority (child reaping); construction
+        # is lazy, so proving conformance spawns nothing. The widened
+        # contract must not break the existing implementation.
+        from remote_subprocess_transport import (
+            SubprocessStdioEnvelopeTransport)
+        transport = SubprocessStdioEnvelopeTransport(
+            [sys.executable, "-c", "pass"])
+        self.assertIsInstance(transport, RemoteEnvelopeTransport)
+
+
 class SourceScanTests(unittest.TestCase):
     """V2-style whole-source channel scan (10H-C discipline). The AST
     scans above prove what the code does; this scan proves the source

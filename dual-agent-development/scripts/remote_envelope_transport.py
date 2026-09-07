@@ -102,11 +102,14 @@ class RemoteEnvelopeReceipt:
 
 @runtime_checkable
 class RemoteEnvelopeTransport(Protocol):
-    """Delivery-boundary contract: send one envelope, poll one mailbox."""
+    """Delivery-boundary contract: send one envelope, poll one mailbox,
+    close the seam."""
 
     def send(self, envelope) -> RemoteEnvelopeReceipt: ...
 
     def receive(self, recipient: str): ...
+
+    def close(self) -> None: ...
 
 
 class LoopbackEnvelopeTransport:
@@ -189,3 +192,14 @@ class LoopbackEnvelopeTransport:
                 RemoteEnvelopeErrorCode.INVALID_ENVELOPE,
                 "mailbox wire is addressed to another recipient")
         return decoded
+
+    def close(self) -> None:
+        """Uniform lifecycle seam: idempotent no-op.
+
+        The loopback holds no external resource (no channel, no
+        connection), so closing has nothing to release; the method
+        exists only to satisfy the transport lifecycle contract that
+        resource-bearing implementations already honor. It introduces
+        no state and changes no behavior: send/receive work exactly as
+        before, before or after any close call.
+        """
