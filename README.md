@@ -128,7 +128,7 @@ Install the published package from PyPI — Python >= 3.10, zero runtime
 dependencies, no clone needed:
 
 ```bash
-pip install dual-agent-development==2.2.1
+pip install dual-agent-development==2.3.0
 dual-agent --version
 dual-agent --help
 ```
@@ -438,7 +438,7 @@ library with zero runtime dependencies. Published on PyPI as
 The published distribution — no clone, no build step:
 
 ```bash
-pip install dual-agent-development==2.2.1
+pip install dual-agent-development==2.3.0
 ```
 
 - Distribution [`dual-agent-development` on PyPI](https://pypi.org/project/dual-agent-development/) — note the GitHub repository name (`runtime-neutral-agent-engineering`) and the PyPI package name are different
@@ -937,14 +937,13 @@ credential-file invariance across the run.
 
 ## Release
 
-Distribution version: **2.2.1** (`dual-agent --version`; single source of
+Distribution version: **2.3.0** (`dual-agent --version`; single source of
 truth `dual_agent.__version__`, read dynamically by the build). Latest
 tagged GitHub release:
-**[Runtime-Neutral Agent Engineering v2.2.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.2.0)**.
-The 2.2.1 distribution carries the product-entry work — self-contained
-`dual-agent` CLI (`qualify` / `run` / `--observe`), persisted
-qualification evidence, semantic exit codes — ahead of the next tagged
-release.
+**[Runtime-Neutral Agent Engineering v2.3.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.3.0)**.
+The 2.3.0 distribution adds Remote Collaboration — declare → compose →
+send → receive → close across a real process boundary, with repository
+examples and honest offline/REAL provenance.
 
 ## Limitations
 
