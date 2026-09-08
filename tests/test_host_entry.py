@@ -44,6 +44,18 @@ from candidate_validation import (
     GateVerdict,
     ValidationGate,
 )
+from collaboration_packet import CollaborationPacket, CollaborationPayloadType
+from collaboration_state import (
+    CollaborationDirection,
+    CollaborationRecord,
+    SharedCollaborationState,
+)
+from structured_packets import (
+    ArchitecturePacket,
+    ImplementationPacket,
+    ReviewPacket,
+    TestPacket,
+)
 from external_runtime import (
     InvocationResult,
     InvocationStatus,
@@ -897,7 +909,13 @@ class ExitContractTests(unittest.TestCase):
             self.assertEqual(payload["failure_category"],
                              "ARCHITECT_INVOKE_FAILED")
             self.assertNotIn("Traceback", stdout.getvalue())
-            self.assertEqual(stderr.getvalue(), "")  # 无 --observe 时无 observation
+            # 无 --observe 时零 observation 事件（P1-U3 本意）；CU-R1 起
+            # stderr 额外携带恰好一行诚实的未交付投影（Case B 契约）。
+            self.assertNotIn("DECISION", stderr.getvalue())
+            self.assertNotIn("INVOCATION", stderr.getvalue())
+            self.assertEqual(
+                stderr.getvalue(),
+                "dual-agent: result not delivered: ARCHITECT_INVOKE_FAILED\n")
 
     def test_run_success_output_is_canonical_single_line(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -977,6 +995,302 @@ class BoundaryDisciplineTests(unittest.TestCase):
         pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('dual-agent = "dual_agent.host_entry:main"', pyproject)
         self.assertNotIn('dual-agent = "dual_agent.cli:main"', pyproject)
+
+
+class RunResultProjectionTests(unittest.TestCase):
+    """CU-R1（Run Result Delivery）：run 后从 ledger 投影安全结果摘要到
+    stderr —— stdout 恰一行机器 JSON 的契约逐字节不变。
+
+    数据源边界：只投影 append 期已通过 packet schema + secret-shape 扫描
+    + 全包 unsafe 扫描的 envelope wire（envelope() 重解码 = 读取侧二次验
+    证）；dict 形状字段只计数；FAILURE → 诚实未交付行；SINGLE/DECISION
+    无 payload 入账 → 零投影（结构事实锁定，不用冻结层去"补"）。
+    """
+
+    TASK = "projection-task"
+
+    EXPECTED_FOUR_STAGE = (
+        "dual-agent: result architecture goal[1]: goal-a",
+        "dual-agent: result architecture goal[2]: goal-b",
+        "dual-agent: result architecture[1]: component split",
+        "dual-agent: result architecture constraints[1]: constraint-a",
+        "dual-agent: result implementation summary: Split parser into a module.",
+        "dual-agent: result implementation changed_files[1]: parser.py",
+        "dual-agent: result implementation details[1]: extracted helpers",
+        "dual-agent: result implementation unresolved[1]: none",
+        "dual-agent: result tests run=1 passed=1 failed=0 failure_items=0",
+        "dual-agent: result tests coverage[1]: manual review only",
+        "dual-agent: result tests remaining_risks[1]: sample risk",
+        "dual-agent: result review status: APPROVED",
+        "dual-agent: result review severity[1]: minor",
+        "dual-agent: result review required_changes[1]: add docstring",
+        "dual-agent: result review findings_count=1",
+    )
+
+    # -- ledger fixtures --------------------------------------------------
+
+    def _arch_packet(self, task=None):
+        return ArchitecturePacket(
+            task_id=task or self.TASK, role="architect",
+            goal=("goal-a", "goal-b"), constraints=("constraint-a",),
+            architecture=("component split",), interfaces=({"name": "iface-1"},),
+            implementation_steps=({"step": 1},),
+            acceptance_criteria=("criteria-a",), risks=({"risk": "latency"},))
+
+    def _impl_packet(self, task=None):
+        return ImplementationPacket(
+            task_id=task or self.TASK, role="coder",
+            changed_files=("parser.py",),
+            implementation_summary="Split parser into a module.",
+            implementation_details=("extracted helpers",),
+            assumptions=("ambient",), unresolved_items=("none",),
+            test_requirements=("unit",))
+
+    def _test_packet(self, task=None):
+        return TestPacket(
+            task_id=task or self.TASK, role="tester",
+            tests_run=("unit",), tests_passed=("unit",), tests_failed=(),
+            failures=(), coverage_or_validation=("manual review only",),
+            remaining_risks=("sample risk",))
+
+    def _review_packet(self, task=None):
+        return ReviewPacket(
+            task_id=task or self.TASK, role="reviewer", status="APPROVED",
+            findings=({"finding": "finding-x"},), severity=("minor",),
+            affected_files=("parser.py",), required_changes=("add docstring",),
+            acceptance_criteria_status=("met",))
+
+    def _envelope(self, payload, correlation, source_role, target_role,
+                  task=None):
+        kind = {
+            "architect": CollaborationPayloadType.ARCHITECTURE,
+            "coder": CollaborationPayloadType.IMPLEMENTATION,
+            "tester": CollaborationPayloadType.TEST,
+            "reviewer": CollaborationPayloadType.REVIEW,
+        }[source_role]
+        return CollaborationPacket(
+            correlation_id=correlation, task_id=task or self.TASK,
+            source_agent=f"addr-{source_role}",
+            target_agent=f"addr-{target_role}",
+            source_role=source_role, target_role=target_role,
+            payload_type=kind, payload=payload, provenance="REAL")
+
+    def _decision(self, state, task=None):
+        return state.append_decision(
+            task or self.TASK, mode="on", complexity="COMPLEX",
+            path="DUAL", runtime_mode="SINGLE_RUNTIME", reason="MODE_ON")
+
+    def _four_stage_state(self):
+        state = SharedCollaborationState()
+        state = self._decision(state)
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._impl_packet(), "corr-1",
+                           "coder", "architect"),
+            "REPLY", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._test_packet(), "corr-2",
+                           "tester", "reviewer"),
+            "REQUEST", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._review_packet(), "corr-3",
+                           "reviewer", "architect"),
+            "REQUEST", "DELIVERED")
+        return state
+
+    # -- 2. FOUR_STAGE 成功投影 -------------------------------------------
+
+    def test_four_stage_success_full_projection(self):
+        lines = host_entry._result_projection_lines(
+            self._four_stage_state(), self.TASK)
+        self.assertEqual(tuple(lines), self.EXPECTED_FOUR_STAGE)
+
+    # -- 3. failure-only：不伪造结果 --------------------------------------
+
+    def test_architect_invalid_failure_only_is_honest(self):
+        state = self._decision(SharedCollaborationState())
+        state = state.append_failure(self.TASK,
+                                     status="ARCHITECT_PACKET_INVALID")
+        self.assertEqual(
+            host_entry._result_projection_lines(state, self.TASK),
+            ("dual-agent: result not delivered: ARCHITECT_PACKET_INVALID",))
+
+    # -- 4. 前置合法结果 + tester 失败 ------------------------------------
+
+    def test_partial_results_with_tester_failure(self):
+        state = SharedCollaborationState()
+        state = self._decision(state)
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._impl_packet(), "corr-1",
+                           "coder", "architect"),
+            "REPLY", "DELIVERED")
+        state = state.append_failure(self.TASK,
+                                     status="TESTER_PACKET_INVALID")
+        lines = host_entry._result_projection_lines(state, self.TASK)
+        self.assertEqual(len(lines), 9)  # arch 4 + impl 4 + 诚实失败行
+        self.assertTrue(lines[0].startswith(
+            "dual-agent: result architecture goal[1]: "))
+        self.assertIn(
+            "dual-agent: result implementation summary: "
+            "Split parser into a module.", lines)
+        self.assertEqual(
+            lines[-1],
+            "dual-agent: result not delivered: TESTER_PACKET_INVALID")
+
+    # -- 5. SINGLE / decision-only：结构事实=无 payload 入账 ---------------
+
+    def test_single_decision_only_projects_nothing(self):
+        state = self._decision(SharedCollaborationState())
+        self.assertEqual(
+            host_entry._result_projection_lines(state, self.TASK), ())
+
+    # -- 6. dict 字段只计数 ------------------------------------------------
+
+    def test_dict_fields_counted_not_expanded(self):
+        lines = host_entry._result_projection_lines(
+            self._four_stage_state(), self.TASK)
+        joined = "\n".join(lines)
+        for dict_content in ("iface-1", "finding-x", "criteria-a", "latency"):
+            self.assertNotIn(dict_content, joined, dict_content)
+        self.assertIn("dual-agent: result review findings_count=1", lines)
+        self.assertIn(
+            "dual-agent: result tests run=1 passed=1 failed=0 "
+            "failure_items=0", lines)
+
+    # -- 7. 禁区字段 -------------------------------------------------------
+
+    def test_forbidden_internal_fields_absent(self):
+        lines = host_entry._result_projection_lines(
+            self._four_stage_state(), self.TASK)
+        joined = "\n".join(lines)
+        for forbidden in ("addr-architect", "addr-coder", "addr-tester",
+                          "addr-reviewer", "corr-1", "corr-2", "corr-3"):
+            self.assertNotIn(forbidden, joined, forbidden)
+
+    # -- 8. 确定性 ---------------------------------------------------------
+
+    def test_deterministic_output(self):
+        state = self._four_stage_state()
+        first = host_entry._result_projection_lines(state, self.TASK)
+        second = host_entry._result_projection_lines(state, self.TASK)
+        self.assertEqual(tuple(first), tuple(second))
+
+    # -- 9. 畸形 wire 隔离 --------------------------------------------------
+
+    def test_malformed_wire_isolated(self):
+        bad = CollaborationRecord(
+            task_id=self.TASK, correlation_id="corr-bad", sequence=1,
+            direction=CollaborationDirection.REQUEST, wire="{not-json")
+        state = SharedCollaborationState(_records={self.TASK: (bad,)})
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        self.assertEqual(
+            host_entry._result_projection_lines(state, self.TASK),
+            ("dual-agent: result record skipped: UNDECODABLE",
+             "dual-agent: result architecture goal[1]: goal-a",
+             "dual-agent: result architecture goal[2]: goal-b",
+             "dual-agent: result architecture[1]: component split",
+             "dual-agent: result architecture constraints[1]: constraint-a"))
+
+    # -- 10. ledger sequence 顺序 -------------------------------------------
+
+    def test_ledger_sequence_ordering(self):
+        state = SharedCollaborationState()
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        state = state.append_failure(self.TASK,
+                                     status="TRANSPORT_FAILED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._impl_packet(), "corr-1",
+                           "coder", "architect"),
+            "REPLY", "DELIVERED")
+        lines = host_entry._result_projection_lines(state, self.TASK)
+        self.assertEqual(len(lines), 9)
+        self.assertTrue(lines[3].startswith(
+            "dual-agent: result architecture constraints[1]: "))
+        self.assertEqual(lines[4],
+                         "dual-agent: result not delivered: TRANSPORT_FAILED")
+        self.assertTrue(lines[5].startswith(
+            "dual-agent: result implementation summary: "))
+
+    # -- 11. 空 ledger ------------------------------------------------------
+
+    def test_empty_ledger_yields_no_lines(self):
+        self.assertEqual(
+            host_entry._result_projection_lines(
+                SharedCollaborationState(), self.TASK), ())
+
+    # -- 12. 多 task 隔离 ---------------------------------------------------
+
+    def test_multiple_tasks_isolated(self):
+        other = "other-task"
+        state = self._four_stage_state()
+        state = state.append_envelope(
+            other,
+            self._envelope(self._arch_packet(other), "corr-x",
+                           "architect", "coder", task=other),
+            "REQUEST", "DELIVERED")
+        mine = host_entry._result_projection_lines(state, self.TASK)
+        self.assertEqual(tuple(mine), self.EXPECTED_FOUR_STAGE)
+        theirs = host_entry._result_projection_lines(state, other)
+        self.assertEqual(len(theirs), 4)  # 只含 other 的 arch 投影
+
+    # -- 1. stdout 不变量 + stderr 投影（集成） -----------------------------
+
+    def _run_main(self, argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                argv, factories=two_family_factories(),
+                evidence=two_family_evidence())
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_stdout_invariant_stderr_projection_offline_four_stage(self):
+        code, out, err = self._run_main(
+            ["run", "--min-runtimes", "1", "--mode", "on",
+             "redesign architecture across modules"])
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 1)  # stdout 恰一行
+        payload = json.loads(lines[0])
+        self.assertEqual(
+            sorted(payload),
+            ["failure_category", "mode", "path", "provenance",
+             "stage_counts", "stages", "status", "task_id"])  # schema 不变
+        self.assertIn("dual-agent: result architecture goal[1]: ", err)
+        self.assertIn("dual-agent: result implementation summary: ", err)
+        self.assertIn("dual-agent: result tests run=", err)
+        self.assertIn("dual-agent: result review status: ", err)
+        self.assertNotIn("dual-agent: result ", out)  # 投影绝不入 stdout
+
+    def test_single_path_emits_no_result_lines(self):
+        # SINGLE/OFF 路径 payload 不入 ledger（结构事实）→ 零结果行；
+        # 该路径离线引擎结果（SUCCESS/FAILED）与本 CU 无关，只锁定投影
+        # 行为：stdout 单行契约保持 + stderr 无任何 result 投影行。
+        code, out, err = self._run_main(["run", "--mode", "off", "tiny task"])
+        self.assertIn(code, (0, 2))  # 既有 exit 契约不变
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertNotIn("dual-agent: result ", err)
 
 
 if __name__ == "__main__":

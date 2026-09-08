@@ -388,6 +388,88 @@ def _print_rejections(rejected) -> None:
               f"{item.reason}: {item.detail}", file=sys.stderr)
 
 
+_RESULT_PREFIX = "dual-agent: result "
+
+
+def _projection_items(out, label, values) -> None:
+    """列表字段逐项一行（1 基序号，确定性输出）。"""
+    for index, value in enumerate(values, start=1):
+        out.append(f"{_RESULT_PREFIX}{label}[{index}]: {value}")
+
+
+def _packet_projection_lines(envelope) -> list:
+    """单个已验证 envelope 的白名单投影。
+
+    只读 payload 的字符串/字符串元组字段；dict 形状字段（interfaces/
+    implementation_steps/risks/failures/findings）按 CU-R1 设计只计数、
+    不展开（自由形状不做渲染面）。字段清单是封闭白名单：goal/
+    architecture/constraints；summary/changed_files/details/unresolved；
+    测试计数/coverage/remaining_risks；status/severity/required_changes/
+    findings_count。绝不输出 wire 原文、trace、agent 地址或
+    correlation_id。
+    """
+    payload = envelope.payload
+    kind = envelope.payload_type.value
+    out = []
+    if kind == "ARCHITECTURE":
+        _projection_items(out, "architecture goal", payload.goal)
+        _projection_items(out, "architecture", payload.architecture)
+        _projection_items(out, "architecture constraints", payload.constraints)
+    elif kind == "IMPLEMENTATION":
+        out.append(f"{_RESULT_PREFIX}implementation summary: "
+                   f"{payload.implementation_summary}")
+        _projection_items(out, "implementation changed_files",
+                          payload.changed_files)
+        _projection_items(out, "implementation details",
+                          payload.implementation_details)
+        _projection_items(out, "implementation unresolved",
+                          payload.unresolved_items)
+    elif kind == "TEST":
+        out.append(f"{_RESULT_PREFIX}tests run={len(payload.tests_run)} "
+                   f"passed={len(payload.tests_passed)} "
+                   f"failed={len(payload.tests_failed)} "
+                   f"failure_items={len(payload.failures)}")
+        _projection_items(out, "tests coverage",
+                          payload.coverage_or_validation)
+        _projection_items(out, "tests remaining_risks",
+                          payload.remaining_risks)
+    elif kind == "REVIEW":
+        out.append(f"{_RESULT_PREFIX}review status: {payload.status}")
+        _projection_items(out, "review severity", payload.severity)
+        _projection_items(out, "review required_changes",
+                          payload.required_changes)
+        out.append(f"{_RESULT_PREFIX}review findings_count="
+                   f"{len(payload.findings)}")
+    return out
+
+
+def _result_projection_lines(state, task_id) -> tuple:
+    """CU-R1：ledger → 安全结果摘要行（纯函数：无 I/O、无时间、无随机）。
+
+    数据源是 append-only 账本里已经固化的 envelope wire —— append 之前
+    payload 已通过 packet 构造（schema + secret-shape 扫描）与全包 unsafe
+    扫描，envelope() 重解码构成读取侧二次验证。逐 record 按 sequence：
+    DECISION 静默跳过；FAILURE → 诚实未交付行（不伪造结果）；解码失败 →
+    skip 行绝不中断；REQUEST/REPLY → 白名单投影。SINGLE/OFF 路径的
+    payload 不入账本（结构事实）→ 自然零投影。
+    """
+    lines = []
+    for record in state.history(task_id):
+        direction = record.direction.value
+        if direction == "DECISION":
+            continue
+        if direction == "FAILURE":
+            lines.append(f"{_RESULT_PREFIX}not delivered: {record.status}")
+            continue
+        try:
+            envelope = record.envelope()
+        except (ValueError, TypeError):
+            lines.append(f"{_RESULT_PREFIX}record skipped: UNDECODABLE")
+            continue
+        lines.extend(_packet_projection_lines(envelope))
+    return tuple(lines)
+
+
 def _qualify_summary(session, saved) -> dict:
     """qualify 的安全 JSON summary：逐 runtime 诚实结果（结构来自既有
     RuntimeBootstrapEntry，构造时已 secret-free 校验），别无敏感面。"""
@@ -536,7 +618,13 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
     # exit 语义在本层稳定映射。
     summary = run_cli(facade, argv)
     print(summary)
-    return exit_code_for(json.loads(summary)["status"])
+    payload = json.loads(summary)
+    # CU-R1（Run Result Delivery）：安全结果投影走 stderr —— stdout 保持
+    # 恰一行机器 JSON 的既有契约。task_id 即 CLI 的任务标识（渲染层
+    # 权威投影）；投影只读 facade.state 账本里已验证的 envelope。
+    for line in _result_projection_lines(facade.state, payload["task_id"]):
+        print(line, file=sys.stderr, flush=True)
+    return exit_code_for(payload["status"])
 
 
 def main(argv=None, *, factories=None, evidence=None, qualifier=None,
