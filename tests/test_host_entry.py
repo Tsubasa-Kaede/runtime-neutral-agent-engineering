@@ -24,6 +24,7 @@
 """
 import io
 import json
+import re
 import sys
 import tempfile
 import types
@@ -289,28 +290,32 @@ class DefaultFacadeTests(unittest.TestCase):
         self.assertIsInstance(facade, ProductionFacade)
 
     def test_facade_pool_comes_from_session_evidence(self):
-        # 不创建第二套 runtime truth：既有 Automatic entry 语义 = 排序后
-        # 首个 admitted runtime 装 pool（零语义漂移）；其身份 = evidence 键
-        # （bootstrap_runtime_session 的复用语义，rc3 C4 先例）。
+        # 不创建第二套 runtime truth：P1-1 后 admitted 全集（≥2）经既有
+        # build_facade_from_agents 装进同一个 VerifiedRuntimePool —— 身份
+        # = evidence 键（bootstrap_runtime_session 的复用语义，rc3 C4
+        # 先例）；确定性排序（sorted identities）。
         facade = host_entry.default_facade(
             factories=two_family_factories(),
             evidence=two_family_evidence())
         identities = facade._orchestrator._pool.identities()
-        self.assertEqual(identities, (("rt-a", "provider-a", None, "default"),))
+        self.assertEqual(identities, (
+            ("rt-a", "provider-a", None, "default"),
+            ("rt-b", "provider-b", None, "default")))
 
     def test_composition_order_registry_then_health_then_bootstrap(self):
         # 顺序证据：default_facade 先构造 registry 与 current_health，
-        # 再交给既有 build_facade_from_bootstrap（patch 记录调用序）。
+        # 再 bootstrap（patch 记录调用序）；P1-1 起 bootstrap 在本层一次
+        # 完成并按 admitted 基数分流组合。
         calls = []
-        real_bootstrap = host_entry.build_facade_from_bootstrap
+        real_bootstrap = host_entry.bootstrap_runtime_session
 
         def spy_bootstrap(registry, **kwargs):
             calls.append(("bootstrap", sorted(
                 d.runtime_id for d in registry.list()),
-                sorted(kwargs.get("current_health") or {})))
+                sorted(host_entry.observe_current_health(registry))))
             return real_bootstrap(registry, **kwargs)
 
-        with patch.object(host_entry, "build_facade_from_bootstrap",
+        with patch.object(host_entry, "bootstrap_runtime_session",
                           side_effect=spy_bootstrap):
             host_entry.default_facade(
                 factories=two_family_factories(),
@@ -1345,11 +1350,13 @@ class PacketRejectDiagnosticsTests(unittest.TestCase):
         return (lambda: adapter,
                 lambda: FakeFamilyAdapter("rt-b", "provider-b"))
 
-    def _run(self, factories):
+    def _run(self, factories, flags=()):
+        argv = ["run", "--min-runtimes", "1", "--mode", "on", *flags,
+                self.TASK]
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = host_entry.main(
-                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                argv,
                 factories=factories, evidence=two_family_evidence())
         return code, stdout.getvalue(), stderr.getvalue()
 
@@ -1425,9 +1432,13 @@ class PacketRejectDiagnosticsTests(unittest.TestCase):
     def test_coder_not_a_list_e2e_attributed_to_stage(self):
         # 同 run 内跨阶段归属：architect 成功（无记录）、coder 拒绝 →
         # 诊断新鲜且归属 coder；_normalize 原样保留（数字非字符串，
-        # 归一化救不了 → 依旧拒绝，语义零变化）。
+        # 归一化救不了 → 依旧拒绝，语义零变化）。P1-1 起 spread 会把
+        # coder 落到 rt-b（好 adapter），故钉 allowlist=rt-a 保持本缝隙
+        # 的原证明场景（拒收归因按角色键、runtime-neutral；多 runtime
+        # 分工由 MultiRuntimeCompositionWiringTests 锁定）。
         code, out, err = self._run(
-            self._reject_role_factory("coder", _CODER_NUMBER_LIST_OUTPUT))
+            self._reject_role_factory("coder", _CODER_NUMBER_LIST_OUTPUT),
+            flags=("--runtimes", "rt-a"))
         self.assertEqual(code, 2)
         self.assertIn("stage=coder rule=NOT_A_LIST", err)
         self.assertIn("field=changed_files", err)
@@ -1744,11 +1755,13 @@ class PacketForensicsCaptureTests(unittest.TestCase):
         return (lambda: adapter,
                 lambda: FakeFamilyAdapter("rt-b", "provider-b"))
 
-    def _run(self, factories):
+    def _run(self, factories, flags=()):
+        argv = ["run", "--min-runtimes", "1", "--mode", "on", *flags,
+                self.TASK]
         stdout, stderr = io.StringIO(), io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             code = host_entry.main(
-                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                argv,
                 factories=factories, evidence=two_family_evidence())
         return code, stdout.getvalue(), stderr.getvalue()
 
@@ -1808,8 +1821,12 @@ class PacketForensicsCaptureTests(unittest.TestCase):
         self.assertEqual(len(out.splitlines()), 1)
 
     def test_two_invocations_distinct_files_no_overwrite(self):
+        # P1-1 起 spread 把 coder 落到 rt-b，角色注入的坏输出将不再到达
+        # parser —— 钉 allowlist=rt-a 保持「两次成功调用、两份取证、互不
+        # 覆盖」的原证明场景。
         code, out, err = self._run(
-            self._forensics_factory("coder", '{"a": 1'))
+            self._forensics_factory("coder", '{"a": 1'),
+            flags=("--runtimes", "rt-a"))
         self.assertEqual(code, 2)
         records = self._forensics_files(err)
         self.assertEqual(len(records), 2)
@@ -1824,7 +1841,8 @@ class PacketForensicsCaptureTests(unittest.TestCase):
 
     def test_secret_shaped_reject_never_plaintext_on_disk(self):
         code, out, err = self._run(
-            self._forensics_factory("coder", self._SECRET_CODER))
+            self._forensics_factory("coder", self._SECRET_CODER),
+            flags=("--runtimes", "rt-a"))
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(out)["status"], "CODER_PACKET_INVALID")
         records = self._forensics_files(err)
@@ -1856,6 +1874,172 @@ class PacketForensicsCaptureTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertNotIn("packet forensics", err)
         self.assertIn("rule=JSON_PARSE_OR_NON_OBJECT", err)
+
+
+class MultiRuntimeCompositionWiringTests(unittest.TestCase):
+    """P1-1（Normal CLI Multi-Runtime Composition Wiring）：admitted ≥ 2 时
+    默认组合根经既有 build_facade_from_agents 形成多 runtime 池 —— 角色指
+    派/policy/admission 真相全部留在既有件；admitted == 1 既有单 runtime
+    路径逐字保持；组合前置缺失诚实失败，绝不静默降级。"""
+
+    COMPLEX_TASK = "redesign architecture across modules"
+    SIMPLE_TASK = "fix one simple bug"
+
+    @staticmethod
+    def _runtime_by_stage(err):
+        mapping = {}
+        for line in err.splitlines():
+            match = re.match(
+                r"\[\d+\] INVOCATION_FINISHED stage=(\S+) runtime=(\S+)",
+                line)
+            if match:
+                mapping[match.group(1)] = match.group(2)
+        return mapping
+
+    def _run(self, argv, *, factories=None, evidence=None,
+             current_health=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                argv,
+                factories=factories or two_family_factories(),
+                evidence=evidence or two_family_evidence(),
+                current_health=current_health)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    # -- 1. DOUBLE ADMITTED ------------------------------------------------
+
+    def test_double_admitted_multi_pool_and_heterogeneous_stages(self):
+        facade = host_entry.default_facade(
+            factories=two_family_factories(),
+            evidence=two_family_evidence())
+        identities = facade._orchestrator._pool.identities()
+        self.assertEqual(identities, (
+            ("rt-a", "provider-a", None, "default"),
+            ("rt-b", "provider-b", None, "default")))
+
+        # 默认 policy（min=2）在多池上不再因组合层原因 UNSATISFIED。
+        code, out, err = self._run(["run", "--mode", "on", "--observe",
+                                    self.COMPLEX_TASK])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["path"], "FOUR_STAGE")
+        self.assertIn("ROLE_ASSIGNMENT=POLICY_SPREAD", err)
+        self.assertNotIn("POLICY_COUNT_UNSATISFIED", err)
+        stage_runtime = self._runtime_by_stage(err)
+        self.assertEqual(stage_runtime.get("architect"), "rt-a")
+        self.assertEqual(stage_runtime.get("coder"), "rt-b")
+        # 跨 runtime 移交：DUAL 半程 handoff 的目的 runtime = coder 方。
+        self.assertIn("HANDOFF stage=architect runtime=rt-b", err)
+
+    # -- 2. SINGLE REGRESSION ----------------------------------------------
+
+    def test_single_admitted_keeps_existing_single_runtime_path(self):
+        single_evidence = {
+            ("rt-a", "provider-a", None, "default"): evidence_for("rt-a"),
+        }
+        facade = host_entry.default_facade(
+            factories=(lambda: FakeFamilyAdapter("rt-a"),),
+            evidence=single_evidence)
+        identities = facade._orchestrator._pool.identities()
+        self.assertEqual(identities,
+                         (("rt-a", "provider-a", None, "default"),))
+
+        code, out, err = self._run(
+            ["run", "--min-runtimes", "1", "--mode", "on", "--observe",
+             self.COMPLEX_TASK],
+            factories=(lambda: FakeFamilyAdapter("rt-a"),),
+            evidence=single_evidence)
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["path"], "FOUR_STAGE")
+        stage_runtime = self._runtime_by_stage(err)
+        self.assertTrue(stage_runtime)
+        self.assertEqual(set(stage_runtime.values()), {"rt-a"})
+
+    # -- 3. NO-RUNTIME-REUSE -------------------------------------------------
+
+    def test_no_runtime_reuse_keeps_roles_on_distinct_runtimes(self):
+        code, out, err = self._run(
+            ["run", "--no-runtime-reuse", "--mode", "on", "--observe",
+             self.COMPLEX_TASK])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["status"], "SUCCESS")
+        stage_runtime = self._runtime_by_stage(err)
+        self.assertNotEqual(stage_runtime.get("architect"),
+                            stage_runtime.get("coder"))
+
+    # -- 4. RUNTIME ALLOWLIST ------------------------------------------------
+
+    def test_runtime_allowlist_flows_through_existing_policy(self):
+        code, out, err = self._run(
+            ["run", "--runtimes", "rt-b", "--min-runtimes", "1",
+             "--mode", "on", "--observe", self.COMPLEX_TASK])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["status"], "SUCCESS")
+        stage_runtime = self._runtime_by_stage(err)
+        self.assertTrue(stage_runtime)
+        self.assertEqual(set(stage_runtime.values()), {"rt-b"})
+
+    # -- 5. SIMPLE/AUTO REGRESSION -------------------------------------------
+
+    def test_auto_simple_routes_single_on_multi_pool(self):
+        code, out, err = self._run(["run", self.SIMPLE_TASK])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["path"], "SINGLE")
+        self.assertEqual(sorted(payload), sorted([
+            "status", "task_id", "mode", "path", "stages", "stage_counts",
+            "provenance", "failure_category"]))
+
+    # -- 6. MISSING HEALTH / EVIDENCE（D4 诚实失败）--------------------------
+
+    def test_missing_health_for_admitted_runtime_fails_honestly(self):
+        registry, _ = host_entry.environment_registry(
+            two_family_factories())
+        partial_health = {
+            runtime_id: status
+            for runtime_id, status
+            in host_entry.observe_current_health(registry).items()
+            if runtime_id == "rt-a"
+        }
+        self.assertEqual(sorted(partial_health), ["rt-a"])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["run", "--min-runtimes", "2", "--mode", "on", "--observe",
+                 self.COMPLEX_TASK],
+                factories=two_family_factories(),
+                evidence=two_family_evidence(),
+                current_health=partial_health)
+        self.assertEqual(code, 2)
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("no current health", combined)
+        self.assertIn("rt-b", combined)
+        # 绝不静默降级成单 runtime 成功。
+        self.assertNotIn('"status":"SUCCESS"', stdout.getvalue().replace(" ", ""))
+
+    # -- 7. ATTRIBUTION 只透传不消费 -----------------------------------------
+
+    def test_attribution_never_surfaces_in_cli_output(self):
+        code, out, err = self._run(["run", "--mode", "on", "--observe",
+                                    self.COMPLEX_TASK])
+        self.assertEqual(code, 0)
+        self.assertNotIn("attribution", out)
+        self.assertNotIn("attribution", err)
+        event_types = set()
+        for line in err.splitlines():
+            match = re.match(r"\[\d+\] ([A-Z_]+) ", line)
+            if match:
+                event_types.add(match.group(1))
+        self.assertTrue(event_types)
+        self.assertTrue(event_types <= {
+            "DECISION", "STAGE_STARTED", "INVOCATION_STARTED",
+            "INVOCATION_FINISHED", "STAGE_FINISHED", "HANDOFF",
+            "TERMINAL"})
 
 
 if __name__ == "__main__":

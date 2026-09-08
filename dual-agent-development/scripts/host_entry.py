@@ -167,7 +167,11 @@ try:  # installed-package mode: dependencies are package siblings
     from .evidence_store import load_evidence, save_evidence
     from .external_runtime import new_invocation_id
     from .generic_runtime_health import GenericRuntimeHealth
-    from .host import build_facade_from_bootstrap
+    from .host import (
+        _CAPS_ALL,
+        build_facade,
+        build_facade_from_bootstrap,
+    )
     from .real_validation_executor import run_real_validation
     from .runtime_adapter_registry import (
         AdapterDescriptor,
@@ -181,7 +185,11 @@ except ImportError:  # source-tree flat-import mode (tests/examples)
     from evidence_store import load_evidence, save_evidence
     from external_runtime import new_invocation_id
     from generic_runtime_health import GenericRuntimeHealth
-    from host import build_facade_from_bootstrap
+    from host import (
+        _CAPS_ALL,
+        build_facade,
+        build_facade_from_bootstrap,
+    )
     from real_validation_executor import run_real_validation
     from runtime_adapter_registry import (
         AdapterDescriptor,
@@ -205,6 +213,12 @@ from content_safety import (
     next_diagnostic_generation,
 )
 import packet_forensics
+
+# P1-1（multi-runtime composition wiring）：既有 V3.0 组合根的只读复用 ——
+# 本模块零新裁决、零 composition 逻辑复制（agent_host 已按不变量锁定）。
+from agent_host import build_facade_from_agents
+from agent_identity import AgentIdentity, AgentRuntimeBinding
+from agent_manifest import AgentManifest, AgentRegistry
 
 # 默认家族接线表（数据，非行为）：每家环境发现的真相在其自身
 # from_environment 内 —— 这里只登记 (模块, 类型) 并按同一契约循环，
@@ -288,23 +302,88 @@ def observe_current_health(registry):
     return statuses
 
 
+# CLI 组合翻译层的确定性 agent 命名（V3.0-A 纪律：agent_id 不含任何
+# runtime/provider/model/config 事实 —— 名字只有位置序号，顺序 = sorted
+# runtime_id；与 runtime 的对应关系由 binding 携带，同输入必同输出）。
+_CLI_AGENT_ID = "cli-agent-"
+
+# 声明角色 = 资格证据已证明的四协作能力投影：bootstrap 以 _CAPS_ALL 准入
+# ⇒ admitted 必然四能力全证 ⇒ 声明四角色与证据一致（组合根的双向能力
+# 一致性不变量因此成立）—— 本层不制造新的能力真相。
+_CLI_DECLARED_ROLES = ("architect", "coder", "tester", "reviewer")
+
+
+def _facade_from_admitted(session, registry, current_health,
+                          timeout_seconds):
+    """P1-1 翻译层：admitted ≥ 2 → 既有 build_facade_from_agents。
+
+    职责严格局限于 admitted entries → 内存 AgentManifest/binding 投影 →
+    确定性 agent_ids → 既有 V3.0 组合根（逐 runtime admission、跨 runtime
+    角色地址宇宙、多 runtime 池全部由其不变量锁定，本层零复制零裁决）。
+    attribution 仅透传不消费（Observation/Event 契约零改动）。缺
+    health/evidence/组合前置的拒绝由组合根封闭词表原样上抛 —— 诚实失败，
+    绝不静默降级单 runtime。"""
+    agent_registry = AgentRegistry()
+    agent_ids = []
+    admitted = sorted(
+        (entry for entry in session.entries if entry.admitted),
+        key=lambda entry: entry.runtime_id)
+    for index, entry in enumerate(admitted, start=1):
+        descriptor = registry.get(entry.runtime_id)
+        agent_id = f"{_CLI_AGENT_ID}{index}"
+        agent_registry.register(AgentManifest(
+            binding=AgentRuntimeBinding(
+                AgentIdentity(agent_id), descriptor.identity),
+            declared_roles=_CLI_DECLARED_ROLES,
+            adapter_factory=descriptor.adapter_factory,
+        ))
+        agent_ids.append(agent_id)
+    facade, _attribution = build_facade_from_agents(
+        agent_registry, tuple(agent_ids), session.evidence,
+        current_health, timeout_seconds=timeout_seconds)
+    return facade
+
+
 def default_facade(*, factories=None, evidence=None, qualifier=None,
                    current_health=None,
                    timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
-    """默认组合：registry → 时点健康 → 既有 Automatic entry。
+    """默认组合：registry → 时点健康 → bootstrap → 按 admitted 基数分流。
 
-    全部语义在既有件内：admission/选择/执行由 build_facade_from_bootstrap
-    内部的 bootstrap_runtime_session 与 build_facade 承担；本函数只做
-    顺序接线（registry 先行，health 未注入时观测，然后交给既有入口）。
+    P1-1（multi-runtime composition wiring）：
+    - admitted ≥ 2 → _facade_from_admitted → 既有 build_facade_from_agents：
+      admitted 全集装进一个多 runtime 池，角色指派/policy/admission 真相
+      全部留在既有件（bridge + assigner/policy + 既有准入机器）。
+    - admitted == 1 → 既有单 runtime 组合原样尾部（同一 session 的
+      admitted[0] → 既有 build_facade；与既有 Automatic entry 的差别仅在
+      不重复 bootstrap —— 输入对象与构造调用逐字相同，健康观测次数与
+      既有路径一致）。
+    - admitted == 0 → 交给既有 Automatic entry 抛出规范组合失败（含全部
+      entry 理由）。
     """
     registry, _skipped = environment_registry(factories)
     if current_health is None:
         current_health = observe_current_health(registry)
-    return build_facade_from_bootstrap(
+    session = bootstrap_runtime_session(
         registry, evidence=evidence, qualifier=qualifier,
-        current_health=current_health,
-        timeout_seconds=timeout_seconds,
-    )
+        required_capabilities=_CAPS_ALL)
+    admitted = [entry for entry in session.entries if entry.admitted]
+    if len(admitted) >= 2:
+        return _facade_from_admitted(
+            session, registry, current_health, timeout_seconds)
+    if not admitted:
+        return build_facade_from_bootstrap(
+            registry, evidence=evidence, qualifier=qualifier,
+            current_health=current_health,
+            timeout_seconds=timeout_seconds,
+        )
+    # admitted == 1：既有 Automatic entry 的组合尾部（同一 session、同一
+    # admitted[0]、同一既有 build_facade 调用）。
+    entry = admitted[0]
+    descriptor = registry.get(entry.runtime_id)
+    validation = session.evidence[descriptor.identity]
+    adapter = descriptor.adapter_factory()
+    return build_facade(adapter, validation, current_health,
+                        timeout_seconds=timeout_seconds)
 
 
 def qualify_runtimes(*, factories=None, base_dir=DEFAULT_EVIDENCE_DIR,
