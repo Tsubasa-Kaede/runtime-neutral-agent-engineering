@@ -13,6 +13,13 @@ existing normalization and content-safety boundaries. The executor expresses
 evidence; it never fabricates success: provenance="REAL" is passed by the
 helper solely when the real gate is open (with real invocation evidence),
 and any gate failure keeps the result at BLOCKED/FAILED.
+
+CU-P0 observability: an optional `progress` callback (default None = zero
+output, existing callers unchanged) receives short fixed-vocabulary lines for
+the real model invocations — G5 plus each G14 experiment — with
+starting/completed/failed, the configured timeout bound and the measured
+duration. Presentation only: lines go to stderr at the CLI boundary and
+never enter any GateResult evidence surface.
 """
 from __future__ import annotations
 
@@ -76,6 +83,12 @@ _SECRET_MARKERS = ("token", "secret", "api_key", "authorization", "bearer", "std
 GATE_ENV_NAME = "RUN_REAL_PROVIDER_TESTS"
 
 
+def _fmt_bound(seconds: float) -> str:
+    """Progress-line timeout bound: 300.0 -> '300', 12.5 -> '12.5'."""
+    value = float(seconds)
+    return str(int(value)) if value.is_integer() else f"{value:g}"
+
+
 def _secret_shaped(text: str) -> bool:
     lowered = (text or "").lower()
     return any(marker in lowered for marker in _SECRET_MARKERS)
@@ -93,6 +106,7 @@ class RealGateExecutor:
         protected_paths: Sequence[Path] = (),
         identity: tuple | None = None,
         env: Mapping[str, str] | None = None,
+        progress: Callable[[str], None] | None = None,
     ):
         self.adapter = adapter
         self._agent_id = agent_id
@@ -101,6 +115,7 @@ class RealGateExecutor:
         self._identity = identity
         self._env = os.environ if env is None else env
         self._gate_enabled = self._env.get(GATE_ENV_NAME, "") == "1"
+        self._progress = progress
         self._snapshot_before = self._snapshot_paths()
         self.invocation_count = 0
         self._last_result = None
@@ -115,6 +130,28 @@ class RealGateExecutor:
 
     def note_executed_at(self, value: float) -> None:
         self._executed_at = value
+
+    # -- CU-P0 progress (fixed-vocabulary lines; never enters evidence) ---
+
+    def _emit_progress_start(self, label: str) -> float:
+        if self._progress is not None:
+            self._progress(
+                f"dual-agent: qualify {label} starting "
+                f"(timeout={_fmt_bound(self._timeout_seconds)}s)")
+        return time.perf_counter()
+
+    def _emit_progress_end(self, label: str, started: float,
+                           status: str | None) -> None:
+        if self._progress is None:
+            return
+        duration = time.perf_counter() - started
+        if status is None:
+            self._progress(
+                f"dual-agent: qualify {label} completed ({duration:.1f}s)")
+        else:
+            self._progress(
+                f"dual-agent: qualify {label} failed "
+                f"(status={status} after {duration:.1f}s)")
 
     # -- gate dispatch ----------------------------------------------------
 
@@ -180,11 +217,14 @@ class RealGateExecutor:
             model=getattr(self.adapter, "model_id", None),
             timeout_seconds=self._timeout_seconds,
         )
+        label = "G5 minimal invocation"
+        started = self._emit_progress_start(label)
         try:
             result = self.adapter.invoke(request)
         except Exception as exc:
             # Exception TYPE only: messages/args may contain paths, prompts,
             # raw runtime output or secrets and must never enter evidence.
+            self._emit_progress_end(label, started, "EXCEPTION")
             return self._failed(
                 gate, "INVOCATION_FAILED: executor raised during invocation",
                 evidence={"exception_type": type(exc).__name__})
@@ -195,6 +235,9 @@ class RealGateExecutor:
         status_value = getattr(status, "value", status)
         text = str(getattr(result, "output", "") or "").strip()
         self._output_class = "exact_ok" if (text.upper() == "OK" and text) else "unexpected_output"
+        self._emit_progress_end(
+            label, started,
+            None if status is InvocationStatus.SUCCESS else str(status_value))
         if status is InvocationStatus.SUCCESS:
             return GateResult(gate, GateVerdict.PASS,
                               evidence={"output_class": self._output_class, "output_len": len(text)})
@@ -393,11 +436,14 @@ class RealGateExecutor:
                 agent_id=role, role=role,
                 timeout_seconds=self._timeout_seconds,
             )
+            label = f"G14 capability [{index + 1}/{len(experiments)}] {role}"
+            started = self._emit_progress_start(label)
             try:
                 result = self.adapter.invoke(request)
             except Exception as exc:
                 # Record the exception TYPE only — messages may carry
                 # secrets, prompts or raw output and must never surface.
+                self._emit_progress_end(label, started, "EXCEPTION")
                 return self._g14_failure(
                     gate, role, "ADAPTER_EXCEPTION", None,
                     f"CAPABILITY_EXPERIMENT_FAILED: {role} adapter raised "
@@ -410,11 +456,16 @@ class RealGateExecutor:
             invocation_ids.append(str(getattr(trace, "invocation_id", "")))
             status = getattr(result, "status", None)
             if status is not InvocationStatus.SUCCESS:
+                self._emit_progress_end(
+                    label, started, str(getattr(status, "value", status)))
                 return self._g14_failure(
                     gate, role, "INVOCATION_FAILED",
                     getattr(status, "value", None),
                     f"CAPABILITY_EXPERIMENT_FAILED: {role} invocation failed",
                     base_evidence)
+            # The invocation itself finished; parse failures are gate-level
+            # outcomes reported through the result, not the invocation.
+            self._emit_progress_end(label, started, None)
             # Parse through the existing boundary: fence strip, normalization,
             # task identity, from_dict and whole-packet content safety.
             packet = _packet_from_output(result.output, packet_class, CAPABILITY_TASK_ID)
@@ -491,12 +542,14 @@ def run_real_validation(
     experiment_id: str | None = None,
     clock: Callable[[], float] = time.time,
     env: Mapping[str, str] | None = None,
+    progress: Callable[[str], None] | None = None,
 ):
     """Run the full gate chain; REAL provenance only when the opt-in gate is open."""
     source = os.environ if env is None else env
     executor = RealGateExecutor(
         adapter, agent_id=agent_id, timeout_seconds=timeout_seconds,
         protected_paths=protected_paths, identity=instance.identity, env=source,
+        progress=progress,
     )
     gate_open = source.get(GATE_ENV_NAME, "") == "1"
     provenance = "REAL" if gate_open else "OFFLINE"

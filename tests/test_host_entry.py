@@ -495,6 +495,132 @@ class QualifySurfaceTests(unittest.TestCase):
             self.assertEqual(payload["error"], "unsupported qualify arguments")
 
 
+class QualifyObservabilityTests(unittest.TestCase):
+    """CU-P0：`qualify --timeout-seconds` 与 stderr progress 的 CLI 契约。
+
+    stdout 单 JSON summary 契约（P1-U3）不变：进度行只走 stderr；
+    拒绝路径沿用既有 exit 2 + stderr JSON + stdout 空；默认 300.0 与
+    既有执行语义零漂移。"""
+
+    def _qualify(self, argv_extra, tmp, *, factories=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["qualify"] + argv_extra,
+                factories=(factories if factories is not None
+                           else two_family_factories()),
+                base_dir=tmp)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _bridge_stub(self, captured, lines=()):
+        """默认 REAL 桥的离线替身：捕获 timeout 透传 + 回放进度行。"""
+
+        def stub(instance, probe, **kwargs):
+            captured.append(kwargs.get("timeout_seconds"))
+            progress = kwargs.get("progress")
+            if progress is not None:
+                for line in lines:
+                    progress(line)
+            return (evidence_for(instance.runtime_id,
+                                 instance.provider_id), object())
+
+        return stub
+
+    def test_default_timeout_remains_300_seconds(self):
+        self.assertEqual(host_entry.DEFAULT_TIMEOUT_SECONDS, 300.0)
+
+    def test_space_form_flag_reaches_bridge_as_exact_float(self):
+        captured = []
+        with patch.object(host_entry, "run_real_validation",
+                          self._bridge_stub(captured)):
+            with tempfile.TemporaryDirectory() as tmp:
+                code, out, err = self._qualify(["--timeout-seconds", "60"], tmp)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(captured, [60.0, 60.0])  # 两个 fake 家族各一次
+        self.assertIsInstance(captured[0], float)
+
+    def test_equals_form_flag_reaches_bridge(self):
+        captured = []
+        with patch.object(host_entry, "run_real_validation",
+                          self._bridge_stub(captured)):
+            with tempfile.TemporaryDirectory() as tmp:
+                code, out, err = self._qualify(["--timeout-seconds=60"], tmp)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(captured, [60.0, 60.0])
+
+    def test_no_flag_uses_default_300(self):
+        captured = []
+        with patch.object(host_entry, "run_real_validation",
+                          self._bridge_stub(captured)):
+            with tempfile.TemporaryDirectory() as tmp:
+                code, out, err = self._qualify([], tmp)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(captured, [300.0, 300.0])
+
+    def _assert_rejected(self, argv_extra, expected_error):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._qualify(argv_extra, tmp)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")  # 拒绝路径 stdout 保持空（既有契约）
+        payload = json.loads(err)
+        self.assertEqual(payload["error"], expected_error)
+
+    def test_duplicate_flag_rejected(self):
+        self._assert_rejected(
+            ["--timeout-seconds", "60", "--timeout-seconds", "30"],
+            "duplicate --timeout-seconds")
+
+    def test_zero_rejected(self):
+        self._assert_rejected(["--timeout-seconds", "0"],
+                              "invalid --timeout-seconds")
+
+    def test_negative_rejected(self):
+        self._assert_rejected(["--timeout-seconds", "-5"],
+                              "invalid --timeout-seconds")
+
+    def test_non_numeric_rejected(self):
+        self._assert_rejected(["--timeout-seconds", "abc"],
+                              "invalid --timeout-seconds")
+
+    def test_missing_value_rejected(self):
+        self._assert_rejected(["--timeout-seconds"],
+                              "missing --timeout-seconds value")
+
+    def test_unknown_argument_with_flag_still_rejected(self):
+        self._assert_rejected(
+            ["--timeout-seconds", "60", "--bogus"],
+            "unsupported qualify arguments")
+
+    def test_progress_streams_to_stderr_stdout_stays_single_json(self):
+        captured = []
+        lines = ("dual-agent: qualify G5 minimal invocation starting (timeout=60s)",
+                 "dual-agent: qualify G5 minimal invocation completed (0.0s)")
+        with patch.object(host_entry, "run_real_validation",
+                          self._bridge_stub(captured, lines)):
+            with tempfile.TemporaryDirectory() as tmp:
+                code, out, err = self._qualify(
+                    ["--timeout-seconds", "60"], tmp)
+        self.assertEqual(code, 0)
+        payload = json.loads(out)  # stdout 仍恰一行合法 JSON
+        self.assertEqual(payload["command"], "qualify")
+        self.assertEqual(out.count("\n"), 1)
+        self.assertIn("starting (timeout=60s)", err)
+        self.assertIn("completed (0.0s)", err)
+        self.assertNotIn("qualify G5", out)
+
+    def test_offline_default_bridge_emits_no_invocation_progress(self):
+        # gate 关闭的真实 offline 链（不打桩）：G5 在 invoke 之前 BLOCKED
+        # —— 不产生 REAL invocation，也不产生假的 starting 事件。
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self._qualify([], tmp)
+        self.assertEqual(code, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "NOT_QUALIFIED")
+        self.assertNotIn("qualify G5", err)
+        self.assertNotIn("qualify G14", err)
+        self.assertNotIn("qualify G", out)
+
+
 class RunPersistenceTests(unittest.TestCase):
     # -- 覆盖 18/19/20/21/22：run 只读盘，绝不隐式 qualification ---------
 

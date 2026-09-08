@@ -146,6 +146,11 @@ dual-agent run "Add a slug helper and its test"          # reads persisted evide
 dual-agent run --observe "Add a slug helper and its test" # + execution events on stderr
 ```
 
+`qualify` streams per-invocation progress for its real model calls
+(G5 plus the four G14 experiments) to stderr, so long waits are visible;
+each call defaults to a 300-second bound, overridable with
+`--timeout-seconds <seconds>`.
+
 On a machine with no persisted evidence, `run` exits `2` with a
 machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) and a human hint
 pointing at `dual-agent qualify` — it never automatically qualifies and
@@ -659,7 +664,10 @@ dual-agent run --mode on   "Implement a GitHub webhook"
   runtimes and persists `VERIFIED` + `REAL` evidence under
   `~/.dual-agent/qualification/`. REAL invocation requires
   `RUN_REAL_PROVIDER_TESTS=1`; offline results are reported honestly and
-  are never persisted.
+  are never persisted. Each G5/G14 model call waits up to 300 seconds by
+  default — `--timeout-seconds <seconds>` overrides it per invocation,
+  and per-call progress lines stream to stderr while stdout stays a
+  single machine-readable JSON summary.
 - `run` only reads persisted evidence. With no evidence it exits `2` with
   a machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) and a human hint
   pointing at `dual-agent qualify` — it never automatically qualifies and

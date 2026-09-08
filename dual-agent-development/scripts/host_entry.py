@@ -58,6 +58,14 @@ P1-U4 打包/发布 UX 增量：
   见 import 处注释）：安装态包相对导入会实例化第二套 enum 类，
   qualify 的 VERIFIED `is` 判定跨图必假 —— 打包冒烟实测出的断裂点。
 
+CU-P0（qualify observability + configurable timeout）：
+- `qualify --timeout-seconds N`（空格或 = 赋值，恰一次，正 float）只覆盖
+  G5/G14 每次 REAL model invocation 的 timeout；默认 300.0 不变，health
+  的 min(30, ...) 与 G1/G2 固定界零触碰 —— 不改默认执行语义。解析住
+  本组合根（cli.py 冻结零修改，--version/--help parse-first 先例同层）。
+- G5/G14 逐调用进度行只走 stderr（stdout 单 JSON 契约独占），仅经默认
+  REAL 桥发射；gate 关闭时零事件（不产生假的 invocation progress）。
+
 边界与诚实性：
 - evidence 注入优先于盘：显式 evidence 参数（嵌入方面）原样传递，
   绝不被空盘覆盖。
@@ -103,6 +111,9 @@ DEFAULT_EVIDENCE_DIR = Path.home() / ".dual-agent" / "qualification"
 # 先例）—— 新机无证据/无家族也能拿到版本与帮助，绝不先组合失败。
 _ARGPARSE_FLAGS = ("--version", "--help", "-h")
 
+# CU-P0：qualify 的唯一可配置参数（每 invocation timeout，默认不变）。
+_QUALIFY_TIMEOUT_FLAG = "--timeout-seconds"
+
 _HINT_QUALIFY = "no persisted qualification evidence: run `dual-agent qualify` first"
 
 # 顶层产品帮助（P1-U4 §6）：cli.py 的 argparse 只认 run 子命令（V2 冻结
@@ -113,7 +124,7 @@ _PRODUCT_HELP = """dual-agent: runtime-neutral agent collaboration (local produc
 Usage:
   dual-agent --version
   dual-agent --help
-  dual-agent qualify
+  dual-agent qualify [--timeout-seconds <seconds>]
   dual-agent run [--mode off|auto|on] [--observe] "<task>"
 
 Commands:
@@ -121,7 +132,9 @@ Commands:
             chain and persist VERIFIED+REAL evidence under
             ~/.dual-agent/qualification/. REAL invocation requires
             RUN_REAL_PROVIDER_TESTS=1; offline results are reported
-            honestly and are never persisted.
+            honestly and are never persisted. Per-invocation model-call
+            timeout defaults to 300 seconds; --timeout-seconds overrides
+            it, and G5/G14 invocation progress streams to stderr.
   run       Execute a collaboration task through verified runtimes,
             reading persisted evidence. run never automatically qualifies:
             with no evidence it exits 2 and points to
@@ -280,7 +293,8 @@ def default_facade(*, factories=None, evidence=None, qualifier=None,
 
 def qualify_runtimes(*, factories=None, base_dir=DEFAULT_EVIDENCE_DIR,
                      qualifier=None,
-                     timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
+                     timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+                     progress=None):
     """显式 qualification surface（P1-U2b）：读发现 → 执行 qualifier →
     成功（VERIFIED+REAL）即持久化。
 
@@ -290,6 +304,8 @@ def qualify_runtimes(*, factories=None, base_dir=DEFAULT_EVIDENCE_DIR,
     （rc3 / gemini REAL 驱动同款接线），REAL 开门语义留在 GATE_ENV_NAME
     内 —— OFFLINE 结果照常返回、照常被 admission 拒绝，只是不落盘。
     持久化只发生在成功结果上：persistence 保存事实，不制造事实。
+    progress（CU-P0）只在默认桥里生效：G5/G14 逐调用进度行交给回调；
+    注入 qualifier 的嵌入面按其自身契约行事，本层不干预。
     返回 (session, rejected, saved_paths)。"""
     registry, _skipped = environment_registry(factories)
     if not registry.list():
@@ -308,7 +324,8 @@ def qualify_runtimes(*, factories=None, base_dir=DEFAULT_EVIDENCE_DIR,
             result, _executor = run_real_validation(
                 instance, instance.probe,
                 experiment_id=experiment_id,
-                timeout_seconds=timeout_seconds)
+                timeout_seconds=timeout_seconds,
+                progress=progress)
             return result
 
         qualifier = _real_bridge
@@ -397,17 +414,74 @@ def _qualify_summary(session, saved) -> dict:
     }
 
 
+def _coerce_qualify_timeout(text):
+    """正 float 校验（拒绝 0/负/NaN/inf/非数字）；返回 (value, problem)。
+
+    problem 是现成的 stderr JSON 错误载荷（invalid --timeout-seconds），
+    value 无问题时为 float、有问题时为 None。"""
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not (value > 0.0) or value == float("inf"):
+        return None, {"error": "invalid --timeout-seconds",
+                      "detail": f"not a positive number: {text}"}
+    return value, None
+
+
+def _parse_qualify_arguments(argv_rest):
+    """qualify 参数面解析（CU-P0；组合根层，cli.py 冻结零修改）。
+
+    只认恰一次 --timeout-seconds（`N` 空格赋值或 `=N`）；其余任何参数
+    返回既有 unsupported-arguments 错误载荷。返回 (timeout|None,
+    error|None) —— error 为现成 stderr JSON 载荷，调用方 exit 2；
+    全空 argv → (None, None) = 默认 300.0 既有行为。"""
+    timeout = None
+    index = 0
+    while index < len(argv_rest):
+        arg = argv_rest[index]
+        if arg == _QUALIFY_TIMEOUT_FLAG:
+            if timeout is not None:
+                return None, {"error": "duplicate --timeout-seconds"}
+            if index + 1 >= len(argv_rest):
+                return None, {"error": "missing --timeout-seconds value"}
+            timeout, problem = _coerce_qualify_timeout(argv_rest[index + 1])
+            if problem:
+                return None, problem
+            index += 2
+        elif arg.startswith(_QUALIFY_TIMEOUT_FLAG + "="):
+            if timeout is not None:
+                return None, {"error": "duplicate --timeout-seconds"}
+            timeout, problem = _coerce_qualify_timeout(
+                arg[len(_QUALIFY_TIMEOUT_FLAG) + 1:])
+            if problem:
+                return None, problem
+            index += 1
+        else:
+            return None, {"error": "unsupported qualify arguments",
+                          "detail": " ".join(argv_rest)}
+    return timeout, None
+
+
 def _main_qualify(argv_rest, *, factories, qualifier, base_dir,
                   timeout_seconds) -> int:
-    if argv_rest:
-        print(json.dumps({"error": "unsupported qualify arguments",
-                          "detail": " ".join(argv_rest)}), file=sys.stderr)
+    timeout_override, problem = _parse_qualify_arguments(argv_rest)
+    if problem is not None:
+        print(json.dumps(problem), file=sys.stderr)
         return 2
+    if timeout_override is not None:
+        timeout_seconds = timeout_override
+
+    def _progress(line: str) -> None:
+        # CU-P0：进度只走 stderr（stdout 被 P1-U3 单 JSON 契约独占）；
+        # flush 保证长等待期间逐行可见（含管道重定向场景）。
+        print(line, file=sys.stderr, flush=True)
+
     directory = DEFAULT_EVIDENCE_DIR if base_dir is None else base_dir
     try:
         session, rejected, saved = qualify_runtimes(
             factories=factories, qualifier=qualifier, base_dir=directory,
-            timeout_seconds=timeout_seconds)
+            timeout_seconds=timeout_seconds, progress=_progress)
     except (RuntimeError, ValueError) as error:
         message = str(error)
         print(json.dumps({"status": "NOT_QUALIFIED",

@@ -289,8 +289,148 @@ class Phase10GBOfflineVerifiedTests(unittest.TestCase):
         self.assertEqual(executor.minimal_prompt, MINIMAL_PROMPT)
 
 
+class ProgressObservabilityTests(unittest.TestCase):
+    """CU-P0: per-invocation progress events for G5/G14 (stderr-shaped lines).
+
+    The callback receives short fixed-vocabulary lines only — gate, G14
+    index/role, starting/completed/failed, timeout bound or duration — never
+    runtime output, prompts or secrets; lines never feed GateResult evidence.
+    """
+
+    def _run_open(self, adapter, progress=None, **kwargs):
+        executor = RealGateExecutor(
+            adapter, env={"RUN_REAL_PROVIDER_TESTS": "1"},
+            progress=progress, **kwargs)
+        result = CandidateValidationRunner().run(
+            instance(), executor, clock=lambda: 1.0,
+            experiment_id="exp-progress", provenance="OFFLINE")
+        return result, executor
+
+    def test_gate_closed_emits_no_events_and_zero_invocations(self):
+        # Offline semantics: with the gate closed G5 BLOCKS before any
+        # invocation — no REAL invocation, no fake "starting" progress.
+        events = []
+        adapter = FakeAdapter()
+        result, _ = run_real_validation(
+            instance(), adapter, progress=events.append)
+        self.assertEqual(result.status, CandidateValidationStatus.BLOCKED)
+        self.assertEqual(adapter.invoke_calls, [])
+        self.assertEqual(events, [])
+
+    def test_success_emits_g5_pair_and_four_g14_pairs(self):
+        events = []
+        result, _ = self._run_open(FakeAdapter(), progress=events.append)
+        self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
+        self.assertEqual(len(events), 10)
+        self.assertEqual(
+            events[0],
+            "dual-agent: qualify G5 minimal invocation starting (timeout=60s)")
+        self.assertRegex(
+            events[1],
+            r"^dual-agent: qualify G5 minimal invocation completed "
+            r"\(\d+\.\d+s\)$")
+        roles = ("architect", "coder", "tester", "reviewer")
+        for i, role in enumerate(roles):
+            self.assertEqual(
+                events[2 + 2 * i],
+                f"dual-agent: qualify G14 capability [{i + 1}/4] {role} "
+                f"starting (timeout=60s)")
+            self.assertRegex(
+                events[3 + 2 * i],
+                rf"^dual-agent: qualify G14 capability \[{i + 1}/4\] {role} "
+                rf"completed \(\d+\.\d+s\)$")
+
+    def test_g5_timeout_emits_failed_line_with_status(self):
+        events = []
+        adapter = FakeAdapter(invocation_result=_result(
+            InvocationStatus.TIMEOUT, error="external runtime timeout",
+            exit_code=None, duration_ms=60000))
+        result, _ = self._run_open(adapter, progress=events.append)
+        self.assertEqual(result.status, CandidateValidationStatus.FAILED)
+        self.assertEqual(len(events), 2)
+        self.assertTrue(events[0].endswith("starting (timeout=60s)"))
+        self.assertRegex(
+            events[1],
+            r"^dual-agent: qualify G5 minimal invocation failed "
+            r"\(status=TIMEOUT after \d+\.\d+s\)$")
+
+    def test_g14_role_failure_emits_indexed_failed_line(self):
+        class CoderTimesOut(FakeAdapter):
+            def invoke(self, request):
+                if request.agent_id == "coder":
+                    return InvocationResult(
+                        InvocationStatus.TIMEOUT, output="",
+                        trace=_trace(InvocationStatus.TIMEOUT, None, 60000))
+                return super().invoke(request)
+
+        events = []
+        result, _ = self._run_open(CoderTimesOut(), progress=events.append)
+        self.assertEqual(result.status, CandidateValidationStatus.FAILED)
+        self.assertEqual(len(events), 6)  # G5 pair + [1/4] pair + [2/4] pair
+        self.assertRegex(
+            events[5],
+            r"^dual-agent: qualify G14 capability \[2/4\] coder failed "
+            r"\(status=TIMEOUT after \d+\.\d+s\)$")
+
+    def test_adapter_exception_emits_failed_line_without_message(self):
+        class RaisingAdapter(FakeAdapter):
+            def invoke(self, request):
+                raise RuntimeError("boom-sensitive-detail")
+
+        events = []
+        result, _ = self._run_open(RaisingAdapter(), progress=events.append)
+        self.assertEqual(result.status, CandidateValidationStatus.FAILED)
+        self.assertEqual(len(events), 2)
+        self.assertRegex(
+            events[1],
+            r"^dual-agent: qualify G5 minimal invocation failed "
+            r"\(status=EXCEPTION after \d+\.\d+s\)$")
+        # Line carries the closed vocabulary only — never the message.
+        self.assertNotIn("boom-sensitive-detail", events[1])
+
+    def test_progress_lines_stay_out_of_evidence_and_are_secret_free(self):
+        events = []
+        adapter = FakeAdapter(invocation_result=_result(
+            InvocationStatus.FAILED, error="runtime failed"))
+        result, _ = self._run_open(adapter, progress=events.append)
+        self.assertTrue(events)
+        surface = repr(result.evidence) + repr(
+            [(g.gate, g.verdict, g.reason, g.evidence)
+             for g in result.gate_results])
+        self.assertNotIn("dual-agent:", surface)
+        self.assertNotIn("qualify G5", surface)
+        for line in events:
+            lowered = line.lower()
+            for marker in ("token", "secret", "api_key", "authorization",
+                           "bearer", "stdout", "stderr"):
+                self.assertNotIn(marker, lowered, marker)
+
+    def test_timeout_bound_reaches_every_real_request(self):
+        adapter = FakeAdapter()
+        result, _ = self._run_open(
+            adapter, progress=None, timeout_seconds=90.5)
+        self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
+        self.assertEqual(len(adapter.invoke_calls), 5)
+        for call in adapter.invoke_calls:
+            self.assertEqual(call.timeout_seconds, 90.5)
+
+    def test_fractional_and_whole_bounds_render_minimally(self):
+        events = []
+        self._run_open(FakeAdapter(), progress=events.append,
+                       timeout_seconds=12.5)
+        self.assertIn("(timeout=12.5s)", events[0])
+        events = []
+        self._run_open(FakeAdapter(), progress=events.append,
+                       timeout_seconds=300)
+        self.assertIn("(timeout=300s)", events[0])
+
+
 class RealRuntimeSmokeTests(unittest.TestCase):
-    """Single real runtime, single minimal invocation — opt-in only."""
+    """Single real runtime through the full gated chain — opt-in only.
+
+    The run covers one G5 minimal invocation plus the four G14 capability
+    experiments (architect/coder/tester/reviewer): 5 invocations total,
+    empirically confirmed by the CU-P0 REAL validation (2026-09-08)."""
 
     def setUp(self):
         if os.environ.get("RUN_REAL_PROVIDER_TESTS", "") != "1":
@@ -330,7 +470,9 @@ class RealRuntimeSmokeTests(unittest.TestCase):
         print("REAL_EVIDENCE:", report)
         self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
         self.assertEqual(result.provenance, "REAL")
-        self.assertEqual(executor.invocation_count, 1)
+        # G5 (1) + G14 capability experiments (4) — matches the offline
+        # FakeAdapter expectation above; the pre-G14 "== 1" was stale.
+        self.assertEqual(executor.invocation_count, 5)
         self.assertEqual(adapter._processes, {})
         self.assertEqual(report["exit_code"], 0)
         self.assertEqual(report["safe_output_summary"], "exact_ok")
