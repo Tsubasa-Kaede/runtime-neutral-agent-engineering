@@ -26,6 +26,7 @@ import io
 import json
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -48,7 +49,14 @@ from collaboration_packet import CollaborationPacket, CollaborationPayloadType
 from collaboration_state import (
     CollaborationDirection,
     CollaborationRecord,
+    CollaborationStateError,
     SharedCollaborationState,
+)
+from content_safety import (
+    ValidationDiagnostic,
+    next_diagnostic_generation,
+    record_validation_diagnostic,
+    reset_validation_diagnostic,
 )
 from structured_packets import (
     ArchitecturePacket,
@@ -1291,6 +1299,398 @@ class RunResultProjectionTests(unittest.TestCase):
         self.assertIn(code, (0, 2))  # 既有 exit 契约不变
         self.assertEqual(len(out.splitlines()), 1)
         self.assertNotIn("dual-agent: result ", err)
+
+
+_MISSING_FIELD_OUTPUT = json.dumps({
+    "task_id": "task-1", "role": "architect",
+    "constraints": ["c"], "architecture": ["a"], "interfaces": [],
+    "implementation_steps": [], "acceptance_criteria": ["ac"], "risks": [],
+})
+
+_PROSE_OUTPUT = "抱歉，该约束下无法只输出 JSON 对象，以下是分析说明。"
+
+_CODER_NUMBER_LIST_OUTPUT = json.dumps({
+    "task_id": "task-1", "role": "coder",
+    "changed_files": 123,
+    "implementation_summary": "s",
+    "implementation_details": [], "assumptions": [],
+    "unresolved_items": [], "test_requirements": [],
+})
+
+
+class PacketRejectDiagnosticsTests(unittest.TestCase):
+    """CU-R2（Packet Rejection Diagnostics）：*_PACKET_INVALID 终态在
+    stderr 获得恰一行值安全的拒绝诊断（rule/field/layer 坐标，绝无被
+    拒值）；无新鲜诊断时按消去法只报 G2/G3 不可分诊形态。stdout 恰
+    一行机器 JSON 的契约逐字节不变。"""
+
+    TASK = "diagnostics probe task"
+
+    def setUp(self):
+        reset_validation_diagnostic()
+
+    # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _reject_role_factory(role, output):
+        class _BadRole(FakeFamilyAdapter):
+            def invoke(self, request):
+                if request.role == role:
+                    return InvocationResult(
+                        InvocationStatus.SUCCESS, output=output, trace=None)
+                return super().invoke(request)
+
+        adapter = _BadRole("rt-a")
+        return (lambda: adapter,
+                lambda: FakeFamilyAdapter("rt-b", "provider-b"))
+
+    def _run(self, factories):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                factories=factories, evidence=two_family_evidence())
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    # -- unit：_packet_reject_line ------------------------------------------
+
+    def test_reject_line_unit_fresh_diagnostic(self):
+        generation = next_diagnostic_generation()
+        record_validation_diagnostic(
+            ValidationDiagnostic("packet", "goal", None, "NOT_A_LIST"))
+        self.assertEqual(
+            host_entry._packet_reject_line("ARCHITECT_PACKET_INVALID",
+                                           generation),
+            "dual-agent: packet reject stage=architect rule=NOT_A_LIST "
+            "field=goal layer=packet")
+
+    def test_reject_line_unit_stale_diagnostic_falls_back(self):
+        # Case A（单元）：代数不匹配的旧诊断绝不被冒用。
+        next_diagnostic_generation()
+        record_validation_diagnostic(
+            ValidationDiagnostic("packet", "goal", None, "NOT_A_LIST"))
+        current = next_diagnostic_generation()
+        line = host_entry._packet_reject_line("TESTER_PACKET_INVALID",
+                                              current)
+        self.assertIn("rule=JSON_PARSE_OR_NON_OBJECT", line)
+        self.assertIn("stage=tester", line)
+        self.assertNotIn("NOT_A_LIST", line)
+
+    def test_reject_line_unit_fallback_without_any_diagnostic(self):
+        generation = next_diagnostic_generation()
+        line = host_entry._packet_reject_line("CODER_PACKET_INVALID",
+                                              generation)
+        self.assertEqual(
+            line, "dual-agent: packet reject stage=coder "
+                  "rule=JSON_PARSE_OR_NON_OBJECT")
+
+    def test_reject_line_unit_none_for_non_packet_invalid_status(self):
+        generation = next_diagnostic_generation()
+        self.assertIsNone(
+            host_entry._packet_reject_line("SUCCESS", generation))
+        self.assertIsNone(
+            host_entry._packet_reject_line("ARCHITECT_INVOKE_FAILED",
+                                           generation))
+
+    # -- e2e：经真实 main() 链 ------------------------------------------------
+
+    def test_missing_fields_e2e_diagnostic_and_stdout_invariant(self):
+        # Case B（e2e）：本次 run 的 REJECT 带当前代数 → 采信并暴露。
+        code, out, err = self._run(
+            self._reject_role_factory("architect", _MISSING_FIELD_OUTPUT))
+        self.assertEqual(code, 2)
+        self.assertEqual(len(out.splitlines()), 1)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "ARCHITECT_PACKET_INVALID")
+        self.assertIn(
+            "dual-agent: packet reject stage=architect rule=MISSING_FIELDS",
+            err)
+        self.assertNotIn("packet reject", out)
+
+    def test_stale_diagnostic_not_surfaced_next_run_uses_fallback(self):
+        # Case A（e2e）：run1 记录 MISSING_FIELDS；run2 换代后 G2 拒绝
+        # （散文输出，无记录）→ 只报消去法行，绝不冒用 run1 的旧观测。
+        code, _, first_err = self._run(
+            self._reject_role_factory("architect", _MISSING_FIELD_OUTPUT))
+        self.assertEqual(code, 2)
+        self.assertIn("rule=MISSING_FIELDS", first_err)
+        code, out, err = self._run(
+            self._reject_role_factory("architect", _PROSE_OUTPUT))
+        self.assertEqual(code, 2)
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn("rule=JSON_PARSE_OR_NON_OBJECT", err)
+        self.assertNotIn("MISSING_FIELDS", err)
+
+    def test_coder_not_a_list_e2e_attributed_to_stage(self):
+        # 同 run 内跨阶段归属：architect 成功（无记录）、coder 拒绝 →
+        # 诊断新鲜且归属 coder；_normalize 原样保留（数字非字符串，
+        # 归一化救不了 → 依旧拒绝，语义零变化）。
+        code, out, err = self._run(
+            self._reject_role_factory("coder", _CODER_NUMBER_LIST_OUTPUT))
+        self.assertEqual(code, 2)
+        self.assertIn("stage=coder rule=NOT_A_LIST", err)
+        self.assertIn("field=changed_files", err)
+
+    def test_success_run_emits_no_false_reject_line(self):
+        code, out, err = self._run(two_family_factories())
+        self.assertEqual(code, 0)
+        self.assertNotIn("packet reject", err)
+        self.assertEqual(len(out.splitlines()), 1)
+        # CU-R1 投影回归：成功 run 的结果投影仍在 stderr。
+        self.assertIn("dual-agent: result architecture goal[1]: ", err)
+
+
+class OpaqueTaskIdBoundaryTests(unittest.TestCase):
+    """CU-R3a（Restore Opaque task_id at the CLI Composition Boundary）：
+    CLI host 路径在组合边界把 task_id 映射为确定性不透明摘要 —— 词域误拒
+    （record_tokens→token 的 identifier 裸子串拒收）结构性消失，而
+    identifier 安全策略/扫描器零改动；task/prompt 原文原样进入 engine；
+    stdout 8 键 schema 不变，仅 task_id 语义变为不透明（已批准变更）。"""
+
+    # 与 REAL 探针同型的词域任务：正文含 marker 子串（record_tokens→token）
+    TASK = "分析 record_tokens 函数的预算职责边界"
+
+    MARKERS = ("token", "secret", "api_key", "authorization",
+               "bearer", "stdout", "stderr")
+
+    DISTINCT_TASKS = (
+        "refactor the parser module",
+        "分析 record_tokens 函数的预算职责边界",
+        "review auth bearer handling and api_key storage",
+        "summarize stdout and stderr capture paths",
+        "tiny task",
+        "a slightly longer collaboration task about module boundaries",
+        "检查 secret 扫描规则的覆盖面",
+        "token budget audit",
+    )
+
+    # -- Test A：确定性 -------------------------------------------------------
+
+    def test_derivation_deterministic(self):
+        first = host_entry._opaque_task_id(self.TASK)
+        second = host_entry._opaque_task_id(self.TASK)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            host_entry._opaque_task_id("tiny task"),
+            host_entry._opaque_task_id("tiny task"))
+
+    # -- Test B：互异 ---------------------------------------------------------
+
+    def test_derivation_distinct_across_tasks(self):
+        ids = [host_entry._opaque_task_id(task)
+               for task in self.DISTINCT_TASKS]
+        self.assertEqual(len(set(ids)), len(ids))
+
+    # -- Test C：不透明（无正文、无 marker、稳定形态） -----------------------
+
+    def test_derived_id_is_opaque(self):
+        for task in self.DISTINCT_TASKS:
+            derived = host_entry._opaque_task_id(task)
+            self.assertNotEqual(derived, task)
+            self.assertNotIn(task, derived)
+            self.assertTrue(derived.startswith("task_"), derived)
+            lowered = derived.lower()
+            for marker in self.MARKERS:
+                self.assertNotIn(marker, lowered, marker)
+        # 形态稳定：同长度、仅十六进制摘要字符
+        first = host_entry._opaque_task_id(self.DISTINCT_TASKS[0])
+        second = host_entry._opaque_task_id(self.DISTINCT_TASKS[1])
+        self.assertEqual(len(first), len(second))
+
+    # -- Test D：组合边界保全 task/prompt 原文、只换 task_id ------------------
+
+    def test_boundary_proxy_preserves_task_and_prompt(self):
+        recorded = {}
+
+        def _run(**kwargs):
+            recorded.update(kwargs)
+            return "sentinel-result"
+
+        namespace = types.SimpleNamespace(run=_run)
+        proxy = host_entry._cli_task_boundary(namespace)
+        sentinel_mode = object()
+        sentinel_sink = object()
+        sentinel_policy = object()
+        returned = proxy.run(
+            task_id=self.TASK, task=self.TASK, prompt=self.TASK,
+            mode=sentinel_mode, observation_sink=sentinel_sink,
+            policy=sentinel_policy)
+        self.assertIs(returned, "sentinel-result")  # 返回值透传
+        self.assertEqual(recorded["task"], self.TASK)  # 原文保全
+        self.assertEqual(recorded["prompt"], self.TASK)  # 原文保全
+        self.assertIs(recorded["mode"], sentinel_mode)  # 其余实参透传
+        self.assertIs(recorded["observation_sink"], sentinel_sink)
+        self.assertIs(recorded["policy"], sentinel_policy)
+        # task_id 已换为不透明摘要（≠ 原文、无 marker）
+        self.assertNotEqual(recorded["task_id"], self.TASK)
+        self.assertNotIn(self.TASK, recorded["task_id"])
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, recorded["task_id"].lower(), marker)
+
+    # -- Test D（e2e 补充）：引擎侧标识符不透明、任务正文原文到达 -----------
+
+    def test_engine_sees_opaque_id_and_original_task_text(self):
+        seen = []
+        base = FakeFamilyAdapter("rt-a")
+
+        class _Recording(FakeFamilyAdapter):
+            def invoke(self, request):
+                seen.append((request.task_id, request.prompt))
+                return base.invoke(request)
+
+        adapter = _Recording("rt-a")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                factories=(lambda: adapter,
+                           lambda: FakeFamilyAdapter("rt-b", "provider-b")),
+                evidence=two_family_evidence())
+        self.assertEqual(code, 0)
+        self.assertTrue(seen)  # 四阶段确实调用了 adapter
+        for task_id, prompt in seen:
+            # 引擎侧标识符 = 不透明摘要（每次调用一致）；前缀无连字符，
+            # 结构性不构成 "sk-" 等凭据形状子串
+            self.assertTrue(task_id.startswith("task_"), task_id)
+            for marker in self.MARKERS:
+                self.assertNotIn(marker, task_id.lower(), marker)
+        # 任务正文原文进入首个调用（architect 的 prompt —— 引擎语义：
+        # 原文只喂 architect，下游角色收 packet 交接，正文不经清洗）
+        self.assertIn(self.TASK, seen[0][1])
+
+    # -- Test E：词域任务不再触发 ledger 安全拒收 ----------------------------
+
+    def test_problematic_vocabulary_runs_without_ledger_rejection(self):
+        # RED→GREEN 的主证：该任务文本在 CU-R3a 之前 100% 复现
+        # CollaborationStateError（REAL 探针 + 离线复现）；现在必须正常
+        # 跑完四阶段并成功交付。
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                factories=two_family_factories(),
+                evidence=two_family_evidence())
+        out, err = stdout.getvalue(), stderr.getvalue()
+        self.assertEqual(code, 0)
+        self.assertNotIn("NOT_QUALIFIED", out)
+        self.assertNotIn("secret-shaped", out)
+        self.assertNotIn("secret-shaped", err)
+        self.assertNotIn("Traceback", err)
+        # 四阶段确实跑完：CU-R1 结果投影在场（engine 真执行，非绕过）
+        self.assertIn("dual-agent: result architecture goal[1]: ", err)
+        self.assertIn("dual-agent: result review status: ", err)
+
+    # -- Test F：retry 身份确定性 ---------------------------------------------
+
+    def test_retry_identity_stable_across_invocations(self):
+        def _once():
+            stdout, _ = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout):
+                code = host_entry.main(
+                    ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                    factories=two_family_factories(),
+                    evidence=two_family_evidence())
+            return code, json.loads(stdout.getvalue())["task_id"]
+
+        code_a, id_a = _once()
+        code_b, id_b = _once()
+        self.assertEqual((code_a, code_b), (0, 0))
+        self.assertEqual(id_a, id_b)  # 同任务两次 host 级调用 → 同 task_id
+
+    # -- Test G：stdout 契约（单行 / 8 键 / task_id 不透明）------------------
+
+    def test_cli_stdout_contract_opaque_task_id(self):
+        stdout, _ = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout):
+            code = host_entry.main(
+                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                factories=two_family_factories(),
+                evidence=two_family_evidence())
+        self.assertEqual(code, 0)
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)  # stdout 恰一行
+        payload = json.loads(lines[0])
+        self.assertEqual(
+            sorted(payload),
+            ["failure_category", "mode", "path", "provenance",
+             "stage_counts", "stages", "status", "task_id"])  # 8 键不变
+        task_id = payload["task_id"]
+        self.assertNotEqual(task_id, self.TASK)  # 已批准的语义变更
+        self.assertTrue(task_id.startswith("task_"), task_id)
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, task_id.lower(), marker)
+
+
+class RunExceptionRenderingTests(unittest.TestCase):
+    """CU-R3b（CLI Pre-Collaboration Exception Rendering）：run 内
+    pre-collaboration 域拒绝（CollaborationStateError，REAL 探针 + 离线
+    复现已证）收敛为既有语义失败表面（stdout 恰 1 行 JSON + stderr 人类
+    行 + exit 2）；真 unexpected 异常保持传播可见性，绝不吞成 exit 2。"""
+
+    def test_ledger_domain_rejection_renders_semantic_failure(self):
+        # CU-R3b 锁定的渲染面回归。自然触发（任务文本含 marker 子串）已被
+        # CU-R3a 组合边界映射结构性移除（同型任务见
+        # OpaqueTaskIdBoundaryTests.Test E —— 现在正常成功）；本测试改为
+        # 模拟触发：append_decision 抛出与 REAL 探针逐字同型的域异常，
+        # 经真实 main() 全链（离线 stub runtime）证明渲染面不变。
+        from collaboration_state import SharedCollaborationState as _State
+        original = _State.append_decision
+
+        def _reject(self, *args, **kwargs):
+            raise CollaborationStateError(
+                "task_id must not contain secret-shaped content")
+
+        _State.append_decision = _reject
+        try:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = host_entry.main(
+                    ["run", "--min-runtimes", "1", "--mode", "on",
+                     "分析 task_budget.py 的 record_tokens 记账职责。只读分析。"],
+                    factories=two_family_factories(),
+                    evidence=two_family_evidence())
+        finally:
+            _State.append_decision = original
+        self.assertEqual(code, 2)
+        out = stdout.getvalue()
+        err = stderr.getvalue()
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(len(out.splitlines()), 1)  # 恰 1 行机器 JSON
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "NOT_QUALIFIED")
+        self.assertIn("secret-shaped", payload["reason"])  # 封闭词表 reason
+        # 任务原文不泄漏到任何表面（reason/detail 是封闭词表坐标）
+        self.assertNotIn("record_tokens", out)
+        self.assertNotIn("record_tokens", err)
+        # 人类行不得误导为 runtime 未获资格（runtime 已入池，被拒的是
+        # ledger 安全规则）
+        self.assertNotIn("no admitted verified runtime", err)
+        # 下游表面零伪造：CU-R1 投影 / CU-R2 诊断 / observation 事件
+        self.assertNotIn("dual-agent: result ", err)
+        self.assertNotIn("packet reject", err)
+        self.assertNotIn("DECISION", err)
+
+    def test_unexpected_exception_keeps_traceback_visibility(self):
+        # 真 unexpected 异常（普通 RuntimeError）从 run_cli 逃逸时必须
+        # 原样传播 —— 不被包装成语义失败、不被吞掉。
+        original = host_entry.run_cli
+
+        def _boom(facade, argv):
+            raise RuntimeError("unexpected engine fault")
+
+        host_entry.run_cli = _boom
+        try:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                with self.assertRaises(RuntimeError):
+                    host_entry.main(
+                        ["run", "--mode", "off", "tiny task"],
+                        factories=two_family_factories(),
+                        evidence=two_family_evidence())
+            self.assertEqual(stdout.getvalue(), "")  # 不伪造 JSON
+        finally:
+            host_entry.run_cli = original
 
 
 if __name__ == "__main__":

@@ -23,7 +23,9 @@ from collaboration_packet import (
 )
 from content_safety import (
     diagnose_packet_reject,
+    last_diagnostic_generation,
     last_validation_diagnostic as last_packet_diagnostic,
+    next_diagnostic_generation,
     packet_has_unsafe_content,
     reset_validation_diagnostic,
 )
@@ -579,6 +581,48 @@ class CorrelationIdTests(unittest.TestCase):
 
     def test_any_non_empty_secret_free_id_is_accepted(self):
         self.assertEqual(envelope(correlation_id="x").correlation_id, "x")
+
+
+class DiagnosticGenerationTests(unittest.TestCase):
+    """CU-R2（Packet Rejection Diagnostics）：诊断代数机制 —— 陈旧
+    REJECT 不得冒充当前 run 的观测。record 打当前代数戳；消费方只
+    采信代数匹配的记录（Case A 陈旧拒信 / Case B 当前采信）。"""
+
+    def setUp(self):
+        reset_validation_diagnostic()
+
+    def test_generation_is_monotonic(self):
+        first = next_diagnostic_generation()
+        second = next_diagnostic_generation()
+        self.assertGreater(second, first)
+
+    def test_recorded_reject_carries_current_generation(self):
+        # Case B：换代后记录的 REJECT 带该代数 —— 当前 run 可采信。
+        generation = next_diagnostic_generation()
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=("api_key=deadbeef",))
+        self.assertEqual(last_diagnostic_generation(), generation)
+        self.assertIsNotNone(last_packet_diagnostic())
+        self.assertEqual(last_packet_diagnostic().rule, "UNSAFE_SHAPE")
+
+    def test_stale_reject_keeps_old_generation(self):
+        # Case A：换代前的 REJECT 仍在槽里，但代数不匹配当前代 ——
+        # 消费方可据此拒信，绝不冒用旧观测。
+        next_diagnostic_generation()
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=("api_key=deadbeef",))
+        stale = last_diagnostic_generation()
+        fresh = next_diagnostic_generation()
+        self.assertIsNotNone(last_packet_diagnostic())
+        self.assertNotEqual(stale, fresh)
+        self.assertNotEqual(last_diagnostic_generation(), fresh)
+
+    def test_reset_clears_diagnostic_and_generation(self):
+        with self.assertRaises(PacketValidationError):
+            envelope(acceptance_criteria=("api_key=deadbeef",))
+        reset_validation_diagnostic()
+        self.assertIsNone(last_packet_diagnostic())
+        self.assertIsNone(last_diagnostic_generation())
 
 
 if __name__ == "__main__":

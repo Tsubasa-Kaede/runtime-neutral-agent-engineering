@@ -66,11 +66,28 @@ class ValidationDiagnostic:
 
 _LAST_DIAGNOSTIC: ValidationDiagnostic | None = None
 
+# CU-R2（Packet Rejection Diagnostics）：诊断代数 —— 单调计数器，每次
+# next_diagnostic_generation() 前进一代；record 打"记录时刻的代数"戳。
+# 消费方（host_entry run 面）run 前换代、事后只采信代数匹配的诊断，
+# 陈旧 REJECT（上一 run / 更早扫描）结构性无法冒充当前观测。代数是
+# 无信息量的 int，不构成任何侧信道。
+_diagnostic_generation = 0
+_last_diagnostic_generation: int | None = None
+
+
+def next_diagnostic_generation() -> int:
+    """Advance and return the diagnostic generation counter."""
+    global _diagnostic_generation
+    _diagnostic_generation += 1
+    return _diagnostic_generation
+
 
 def record_validation_diagnostic(diagnostic: ValidationDiagnostic) -> None:
-    """Store the structured (value-free) diagnostic of the latest REJECT."""
-    global _LAST_DIAGNOSTIC
+    """Store the structured (value-free) diagnostic of the latest REJECT,
+    stamped with the diagnostic generation active at recording."""
+    global _LAST_DIAGNOSTIC, _last_diagnostic_generation
     _LAST_DIAGNOSTIC = diagnostic
+    _last_diagnostic_generation = _diagnostic_generation
 
 
 def last_validation_diagnostic() -> ValidationDiagnostic | None:
@@ -79,14 +96,21 @@ def last_validation_diagnostic() -> ValidationDiagnostic | None:
     return _LAST_DIAGNOSTIC
 
 
+def last_diagnostic_generation() -> int | None:
+    """The generation stamp of the stored REJECT diagnostic (None when no
+    diagnostic is stored) — lets consumers reject stale observations."""
+    return _last_diagnostic_generation
+
+
 def reset_validation_diagnostic() -> None:
     """Clear the stored diagnostic (test/inspection boundary helper).
 
     The diagnostic slot is a single global "last REJECT" observation —
     tests read it right after the scan under test and reset it first so
     a prior reject cannot leak into the assertion."""
-    global _LAST_DIAGNOSTIC
+    global _LAST_DIAGNOSTIC, _last_diagnostic_generation
     _LAST_DIAGNOSTIC = None
+    _last_diagnostic_generation = None
 
 
 def _marker_in_key(key) -> bool:

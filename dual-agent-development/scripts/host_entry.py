@@ -66,6 +66,13 @@ CU-P0（qualify observability + configurable timeout）：
 - G5/G14 逐调用进度行只走 stderr（stdout 单 JSON 契约独占），仅经默认
   REAL 桥发射；gate 关闭时零事件（不产生假的 invocation progress）。
 
+CU-R3a（opaque task_id at the CLI composition boundary）：
+- CLI 唯一 task 实参在进入 engine 前把 task_id 映射为确定性不透明摘要
+  （sha256 前 12 hex，"task_" 前缀）；task/prompt 原文透传。词域误拒
+  （任务正文含 marker 子串 → 标识符层『拒绝提及』）结构性消失，
+  identifier 安全策略/扫描器零改动；stdout 8 键 schema 不变，task_id
+  语义变为不透明（已批准变更）。
+
 边界与诚实性：
 - evidence 注入优先于盘：显式 evidence 参数（嵌入方面）原样传递，
   绝不被空盘覆盖。
@@ -85,9 +92,11 @@ CU-P0（qualify observability + configurable timeout）：
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import sys
+import types
 from pathlib import Path
 
 __all__ = (
@@ -189,6 +198,12 @@ except ImportError:  # source-tree flat-import mode (tests/examples)
 # 报成功但零落盘）。shim（dual_agent/__init__.py）保证两种模式下平铺
 # 名都可用；其余导入是函数/工厂（无身份比较），双模式原样保留。
 from candidate_validation import CandidateValidationStatus
+from collaboration_state import CollaborationStateError
+from content_safety import (
+    last_diagnostic_generation,
+    last_validation_diagnostic,
+    next_diagnostic_generation,
+)
 
 # 默认家族接线表（数据，非行为）：每家环境发现的真相在其自身
 # from_environment 内 —— 这里只登记 (模块, 类型) 并按同一契约循环，
@@ -368,17 +383,20 @@ def _composition_reason(message: str) -> str:
     return first.strip()
 
 
-def _semantic_failure(reason: str, message: str) -> int:
-    """P1-U3 语义失败契约：stdout 机器 JSON + stderr 人类行 + exit 2。"""
+def _semantic_failure(reason: str, message: str, human: str | None = None) -> int:
+    """P1-U3 语义失败契约：stdout 机器 JSON + stderr 人类行 + exit 2。
+
+    human 可覆盖 stderr 人类行（CU-R3b：ledger 安全拒收不是 runtime
+    资格问题，不得误导）；缺省行为与 P1-U3 逐字节一致。"""
     payload = {"status": "NOT_QUALIFIED", "reason": reason, "detail": message}
     if "NO_EVIDENCE_NO_QUALIFIER" in message:
         payload["hint"] = _HINT_QUALIFY
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-    human = ("No qualified runtime evidence is available. "
-             "Run `dual-agent qualify` first."
-             if "NO_EVIDENCE_NO_QUALIFIER" in message
-             else f"dual-agent: no admitted verified runtime ({reason})")
-    print(human, file=sys.stderr)
+    human_default = ("No qualified runtime evidence is available. "
+                     "Run `dual-agent qualify` first."
+                     if "NO_EVIDENCE_NO_QUALIFIER" in message
+                     else f"dual-agent: no admitted verified runtime ({reason})")
+    print(human or human_default, file=sys.stderr)
     return 2
 
 
@@ -468,6 +486,57 @@ def _result_projection_lines(state, task_id) -> tuple:
             continue
         lines.extend(_packet_projection_lines(envelope))
     return tuple(lines)
+
+
+def _packet_reject_line(status, generation) -> str | None:
+    """CU-R2：*_PACKET_INVALID 终态 → 值安全的拒绝诊断行（或 None）。
+
+    只读全局诊断槽并比对代数（run 前由 _main_run 换代）：代数匹配才
+    采信 —— 陈旧 REJECT 结构性无法冒充本 run 观测。诊断坐标来自
+    structured_packets/content_safety 的 R6-C11 契约（layer/field/
+    rule，绝不含被拒值）。无新鲜诊断时只能按消去法报告 G2/G3 的
+    不可分诊形态 —— JSON 解析失败与非对象顶层住在冻结解析器内，
+    本层无证据区分，绝不声称可分。
+    """
+    if not status.endswith("_PACKET_INVALID"):
+        return None
+    stage = status[: -len("_PACKET_INVALID")].lower()
+    diagnostic = last_validation_diagnostic()
+    if (diagnostic is not None
+            and last_diagnostic_generation() == generation):
+        return (f"dual-agent: packet reject stage={stage} "
+                f"rule={diagnostic.rule} field={diagnostic.field} "
+                f"layer={diagnostic.layer}")
+    return (f"dual-agent: packet reject stage={stage} "
+            f"rule=JSON_PARSE_OR_NON_OBJECT")
+
+
+def _opaque_task_id(task_id: str) -> str:
+    """CU-R3a：任务正文 → 确定性不透明标识（标准库 sha256 摘要前 12 位
+    十六进制，"task_" 前缀 —— 无连字符，结构性不构成 "sk-" 等任何凭据
+    形状子串）。无时间/随机/PID/路径/runtime 依赖：同一正文必产同一 id
+    （retry 身份确定性保持），hex 词表 [0-9a-f] 不含任何 secret marker
+    子串，也不含用户任务正文。"""
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
+    return f"task_{digest}"
+
+
+def _cli_task_boundary(facade):
+    """CU-R3a 组合边界：CLI host 路径把唯一的 task 实参映射为不透明
+    task_id。
+
+    既有 CLI（冻结件）对 facade.run 传 task_id==task==prompt（同一
+    实参）；engine 的标识符层（ledger/envelope/observation）对标识符
+    拒绝 marker『提及』是有文档的安全策略 —— 任务散文进标识符区即与
+    该策略碰撞（REAL 已证：record_tokens → token 误拒）。本代理只把
+    task_id 换成 _opaque_task_id 摘要：task/prompt 原文与其余实参
+    （mode/observation_sink/policy）原样透传，返回值与异常原样传播
+    （绝不吞掉）。代理仅存在于 run_cli 调用点 —— default_facade 的
+    直接嵌入 API（task_id 显式指定）行为不变。"""
+    def _run(task_id, task, prompt, **kwargs):
+        return facade.run(task_id=_opaque_task_id(task_id),
+                          task=task, prompt=prompt, **kwargs)
+    return types.SimpleNamespace(run=_run)
 
 
 def _qualify_summary(session, saved) -> dict:
@@ -615,8 +684,23 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
         return 2
     # 既有 run_cli 直接组合（parse → policy → run → 渲染；cli.py 零修改，
     # cli.main 的注入式嵌入面原样保留给直接嵌入方）：渲染字符串即规范形，
-    # exit 语义在本层稳定映射。
-    summary = run_cli(facade, argv)
+    # exit 语义在本层稳定映射。CU-R3a：facade 经组合边界代理 —— CLI 的
+    # task_id 映射为确定性不透明摘要后再进 engine（task/prompt 原文
+    # 透传；stdout 的 task_id 随之变为不透明，CU-R1 投影按该 id 查
+    # ledger，账本键一致）。run 前换代（CU-R2）：run 期间记录的
+    # 拒绝诊断带本代数戳，事后只采信本代观测。
+    generation = next_diagnostic_generation()
+    # CU-R3b：run 内 pre-collaboration 域拒绝（REAL 探针 + 离线复现已
+    # 证：append_decision 对 task_id 的封闭词表安全拒收，消息不含值）收敛
+    # 到既有语义失败表面；其余异常保持 traceback 可见性，绝不吞掉。
+    try:
+        summary = run_cli(_cli_task_boundary(facade), argv)
+    except CollaborationStateError as error:
+        reason = _composition_reason(str(error))
+        return _semantic_failure(
+            reason, str(error),
+            human=f"dual-agent: run rejected by ledger safety rules "
+                  f"({reason})")
     print(summary)
     payload = json.loads(summary)
     # CU-R1（Run Result Delivery）：安全结果投影走 stderr —— stdout 保持
@@ -624,6 +708,11 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
     # 权威投影）；投影只读 facade.state 账本里已验证的 envelope。
     for line in _result_projection_lines(facade.state, payload["task_id"]):
         print(line, file=sys.stderr, flush=True)
+    # CU-R2（Packet Rejection Diagnostics）：packet 拒绝的值安全诊断行
+    # （无新鲜诊断 ⇒ G2/G3 消去法形态）。
+    reject_line = _packet_reject_line(payload["status"], generation)
+    if reject_line is not None:
+        print(reject_line, file=sys.stderr, flush=True)
     return exit_code_for(payload["status"])
 
 

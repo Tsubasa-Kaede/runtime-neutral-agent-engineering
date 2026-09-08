@@ -61,9 +61,17 @@ def _clean(value: Any, layer: str = "packet", field: str = "") -> Any:
     return value
 
 
+def _record_reject(field: str, rule: str) -> None:
+    """CU-R2：拒绝点的值安全诊断（layer/field/rule 结构坐标，绝不含
+    被拒值）—— 只加可观测性，REJECT 语义零变化。"""
+    record_validation_diagnostic(
+        ValidationDiagnostic("packet", field, None, rule))
+
+
 def _required(data: dict[str, Any], fields: tuple[str, ...]) -> None:
     missing = [field for field in fields if field not in data]
     if missing:
+        _record_reject(",".join(missing), "MISSING_FIELDS")
         raise PacketValidationError(f"missing required fields: {', '.join(missing)}")
 
 
@@ -79,6 +87,7 @@ def _clean_packet(packet, layer: str = "packet") -> None:
 
 def _tuple(value: Any, field: str) -> tuple:
     if not isinstance(value, (list, tuple)):
+        _record_reject(field, "NOT_A_LIST")
         raise PacketValidationError(f"{field} must be a list")
     # R6-C11: 逐元素调用 _clean —— 既做校验（list index 精确记入
     # diagnostic），也保留 _clean 重建后的结构（from_dict 的历史
@@ -119,8 +128,10 @@ class ArchitecturePacket:
 
     def _validate_identity(self, expected_role: str):
         if not isinstance(self.task_id, str) or not self.task_id.strip():
+            _record_reject("task_id", "IDENTITY_INVALID")
             raise PacketValidationError("task_id is required")
         if self.role != expected_role:
+            _record_reject("role", "IDENTITY_INVALID")
             raise PacketValidationError(f"role must be {expected_role}")
 
     @classmethod
@@ -164,7 +175,11 @@ class ImplementationPacket:
         self._validate()
 
     def _validate(self):
-        if not isinstance(self.task_id, str) or not self.task_id.strip() or self.role != self.required_role():
+        if not isinstance(self.task_id, str) or not self.task_id.strip():
+            _record_reject("task_id", "IDENTITY_INVALID")
+            raise PacketValidationError("ImplementationPacket requires task_id and coder role")
+        if self.role != self.required_role():
+            _record_reject("role", "IDENTITY_INVALID")
             raise PacketValidationError("ImplementationPacket requires task_id and coder role")
         _clean_packet(self)
 
@@ -197,7 +212,11 @@ class ReviewPacket:
         return "reviewer"
 
     def __post_init__(self):
-        if not isinstance(self.task_id, str) or not self.task_id.strip() or self.role != self.required_role():
+        if not isinstance(self.task_id, str) or not self.task_id.strip():
+            _record_reject("task_id", "IDENTITY_INVALID")
+            raise PacketValidationError("ReviewPacket requires task_id and reviewer role")
+        if self.role != self.required_role():
+            _record_reject("role", "IDENTITY_INVALID")
             raise PacketValidationError("ReviewPacket requires task_id and reviewer role")
         _clean_packet(self)
 
@@ -230,7 +249,11 @@ class TestPacket:
         return "tester"
 
     def __post_init__(self):
-        if not isinstance(self.task_id, str) or not self.task_id.strip() or self.role != self.required_role():
+        if not isinstance(self.task_id, str) or not self.task_id.strip():
+            _record_reject("task_id", "IDENTITY_INVALID")
+            raise PacketValidationError("TestPacket requires task_id and tester role")
+        if self.role != self.required_role():
+            _record_reject("role", "IDENTITY_INVALID")
             raise PacketValidationError("TestPacket requires task_id and tester role")
         _clean_packet(self)
 

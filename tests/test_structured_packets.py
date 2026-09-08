@@ -7,6 +7,10 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "dual-agent-development" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from content_safety import (
+    last_validation_diagnostic,
+    reset_validation_diagnostic,
+)
 from structured_packets import (
     ArchitecturePacket,
     ImplementationPacket,
@@ -97,6 +101,94 @@ class StructuredPacketTests(unittest.TestCase):
         self.assertEqual(ImplementationPacket.required_role(), "coder")
         self.assertEqual(TestPacket.required_role(), "tester")
         self.assertEqual(ReviewPacket.required_role(), "reviewer")
+
+
+class RejectDiagnosticsTests(unittest.TestCase):
+    """CU-R2（Packet Rejection Diagnostics）：from_dict 的既有拒绝点
+    记录值安全的结构坐标诊断（rule/field/layer，绝不含被拒值）——
+    拒绝语义零变化，只新增可观测性。诊断槽是全局 last-REJECT，
+    每个用例先清零。"""
+
+    def setUp(self):
+        reset_validation_diagnostic()
+
+    def _arch_dict(self, **overrides):
+        data = {
+            "task_id": "task-1", "role": "architect",
+            "goal": ["g"], "constraints": ["c"], "architecture": ["a"],
+            "interfaces": [], "implementation_steps": [],
+            "acceptance_criteria": ["ac"], "risks": [],
+        }
+        data.update(overrides)
+        return data
+
+    def _coder_dict(self, **overrides):
+        data = {
+            "task_id": "task-1", "role": "coder",
+            "changed_files": ["parser.py"],
+            "implementation_summary": "s",
+            "implementation_details": [], "assumptions": [],
+            "unresolved_items": [], "test_requirements": [],
+        }
+        data.update(overrides)
+        return data
+
+    def test_missing_fields_diagnostic_names_fields(self):
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket.from_dict(
+                {"task_id": "task-1", "role": "architect"})
+        diagnostic = last_validation_diagnostic()
+        self.assertIsNotNone(diagnostic)
+        self.assertEqual(diagnostic.rule, "MISSING_FIELDS")
+        self.assertEqual(diagnostic.layer, "packet")
+        self.assertIn("goal", diagnostic.field)
+        self.assertIn("risks", diagnostic.field)
+
+    def test_not_a_list_diagnostic_names_field(self):
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket.from_dict(self._arch_dict(goal="single goal"))
+        diagnostic = last_validation_diagnostic()
+        self.assertEqual(diagnostic.rule, "NOT_A_LIST")
+        self.assertEqual(diagnostic.field, "goal")
+        self.assertEqual(diagnostic.layer, "packet")
+
+    def test_identity_invalid_diagnostic_names_role(self):
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket.from_dict(self._arch_dict(role="Architect"))
+        diagnostic = last_validation_diagnostic()
+        self.assertEqual(diagnostic.rule, "IDENTITY_INVALID")
+        self.assertEqual(diagnostic.field, "role")
+
+    def test_identity_invalid_blank_task_id(self):
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket.from_dict(self._arch_dict(task_id="   "))
+        self.assertEqual(last_validation_diagnostic().rule, "IDENTITY_INVALID")
+        self.assertEqual(last_validation_diagnostic().field, "task_id")
+
+    def test_coder_identity_invalid_diagnostic(self):
+        with self.assertRaises(PacketValidationError):
+            ImplementationPacket.from_dict(self._coder_dict(role="coderr"))
+        self.assertEqual(last_validation_diagnostic().rule, "IDENTITY_INVALID")
+        self.assertEqual(last_validation_diagnostic().field, "role")
+
+    def test_valid_packet_records_no_diagnostic(self):
+        packet = ArchitecturePacket.from_dict(self._arch_dict())
+        self.assertEqual(packet.role, "architect")
+        self.assertIsNone(last_validation_diagnostic())
+
+    def test_unsafe_shape_still_records(self):
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket.from_dict(
+                self._arch_dict(goal=["api_key=deadbeef"]))
+        self.assertEqual(last_validation_diagnostic().rule, "UNSAFE_SHAPE")
+
+    def test_diagnostics_never_carry_rejected_values(self):
+        with self.assertRaises(PacketValidationError):
+            ArchitecturePacket.from_dict(
+                self._arch_dict(goal=["api_key=deadbeef"], risks="oops"))
+        joined = str(last_validation_diagnostic())
+        self.assertNotIn("deadbeef", joined)
+        self.assertNotIn("oops", joined)
 
 
 if __name__ == "__main__":
