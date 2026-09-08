@@ -38,6 +38,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 import evidence_store
 import host_entry
+import packet_forensics
 from candidate_validation import (
     CandidateValidationResult,
     CandidateValidationStatus,
@@ -1691,6 +1692,170 @@ class RunExceptionRenderingTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")  # 不伪造 JSON
         finally:
             host_entry.run_cli = original
+
+
+class PacketForensicsCaptureTests(unittest.TestCase):
+    """CU-R4（Architect Raw Output Forensics Capture）：*_PACKET_INVALID
+    终态专属的 parser-input 原文取证。fixture 镜像真实 adapter 接线
+    （每次成功 invoke 都 remember；真实接线由
+    test_packet_forensics.AdapterRememberWiringTests 离线证明）；成功
+    run 零落盘零输出；CU-R2 拒绝行与 stdout 契约逐字节不变。"""
+
+    TASK = "forensics capture probe task"
+    _MALFORMED_ARCH = '{"task_id": "t", "role": "architect", "goal": ["a'
+    _SECRET_CODER = ('{"task_id": "t", "role": "coder", '
+                     '"changed_files": ["f"], "note": "api_key: zz9988776655"')
+
+    def setUp(self):
+        packet_forensics.reset()
+        self._cleanup = []
+
+    def tearDown(self):
+        for path in self._cleanup:
+            Path(path).unlink(missing_ok=True)
+        packet_forensics.reset()
+
+    # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _forensics_factory(bad_role, bad_output):
+        """镜像真实 adapter：每次成功 invoke 都 remember（invocation id
+        递增 → 文件名天然不重叠）；仅 bad_role 返回 malformed 输出。"""
+
+        class _ForensicsProbe(FakeFamilyAdapter):
+            def __init__(self, runtime_id):
+                super().__init__(runtime_id)
+                self._invocations = 0
+
+            def invoke(self, request):
+                self._invocations += 1
+                if request.role == bad_role:
+                    output = bad_output
+                else:
+                    output = json.dumps(ARCH_P if request.role == "architect"
+                                        else IMPL_P)
+                packet_forensics.remember_invocation_output(
+                    self.runtime_id, f"inv-cu4-{self._invocations}",
+                    request.task_id, request.role, output)
+                return InvocationResult(
+                    InvocationStatus.SUCCESS, output=output, trace=None)
+
+        adapter = _ForensicsProbe("rt-a")
+        return (lambda: adapter,
+                lambda: FakeFamilyAdapter("rt-b", "provider-b"))
+
+    def _run(self, factories):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+                factories=factories, evidence=two_family_evidence())
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _forensics_files(self, err):
+        prefix = "dual-agent: packet forensics: "
+        lines = [line[len(prefix):] for line in err.splitlines()
+                 if line.startswith(prefix)]
+        self.assertEqual(len(lines), 1, "取证行必须恰一行")
+        self._cleanup.extend(lines[0].split("; "))
+        return [json.loads(Path(path).read_text(encoding="utf-8"))
+                for path in lines[0].split("; ")]
+
+    # -- e2e ---------------------------------------------------------------
+
+    def test_architect_reject_captures_exact_parser_input(self):
+        code, out, err = self._run(
+            self._forensics_factory("architect", self._MALFORMED_ARCH))
+        self.assertEqual(code, 2)
+        # stdout 契约不变：恰一行 8 键 JSON（CU-R2 同面）。
+        self.assertEqual(len(out.splitlines()), 1)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "ARCHITECT_PACKET_INVALID")
+        self.assertEqual(sorted(payload), sorted([
+            "status", "task_id", "mode", "path", "stages", "stage_counts",
+            "provenance", "failure_category"]))
+        # CU-R2 拒绝行不变，取证行是新增加的恰一行。
+        self.assertIn(
+            "dual-agent: packet reject stage=architect "
+            "rule=JSON_PARSE_OR_NON_OBJECT", err)
+        records = self._forensics_files(err)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        # 核心验收：captured == parser input，完整字符串 equality。
+        self.assertEqual(record["raw_parser_input"], self._MALFORMED_ARCH)
+        self.assertEqual(record["capture_mode"], "FULL")
+        self.assertEqual(record["runtime_id"], "rt-a")
+        self.assertEqual(record["role"], "architect")
+        self.assertEqual(record["failure_stage_hint"], "architect")
+        # CU-R3a 相关性：记录里的 task_id 与 stdout 的不透明 id 一致。
+        self.assertEqual(record["task_id"], payload["task_id"])
+        self.assertTrue(record["task_id"].startswith("task_"))
+
+    def test_success_run_persists_nothing_and_stays_silent(self):
+        class _RememberingGood(FakeFamilyAdapter):
+            def invoke(self, request):
+                packet_forensics.remember_invocation_output(
+                    self.runtime_id, "inv-cu4-good", request.task_id,
+                    request.role, "captured-but-clean-run")
+                return super().invoke(request)
+
+        adapter = _RememberingGood("rt-a")
+        code, out, err = self._run(
+            (lambda: adapter, lambda: FakeFamilyAdapter("rt-b", "provider-b")))
+        self.assertEqual(code, 0)
+        self.assertNotIn("packet forensics", err)
+        self.assertEqual(packet_forensics.pending(), ())  # 成功即清槽
+        self.assertEqual(len(out.splitlines()), 1)
+
+    def test_two_invocations_distinct_files_no_overwrite(self):
+        code, out, err = self._run(
+            self._forensics_factory("coder", '{"a": 1'))
+        self.assertEqual(code, 2)
+        records = self._forensics_files(err)
+        self.assertEqual(len(records), 2)
+        by_role = {record["role"]: record for record in records}
+        self.assertEqual(sorted(by_role), ["architect", "coder"])
+        self.assertEqual(by_role["architect"]["capture_mode"], "FULL")
+        self.assertEqual(by_role["architect"]["raw_parser_input"],
+                         json.dumps(ARCH_P))
+        self.assertEqual(by_role["coder"]["raw_parser_input"], '{"a": 1')
+        self.assertNotEqual(by_role["architect"]["invocation_id"],
+                            by_role["coder"]["invocation_id"])
+
+    def test_secret_shaped_reject_never_plaintext_on_disk(self):
+        code, out, err = self._run(
+            self._forensics_factory("coder", self._SECRET_CODER))
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["status"], "CODER_PACKET_INVALID")
+        records = self._forensics_files(err)
+        coder = [record for record in records
+                 if record["role"] == "coder"][0]
+        self.assertEqual(coder["capture_mode"], "REDACTED_UNSAFE")
+        self.assertNotIn("zz9988776655",
+                         json.dumps(coder, ensure_ascii=True))
+        # redacted artifact 绝不声称等于 parser input（原文摘要独立保留）。
+        self.assertNotEqual(coder["raw_parser_input"], self._SECRET_CODER)
+        self.assertEqual(coder["raw_length"], len(self._SECRET_CODER))
+
+    def test_reject_without_any_remembered_output_is_graceful(self):
+        # 非 claude 家族 adapter（未接线 remember）拒绝时：零文件、零
+        # 取证行 —— 取证绝不反向破坏既有失败语义。
+        bad_output = self._MALFORMED_ARCH
+
+        class _PlainBad(FakeFamilyAdapter):
+            def invoke(self, request):
+                if request.role == "architect":
+                    return InvocationResult(
+                        InvocationStatus.SUCCESS,
+                        output=bad_output, trace=None)
+                return super().invoke(request)
+
+        adapter = _PlainBad("rt-a")
+        code, out, err = self._run(
+            (lambda: adapter, lambda: FakeFamilyAdapter("rt-b", "provider-b")))
+        self.assertEqual(code, 2)
+        self.assertNotIn("packet forensics", err)
+        self.assertIn("rule=JSON_PARSE_OR_NON_OBJECT", err)
 
 
 if __name__ == "__main__":

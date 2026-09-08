@@ -42,6 +42,7 @@ from external_runtime import (
     RuntimeProfile,
     new_invocation_id,
 )
+from packet_forensics import remember_invocation_output
 
 
 class ClaudeCodeAdapter:
@@ -208,6 +209,13 @@ class ClaudeCodeAdapter:
                     trace=self._finish_trace(trace, InvocationStatus.FAILED, started, process.returncode, finished, error),
                 )
             output = self._parse_output(stdout)
+            # CU-R4（forensics capture）：成功输出在构造结果前记住到进程内
+            # 取证槽 —— 同一引用随即成为 InvocationResult.output（session
+            # 原样送进 packet parser）。纯内存、零 I/O、零用户可见输出；
+            # 落盘只发生在 host 侧 *_PACKET_INVALID 终态。
+            remember_invocation_output(
+                "claude-cli", invocation_id, request.task_id,
+                request.role, output)
             input_tokens, output_tokens = self._parse_usage(stdout)
             return InvocationResult(
                 InvocationStatus.SUCCESS,

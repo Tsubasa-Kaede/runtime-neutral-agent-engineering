@@ -204,6 +204,7 @@ from content_safety import (
     last_validation_diagnostic,
     next_diagnostic_generation,
 )
+import packet_forensics
 
 # 默认家族接线表（数据，非行为）：每家环境发现的真相在其自身
 # from_environment 内 —— 这里只登记 (模块, 类型) 并按同一契约循环，
@@ -690,6 +691,9 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
     # ledger，账本键一致）。run 前换代（CU-R2）：run 期间记录的
     # 拒绝诊断带本代数戳，事后只采信本代观测。
     generation = next_diagnostic_generation()
+    # CU-R4（forensics capture）：run 入口清取证槽 —— 跨 run 绝不泄漏旧
+    # 输出；adapter 只在成功 invoke 时进槽（纯内存，零用户可见输出）。
+    packet_forensics.reset()
     # CU-R3b：run 内 pre-collaboration 域拒绝（REAL 探针 + 离线复现已
     # 证：append_decision 对 task_id 的封闭词表安全拒收，消息不含值）收敛
     # 到既有语义失败表面；其余异常保持 traceback 可见性，绝不吞掉。
@@ -713,6 +717,20 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
     reject_line = _packet_reject_line(payload["status"], generation)
     if reject_line is not None:
         print(reject_line, file=sys.stderr, flush=True)
+    # CU-R4（forensics capture）：*_PACKET_INVALID 终态专属 —— 记住的
+    # parser input 原文落盘取证（FULL 模式与 parser 输入逐字节相等；
+    # 含凭据形状走既有脱敏，绝不明文、绝不声称相等）。成功与其余
+    # 终态零落盘零输出；adapter 未接线（非 claude 家族）时槽为空，
+    # 安静无副作用。取证 IO 失败在库层已被吞掉 —— 绝不改变失败语义。
+    if payload["status"].endswith("_PACKET_INVALID"):
+        paths = packet_forensics.persist_pending(
+            stage_hint=payload["status"].split("_", 1)[0].lower())
+        if paths:
+            print("dual-agent: packet forensics: "
+                  + "; ".join(str(path) for path in paths),
+                  file=sys.stderr, flush=True)
+    else:
+        packet_forensics.reset()
     return exit_code_for(payload["status"])
 
 
