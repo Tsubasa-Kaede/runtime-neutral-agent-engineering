@@ -20,6 +20,7 @@ from collaboration_packet import (
     serialize_collaboration_packet,
 )
 from collaboration_session import (
+    ARCHITECT_INSTRUCTION,
     CollaborationOutcome,
     CollaborationSession,
     CollaborationStatus,
@@ -534,6 +535,67 @@ class RealDualAgentSmokeTests(unittest.TestCase):
         after = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in protected if p.exists()}
         self.assertEqual(before, after)
         self.assertEqual(adapter._processes, {})
+
+
+class ArchitectInstructionRepairTests(unittest.TestCase):
+    """CU-PR-1：生成侧预防 —— ARCHITECT_INSTRUCTION append-only 增强。
+
+    只证明新的 qualification 先例约束已进入 Architect generation
+    boundary（字符串事实与拼接契约）；不声称 offline 单测可以证明
+    REAL 生成可靠性 —— 后者由独立 REAL gate 验证。
+    """
+
+    # CU-PR-1 之前的完整原文正文（含结尾空行连接符）—— append-only
+    # 契约要求它逐字保留为新 instruction 的前缀。
+    ORIGINAL_BODY = (
+        "You are the architect for one small, read-only design task. "
+        "Return ONLY a JSON object with exactly these keys: "
+        "task_id, role, goal, constraints, architecture, interfaces, "
+        "implementation_steps, acceptance_criteria, risks. "
+        'task_id and role are strings (role must be "architect"). '
+        "goal, constraints, architecture, acceptance_criteria are arrays of "
+        "strings. interfaces, implementation_steps, risks are arrays of "
+        "objects. No prose, no markdown fences. "
+        "Do not modify files, run commands, or touch any repository.\n\n"
+    )
+
+    def test_t1_original_body_is_verbatim_prefix(self):
+        self.assertTrue(ARCHITECT_INSTRUCTION.startswith(self.ORIGINAL_BODY))
+
+    def test_t2_a1_content_boundary_present(self):
+        # A1：qualify 原文的内容边界句逐字在场（Class A 生成侧预防）。
+        self.assertIn(
+            "Do not use the words token, secret, api_key, authorization, "
+            "bearer, stdout or stderr anywhere in the JSON.",
+            ARCHITECT_INSTRUCTION)
+
+    def test_t3_b1_format_rules_present(self):
+        # B1：qualify 原文的 format rules 逐字在场（Class B 生成侧预防）。
+        self.assertIn(
+            "Format rules: your entire reply must be a single JSON object "
+            "that starts with { and ends with } — no markdown fences, no "
+            "text before or after it.", ARCHITECT_INSTRUCTION)
+        self.assertIn(
+            "goal, constraints, architecture and acceptance_criteria must "
+            "each be a JSON array (use [] when empty); never a number or a "
+            "bare string.", ARCHITECT_INSTRUCTION)
+        self.assertIn(
+            "interfaces, implementation_steps and risks must be arrays of "
+            "objects. Keep every item short.", ARCHITECT_INSTRUCTION)
+
+    def test_t4_task_connector_contract_intact(self):
+        # 拼接契约：instruction 仍以 "\n\nTask: " 收尾；session 的
+        # task_id 行 + Task 拼接方式不变（含既有双 "Task: " 标签形态）。
+        self.assertTrue(ARCHITECT_INSTRUCTION.endswith("\n\nTask: "))
+        composed = (ARCHITECT_INSTRUCTION
+                    + 'task_id must be exactly "task_x".\n\nTask: '
+                    + "Fix the parser.")
+        self.assertEqual(composed.count("Task: "), 2)
+        self.assertTrue(composed.endswith("Fix the parser."))
+        # 增强约束在组合 prompt 中恰好出现一次（无重复注入）。
+        self.assertEqual(
+            composed.count("Do not use the words token, secret"), 1)
+        self.assertEqual(composed.count("Format rules: your entire reply"), 1)
 
 
 if __name__ == "__main__":

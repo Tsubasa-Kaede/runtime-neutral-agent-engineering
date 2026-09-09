@@ -39,7 +39,21 @@ ARCHITECT_INSTRUCTION = (
     "strings. interfaces, implementation_steps, risks are arrays of "
     "objects. No prose, no markdown fences. "
     "Do not modify files, run commands, or touch any repository.\n\n"
-    "Task: "
+    # CU-PR-1（用户批准的一次 V2 冻结例外，append-only）：qualification
+    # 路径已 REAL 验证过的生成约束逐字移植（real_validation_executor.py
+    # 的 architect_format 原文）——A1 内容边界句压 Class A（G15 扫描
+    # 误伤面），B1 format rules + keep every item short 压 Class B（长
+    # 程结构记账错误面）。生成侧预防，不改 scanner/parser/schema，失败
+    # 仍诚实浮现为 ARCHITECT_PACKET_INVALID。
+    "\n\nFormat rules: your entire reply must be a single JSON object "
+    "that starts with { and ends with } — no markdown fences, no "
+    "text before or after it. goal, constraints, architecture and "
+    "acceptance_criteria must each be a JSON array (use [] when "
+    "empty); never a number or a bare string. interfaces, "
+    "implementation_steps and risks must be arrays of objects. Keep "
+    "every item short. Do not use the words token, secret, api_key, "
+    "authorization, bearer, stdout or stderr anywhere in the JSON."
+    "\n\nTask: "
 )
 
 CODER_INSTRUCTION = (
