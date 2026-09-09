@@ -174,6 +174,17 @@ class ProviderlessAdapter(FakeFamilyAdapter):
         super().__init__(runtime_id="rt-l0", provider_id=None)
 
 
+class HealthFailingFamilyAdapter(FakeFamilyAdapter):
+    """mini 探测不过的家族（离线语义：UNSUPPORTED_HEALTH_CHECK）：auth/
+    provider 照常通过 → RuntimeHealthController 判 ERROR → bootstrap
+    reason="HEALTH_ERROR"（未开 REAL gate 的真实家族同型失败类）。"""
+
+    def minimal_health_check(self, timeout_seconds):
+        from runtime_health import MinimalHealthCheck
+        return MinimalHealthCheck(False, ReasonCode.UNSUPPORTED_HEALTH_CHECK,
+                                  output_class="skipped")
+
+
 def evidence_for(runtime_id="rt-a", provider_id="provider-a",
                  fingerprint="default"):
     return CandidateValidationResult(
@@ -2077,6 +2088,177 @@ class MultiRuntimeCompositionWiringTests(unittest.TestCase):
             "DECISION", "STAGE_STARTED", "INVOCATION_STARTED",
             "INVOCATION_FINISHED", "STAGE_FINISHED", "HANDOFF",
             "TERMINAL"})
+
+
+class AdmissionExclusionObservabilityTests(unittest.TestCase):
+    """CU-R6（Admission Exclusion Observability）：bootstrap 阶段未
+    admitted 的既有封闭词表 reason 经 CLI stderr 原样透出 —— 纯观测
+    投影：不改 health/admission/policy 语义、不改 stdout 契约、library
+    层（default_facade）保持静默。POLICY_RUNTIME_ABSENT（bootstrap 已
+    admitted 后被 policy/selection 排除，或根本未注册）不是 CU-R6 的
+    报告面 —— 两者互补但绝不重叠。"""
+
+    COMPLEX_TASK = "redesign architecture across modules"
+    EXCLUSION_PREFIX = "dual-agent: admission exclusion: "
+
+    @staticmethod
+    def _exclusion_lines(err):
+        return [line for line in err.splitlines()
+                if line.startswith(
+                    AdmissionExclusionObservabilityTests.EXCLUSION_PREFIX)]
+
+    def _run(self, argv, *, factories, evidence, current_health=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(argv, factories=factories,
+                                   evidence=evidence,
+                                   current_health=current_health)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def _mixed_factories(*failing_ids):
+        # 注册顺序故意与健康序不同（rt-c 在 rt-b 前）—— 排序语义可断言。
+        adapters = [FakeFamilyAdapter("rt-a")]
+        adapters += [HealthFailingFamilyAdapter(rid, "provider-" + rid)
+                     for rid in failing_ids]
+        return tuple(lambda a=a: a for a in adapters)
+
+    @staticmethod
+    def _mixed_evidence(*failing_ids):
+        evidence = {
+            ("rt-a", "provider-a", None, "default"): evidence_for("rt-a")}
+        for rid in failing_ids:
+            evidence[(rid, "provider-" + rid, None, "default")] = \
+                evidence_for(rid, "provider-" + rid)
+        return evidence
+
+    # -- T1：一个 admitted + 一个 bootstrap health failure -------------------
+
+    def test_health_failure_prints_exactly_one_closed_reason_line(self):
+        code, out, err = self._run(
+            ["run", "--runtimes", "rt-a,rt-bad", "--min-runtimes", "1",
+             "--mode", "on", "--observe", self.COMPLEX_TASK],
+            factories=self._mixed_factories("rt-bad"),
+            evidence=self._mixed_evidence("rt-bad"))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["status"], "SUCCESS")
+        # 恰一行，原样透传既有封闭词表 reason（绝不重算/改写）。
+        self.assertEqual(
+            self._exclusion_lines(err),
+            ["dual-agent: admission exclusion: runtime=rt-bad"
+             " reason=HEALTH_ERROR"])
+        # 与 policy 的 ABSENT 报告互补共存（REAL gate 同型诊断对）。
+        self.assertIn("ROLE_ASSIGNMENT=POLICY_RUNTIME_ABSENT=rt-bad", err)
+        # stdout 契约不变：仍恰一行机器 JSON。
+        self.assertEqual(len(out.strip().splitlines()), 1)
+
+    # -- T2：多个 exclusion，确定性排序，每个恰一行 -------------------------
+
+    def test_multiple_exclusions_sorted_one_line_each(self):
+        # 注册顺序 rt-a, rt-c, rt-b；输出必须按 runtime_id 排序 rt-b, rt-c。
+        code, out, err = self._run(
+            ["run", "--min-runtimes", "1", "--mode", "on", "--observe",
+             self.COMPLEX_TASK],
+            factories=self._mixed_factories("rt-c", "rt-b"),
+            evidence=self._mixed_evidence("rt-c", "rt-b"))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["status"], "SUCCESS")
+        self.assertEqual(
+            self._exclusion_lines(err),
+            ["dual-agent: admission exclusion: runtime=rt-b"
+             " reason=HEALTH_ERROR",
+             "dual-agent: admission exclusion: runtime=rt-c"
+             " reason=HEALTH_ERROR"])
+
+    # -- T3：全部 admitted → 零 exclusion 行 ---------------------------------
+
+    def test_all_admitted_zero_exclusion_lines(self):
+        code, out, err = self._run(
+            ["run", "--mode", "on", "--observe", self.COMPLEX_TASK],
+            factories=two_family_factories(),
+            evidence=two_family_evidence())
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["status"], "SUCCESS")
+        self.assertEqual(self._exclusion_lines(err), [])
+
+    # -- T4：bootstrap ADMITTED + POLICY_RUNTIME_ABSENT → 零 CU-R6 行 -------
+
+    def test_policy_absent_is_not_a_bootstrap_exclusion(self):
+        # rt-a/rt-b 均 bootstrap admitted；allowlist 点名未注册的 rt-z →
+        # policy 报 POLICY_RUNTIME_ABSENT=rt-z，但 CU-R6 必须保持沉默
+        # （该缺席不是 bootstrap 排除），DECISION 行原样保留。
+        code, out, err = self._run(
+            ["run", "--runtimes", "rt-a,rt-z", "--min-runtimes", "1",
+             "--mode", "on", "--observe", self.COMPLEX_TASK],
+            factories=two_family_factories(),
+            evidence=two_family_evidence())
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["status"], "SUCCESS")
+        self.assertIn("ROLE_ASSIGNMENT=POLICY_RUNTIME_ABSENT=rt-z", err)
+        self.assertEqual(self._exclusion_lines(err), [])
+        decision_lines = [line for line in err.splitlines()
+                          if "[0] DECISION " in line]
+        self.assertEqual(len(decision_lines), 1)
+
+    # -- T5：不传新参数 → 完全向后兼容 ---------------------------------------
+
+    def test_default_facade_backward_compatible_without_parameter(self):
+        facade = host_entry.default_facade(
+            factories=two_family_factories(),
+            evidence=two_family_evidence())
+        # 既有构造路径零变化：同一多 runtime 池身份。
+        self.assertEqual(facade._orchestrator._pool.identities(), (
+            ("rt-a", "provider-a", None, "default"),
+            ("rt-b", "provider-b", None, "default")))
+
+    # -- T6：observation list 不改变任何构造/判定/输出 -----------------------
+
+    def test_observation_list_changes_nothing(self):
+        observed = []
+        without = host_entry.default_facade(
+            factories=two_family_factories(),
+            evidence=two_family_evidence())
+        with_list = host_entry.default_facade(
+            factories=two_family_factories(),
+            evidence=two_family_evidence(),
+            bootstrap_exclusions=observed)
+        # admitted 集合与 facade 构造完全一致；全部 admitted ⇒ 观测为空。
+        self.assertEqual(without._orchestrator._pool.identities(),
+                         with_list._orchestrator._pool.identities())
+        self.assertEqual(observed, [])
+        # 有失败家族时：观测拿到既有 reason，池身份仍只含 admitted。
+        observed_mixed = []
+        facade_mixed = host_entry.default_facade(
+            factories=self._mixed_factories("rt-bad"),
+            evidence=self._mixed_evidence("rt-bad"),
+            bootstrap_exclusions=observed_mixed)
+        self.assertEqual(facade_mixed._orchestrator._pool.identities(), (
+            ("rt-a", "provider-a", None, "default"),))
+        self.assertEqual(observed_mixed, [("rt-bad", "HEALTH_ERROR")])
+        # CLI 行为确定性：同 argv 两次运行 stdout 完全一致。
+        argv = ["run", "--min-runtimes", "1", "--mode", "on", "--observe",
+                self.COMPLEX_TASK]
+        first = self._run(argv, factories=self._mixed_factories("rt-bad"),
+                          evidence=self._mixed_evidence("rt-bad"))
+        second = self._run(argv, factories=self._mixed_factories("rt-bad"),
+                           evidence=self._mixed_evidence("rt-bad"))
+        self.assertEqual(first[1], second[1])
+        self.assertEqual(first[2], second[2])
+
+    # -- T7：library 静默 + 既有调用面兼容 -----------------------------------
+
+    def test_default_facade_library_call_stays_silent(self):
+        observed = []
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            host_entry.default_facade(
+                factories=self._mixed_factories("rt-bad"),
+                evidence=self._mixed_evidence("rt-bad"),
+                bootstrap_exclusions=observed)
+        # stderr 输出只属于 CLI entry layer（_main_run），library 零打印。
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(observed, [("rt-bad", "HEALTH_ERROR")])
 
 
 if __name__ == "__main__":

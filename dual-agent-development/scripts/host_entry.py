@@ -346,7 +346,8 @@ def _facade_from_admitted(session, registry, current_health,
 
 def default_facade(*, factories=None, evidence=None, qualifier=None,
                    current_health=None,
-                   timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
+                   timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+                   bootstrap_exclusions=None):
     """默认组合：registry → 时点健康 → bootstrap → 按 admitted 基数分流。
 
     P1-1（multi-runtime composition wiring）：
@@ -359,6 +360,12 @@ def default_facade(*, factories=None, evidence=None, qualifier=None,
       既有路径一致）。
     - admitted == 0 → 交给既有 Automatic entry 抛出规范组合失败（含全部
       entry 理由）。
+
+    CU-R6（Admission Exclusion Observability）：可选 ``bootstrap_exclusions``
+    列表由调用方提供 —— bootstrap 阶段未 admitted 的 (runtime_id, reason)
+    按确定性排序原样写入；reason 即 ``RuntimeBootstrapEntry.reason`` 的
+    既有封闭词表值，绝不重算、绝不重分类。纯观测投影：本函数自身零
+    打印、零判定变化；stderr 输出只属于 CLI entry layer（``_main_run``）。
     """
     registry, _skipped = environment_registry(factories)
     if current_health is None:
@@ -367,6 +374,14 @@ def default_facade(*, factories=None, evidence=None, qualifier=None,
         registry, evidence=evidence, qualifier=qualifier,
         required_capabilities=_CAPS_ALL)
     admitted = [entry for entry in session.entries if entry.admitted]
+    if bootstrap_exclusions is not None:
+        # CU-R6：纯观测投影 —— bootstrap 阶段未 admitted 的既有封闭词表
+        # reason 原样交给调用方（确定性排序）。绝不重算 reason、绝不重
+        # 分类、绝不影响下方任何构造/裁决分支。
+        bootstrap_exclusions.extend(sorted(
+            ((entry.runtime_id, entry.reason)
+             for entry in session.entries if not entry.admitted),
+            key=lambda exclusion: exclusion[0]))
     if len(admitted) >= 2:
         return _facade_from_admitted(
             session, registry, current_health, timeout_seconds)
@@ -750,11 +765,13 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
                               "detail": str(error)}), file=sys.stderr)
             return 2
         _print_rejections(rejected)
+    bootstrap_exclusions: list = []
     try:
         facade = default_facade(
             factories=factories, evidence=evidence, qualifier=None,
             current_health=current_health,
-            timeout_seconds=timeout_seconds)
+            timeout_seconds=timeout_seconds,
+            bootstrap_exclusions=bootstrap_exclusions)
     except (RuntimeError, ValueError) as error:
         return _semantic_failure(_composition_reason(str(error)),
                                  str(error))
@@ -762,6 +779,15 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
         print(json.dumps({"error": "host composition failed",
                           "detail": str(error)}), file=sys.stderr)
         return 2
+    # CU-R6（Admission Exclusion Observability）：bootstrap 阶段未 admitted
+    # 的既有 reason 经 stderr 原样透出，与 DECISION 的
+    # POLICY_RUNTIME_ABSENT 互补但不重叠 —— 本行只描述 bootstrap 排除
+    # （health/discovery/evidence 门），bootstrap 已 admitted 后被
+    # policy/selection 排除的缺席不在此报告面。绝不重算、绝不探测、
+    # 绝不影响 stdout 契约与任何判定路径。
+    for runtime_id, reason in bootstrap_exclusions:
+        print(f"dual-agent: admission exclusion: runtime={runtime_id} "
+              f"reason={reason}", file=sys.stderr, flush=True)
     # 既有 run_cli 直接组合（parse → policy → run → 渲染；cli.py 零修改，
     # cli.main 的注入式嵌入面原样保留给直接嵌入方）：渲染字符串即规范形，
     # exit 语义在本层稳定映射。CU-R3a：facade 经组合边界代理 —— CLI 的
