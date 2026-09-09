@@ -33,6 +33,28 @@ malformed construct 定位 UNKNOWN。本模块让下一次 REAL failure 拿到�
 文件命名 ``packet_forensics_{runtime_id}_{invocation_id}.json`` 落在系统
 tempdir：文件名只含 runtime/invocation 标识 —— 绝不含 task 原文，绝不含
 secret。
+
+CU-R5（Packet Forensics Self-Test Fields）：落盘记录内新增两个只读自测
+字段 —— ``self_test_json_loads``（``OK`` | ``FAIL:<exception-class>:<pos>``）
+与 ``self_test_packet_schema``（``PASS`` | ``FAIL:<rule>`` | ``N/A``）。
+对**脱敏之前的内存原文**重新执行 JSON decode 与 packet schema 检查，
+使 *_PACKET_INVALID 取证可直接区分「JSON 解析失败 / schema 失败 /
+后置内容扫描拒绝」（R2C/P1-1b 两取证因 REDACTED+4096 截断丧失全文，
+无法离线复跑 json.loads —— 本 CU 关闭该 observability gap）。
+
+自测红线（forensic-only）：
+- 在 persist 时（run 终态之后）对槽内原文计算，绝不改变生产
+  acceptance/rejection —— ``_packet_from_output`` 行为零变化，self-test
+  FAIL 绝不反向影响任何生产路径。
+- schema 检查复用既有 primitive（structured_packets 的 from_dict 家族 +
+  R6-C11 结构化诊断 rule + session 家族的 _normalize 归一语义），绝不建
+  第二套业务 parser；两家族忠实映射：architect/coder 走 session 家族
+  （from_dict 前 _normalize，collaboration_session.py 语义），tester/
+  reviewer 走 verification 家族（无归一，verification_collaboration.py
+  语义）；未映射 role → ``N/A``。
+- task_id 覆写与两家族生产语义一致（orchestration 拥有任务身份）。
+- 诊断槽在自测前后 reset：陈旧诊断绝不冒充本次失败原因，自测绝不
+  留下跨调用污染。
 """
 from __future__ import annotations
 
@@ -131,6 +153,8 @@ def _build_record(entry, stage_hint):
         text = json.dumps(output, ensure_ascii=True, sort_keys=True,
                           default=repr)
         serialized = True
+    # 生产 parser input 语义（_packet_from_output：非字符串按 "" 处理）。
+    parser_text = output if isinstance(output, str) else ""
     # 判定在原始对象上做（dict 形态时递归语义与 packet 扫描同源）。
     if contains_unsafe_content(output):
         mode = "REDACTED_UNSAFE"
@@ -152,6 +176,11 @@ def _build_record(entry, stage_hint):
         "sha256_raw": hashlib.sha256(
             text.encode("utf-8")).hexdigest(),
         "raw_parser_input": stored,
+        # CU-R5：自测在脱敏之前的内存原文上执行（stored 已损失原文时，
+        # 这两个字段是判别「parse vs schema vs 后置扫描」的唯一证据）。
+        "self_test_json_loads": _self_test_json_loads(parser_text),
+        "self_test_packet_schema": _self_test_packet_schema(
+            parser_text, entry["task_id"], entry["role"]),
         "failure_stage_hint": stage_hint,
         "captured_at": time.time(),
     }
@@ -167,6 +196,77 @@ def _safe_task_id(task_id):
     if isinstance(task_id, str) and contains_unsafe_content(task_id):
         return "REDACTED"
     return task_id
+
+
+def _self_test_json_loads(parser_text: str) -> str:
+    """CU-R5：对 parser input 原文直接执行 JSON decode，记录异常类与
+    位置（json.JSONDecodeError.pos）。只描述「现在重新检查会得到
+    什么」，绝不影响任何生产判定。"""
+    try:
+        json.loads(parser_text)
+    except ValueError as exc:
+        position = getattr(exc, "pos", None)
+        suffix = "" if position is None else f":{position}"
+        return f"FAIL:{type(exc).__name__}{suffix}"
+    return "OK"
+
+
+def _self_test_packet_class(role):
+    """role → (packet_class, 是否 session 家族归一)。懒导入避免模块级
+    权重/环；映射忠实两家族生产路径（见模块 docstring）。未映射 →
+    None（自测如实 N/A，绝不猜测 schema）。"""
+    from structured_packets import (
+        ArchitecturePacket,
+        ImplementationPacket,
+        ReviewPacket,
+        TestPacket,
+    )
+    return {
+        "architect": (ArchitecturePacket, True),
+        "coder": (ImplementationPacket, True),
+        "tester": (TestPacket, False),
+        "reviewer": (ReviewPacket, False),
+    }.get(role)
+
+
+def _self_test_packet_schema(parser_text: str, task_id, role) -> str:
+    """CU-R5：对已解析对象按生产同族规则重跑 packet schema 检查。
+
+    与 ``_packet_from_output`` 的 gate 顺序保持同族语义（dict 检查 →
+    task_id 覆写 → [session 家族] _normalize → from_dict），但不做 fence
+    剥离、不跑后置全包内容扫描 —— 自测要分离的恰是「schema 之前 vs
+    之后」。失败 rule 复用 R6-C11 结构化诊断（无诊断可读时退化为
+    PACKET_VALIDATION_ERROR），绝不携带被拒值。"""
+    mapped = _self_test_packet_class(role)
+    if mapped is None:
+        return "N/A"
+    packet_class, session_family = mapped
+    try:
+        data = json.loads(parser_text)
+    except ValueError:
+        return "N/A"
+    if not isinstance(data, dict):
+        return "FAIL:NON_OBJECT"
+    data = dict(data)
+    data["task_id"] = task_id  # orchestration owns task identity（两家族一致）
+    if session_family:
+        from collaboration_session import _normalize  # 冻结件复用，非复制
+        data = _normalize(data)
+    from content_safety import (
+        last_validation_diagnostic,
+        reset_validation_diagnostic,
+    )
+    reset_validation_diagnostic()  # 陈旧诊断绝不冒充本次失败原因
+    try:
+        packet_class.from_dict(data)
+    except (ValueError, TypeError, KeyError):
+        diagnostic = last_validation_diagnostic()
+        rule = (diagnostic.rule if diagnostic is not None
+                else "PACKET_VALIDATION_ERROR")
+        reset_validation_diagnostic()  # 自测绝不留下跨调用污染
+        return f"FAIL:{rule}"
+    reset_validation_diagnostic()
+    return "PASS"
 
 
 def _redact(text):

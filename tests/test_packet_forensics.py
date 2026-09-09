@@ -29,6 +29,42 @@ MALFORMED_HEAD_BREAK = ('{"task_id": "t", "role": "architect", '
 SECRET_SHAPED = ('before {"task_id": "t"} token=abc12345678 '
                 'and api_key: zz9988776655 after')
 
+# CU-R5 fixtures：合法 schema 的四家族 packet（clean 版与含凭据形状
+# 描述词的版本 —— 后者复现 R2C/P1-1b 的 REDACTED_UNSAFE 失败类）。
+VALID_ARCHITECT_PACKET_CLEAN = json.dumps({
+    "task_id": "task_abc123def456", "role": "architect",
+    "goal": ["analyze the helper"], "constraints": ["read-only"],
+    "architecture": ["unify the fallback literals"],
+    "interfaces": [{"name": "safe_error"}],
+    "implementation_steps": [{"step": "add module"}],
+    "acceptance_criteria": ["byte-identical output"],
+    "risks": [{"risk": "none"}],
+})
+# 与 REAL 取证同型的 prose：描述脱敏模式本身的合法技术文本。
+VALID_ARCHITECT_PACKET_BEARER_PROSE = json.dumps({
+    "task_id": "task_abc123def456", "role": "architect",
+    "goal": ["analyze the redaction helper"],
+    "constraints": ["read-only"],
+    "architecture": ["base 6 credential-shape patterns (api key / token "
+                     "/ secret assignment, bearer material, hf_/sk- forms)"],
+    "interfaces": [{"name": "safe_error"}],
+    "implementation_steps": [{"step": "add module"}],
+    "acceptance_criteria": ["byte-identical output"],
+    "risks": [{"risk": "none"}],
+})
+VALID_CODER_PACKET = json.dumps({
+    "task_id": "task_abc123def456", "role": "coder",
+    "changed_files": ["a.py"], "implementation_summary": "s",
+    "implementation_details": ["d"], "assumptions": [],
+    "unresolved_items": [], "test_requirements": ["t"],
+})
+VALID_TESTER_PACKET = json.dumps({
+    "task_id": "task_abc123def456", "role": "tester",
+    "tests_run": ["t1"], "tests_passed": ["t1"], "tests_failed": [],
+    "failures": [], "coverage_or_validation": ["full"],
+    "remaining_risks": [],
+})
+
 
 def _remember_flush(*, runtime_id="rt-a", invocation_id="inv-x",
                     task_id="task_abc123def456", role="architect",
@@ -166,6 +202,145 @@ class ForensicsPersistIntegrityTests(unittest.TestCase):
             packet_forensics._write_entry = original
         self.assertEqual(paths, ())
         self.assertEqual(packet_forensics.pending(), ())  # 取走即清仍成立
+
+
+class ForensicsSelfTestFieldsTests(unittest.TestCase):
+    """CU-R5（Packet Forensics Self-Test Fields）：取证记录内的两个只读
+    自测字段 —— 对记住的 raw parser input 原文（落盘脱敏之前的内存值）
+    重新执行 JSON decode 与 packet schema 检查，使下一次 *_PACKET_INVALID
+    可以区分「JSON 解析失败 / schema 失败 / 后置内容扫描」。
+
+    语义红线：自测只回答「现在重新检查会得到什么」，绝不参与生产
+    acceptance/rejection（_packet_from_output 行为零变化）。
+    """
+
+    def setUp(self):
+        packet_forensics.reset()
+        self._cleanup = []
+
+    def tearDown(self):
+        for path in self._cleanup:
+            Path(path).unlink(missing_ok=True)
+        packet_forensics.reset()
+
+    def _persist_and_load(self, output, *, task_id="task_abc123def456",
+                          invocation_id="inv-cu5", role="architect"):
+        packet_forensics.remember_invocation_output(
+            "rt-a", invocation_id, task_id, role, output)
+        paths = packet_forensics.persist_pending(stage_hint="architect")
+        self._cleanup.extend(paths)
+        self.assertEqual(len(paths), 1)
+        return json.loads(Path(paths[0]).read_text(encoding="utf-8"))
+
+    def test_a_valid_json_and_schema_pass(self):
+        # A：合法 JSON + 合法 ArchitecturePacket schema → OK / PASS。
+        record = self._persist_and_load(VALID_ARCHITECT_PACKET_CLEAN)
+        self.assertEqual(record["capture_mode"], "FULL")
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"], "PASS")
+
+    def test_b_invalid_json_reports_exception_class_and_position(self):
+        # B：坏 JSON → FAIL:<exception-class>:<pos>，schema N/A。
+        record = self._persist_and_load(MALFORMED_HEAD_BREAK)
+        self.assertEqual(record["capture_mode"], "FULL")
+        self.assertEqual(record["self_test_packet_schema"], "N/A")
+        self.assertRegex(record["self_test_json_loads"],
+                         r"^FAIL:JSONDecodeError:\d+$")
+
+    def test_c_valid_json_invalid_schema_reports_structured_rule(self):
+        # C：合法 JSON + 缺必需字段 → OK / FAIL:MISSING_FIELDS（复用
+        # R6-C11 结构化诊断 rule，绝不携带被拒值）。
+        record = self._persist_and_load(
+            json.dumps({"task_id": "task_abc123def456",
+                        "role": "architect"}))
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"],
+                         "FAIL:MISSING_FIELDS")
+
+    def test_session_family_scalar_normalization_is_honored(self):
+        # session 家族忠实性：bare-string 列表字段经 _normalize 归一后
+        # 生产会接受 → 自测同样 PASS（绝不误报 schema 失败）。
+        packet = json.loads(VALID_ARCHITECT_PACKET_CLEAN)
+        packet["goal"] = "single string goal"
+        record = self._persist_and_load(json.dumps(packet))
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"], "PASS")
+
+    def test_verification_family_has_no_normalization(self):
+        # verification 家族忠实性：tester 路径无 _normalize，bare-string
+        # 列表字段按生产语义拒绝 → FAIL:NOT_A_LIST（两家族差异被钉死）。
+        packet = json.loads(VALID_TESTER_PACKET)
+        packet["tests_run"] = "t1"
+        record = self._persist_and_load(json.dumps(packet), role="tester")
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"],
+                         "FAIL:NOT_A_LIST")
+
+    def test_e_redacted_capture_self_test_runs_on_raw_pre_redaction(self):
+        # E（核心）：REDACTED 模式下自测在脱敏前的原文上执行 —— 与
+        # R2C/P1-1b 同型的 bearer-prose packet：mode=REDACTED_UNSAFE 证明
+        # G15 扫描命中，但 json=OK、schema=PASS ⇒ 后置内容扫描即唯一
+        # 剩余拒收 gate（本 CU 要买的判别力）。真实取证签名：bearer
+        # 描述词不命中 _safe_error 六模式，stored 原样可见 + verbatim_note
+        # 如实声明非逐字节相等。
+        record = self._persist_and_load(VALID_ARCHITECT_PACKET_BEARER_PROSE)
+        self.assertEqual(record["capture_mode"], "REDACTED_UNSAFE")
+        self.assertIn("bearer material", record["raw_parser_input"])
+        self.assertEqual(record["verbatim_note"],
+                         "stored artifact is NOT the verbatim parser input")
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"], "PASS")
+
+    def test_non_object_json_fails_schema_as_non_object(self):
+        # 顶层非对象：生产在 isinstance dict 检查处拒绝 → FAIL:NON_OBJECT。
+        record = self._persist_and_load("[1, 2]")
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"],
+                         "FAIL:NON_OBJECT")
+
+    def test_coder_and_tester_roles_map_to_their_families(self):
+        for role, output in (("coder", VALID_CODER_PACKET),
+                             ("tester", VALID_TESTER_PACKET)):
+            with self.subTest(role=role):
+                record = self._persist_and_load(output, role=role)
+                self.assertEqual(record["self_test_json_loads"], "OK")
+                self.assertEqual(record["self_test_packet_schema"], "PASS")
+
+    def test_unmapped_role_is_na(self):
+        record = self._persist_and_load(VALID_ARCHITECT_PACKET_CLEAN,
+                                        role="observer")
+        self.assertEqual(record["self_test_json_loads"], "OK")
+        self.assertEqual(record["self_test_packet_schema"], "N/A")
+
+    def test_non_string_output_matches_production_empty_text_path(self):
+        # 非字符串输出：生产 _packet_from_output 取 "" → 解析必败；
+        # 自测如实复现（FAIL:…:0），schema N/A。
+        record = self._persist_and_load({"already": "parsed"})
+        self.assertEqual(record["self_test_json_loads"],
+                         "FAIL:JSONDecodeError:0")
+        self.assertEqual(record["self_test_packet_schema"], "N/A")
+
+    def test_diagnostic_slot_left_clean_and_stale_stamps_ignored(self):
+        # 诊断槽卫生：自测前后 reset —— 陈旧诊断绝不冒充本次失败原因；
+        # persist 完成后槽为 None（零跨调用污染）。
+        from content_safety import (
+            ValidationDiagnostic,
+            last_validation_diagnostic,
+            record_validation_diagnostic,
+            reset_validation_diagnostic,
+        )
+        record_validation_diagnostic(
+            ValidationDiagnostic("packet", "goal", None, "UNSAFE_SHAPE"))
+        record = self._persist_and_load(VALID_ARCHITECT_PACKET_CLEAN)
+        self.assertEqual(record["self_test_packet_schema"], "PASS")
+        self.assertIsNone(last_validation_diagnostic())
+        record = self._persist_and_load(
+            json.dumps({"task_id": "task_abc123def456",
+                        "role": "architect"}))
+        self.assertEqual(record["self_test_packet_schema"],
+                         "FAIL:MISSING_FIELDS")
+        self.assertIsNone(last_validation_diagnostic())
+        reset_validation_diagnostic()
 
 
 class AdapterRememberWiringTests(unittest.TestCase):
