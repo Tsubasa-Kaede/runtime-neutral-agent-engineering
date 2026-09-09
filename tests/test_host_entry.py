@@ -249,6 +249,43 @@ class EnvironmentRegistryTests(unittest.TestCase):
                          ["rt-a", "rt-b"])
         self.assertEqual(skipped, ("rt-l0",))
 
+    def test_pi_settings_backed_family_registers_deepseek_identity(self):
+        # P1-1b：Pi 的 provider 来自 Pi 自己的 settings defaultProvider
+        # —— registry 零特判，纯走既有 provider 非空注册语义；model
+        # 恒 None（defaultModel 绝不进 identity）。
+        from pi_adapter import PiAdapter
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "settings.json"
+            settings.write_text(json.dumps(
+                {"defaultProvider": "deepseek",
+                 "defaultModel": "deepseek-v4-pro"}), encoding="utf-8")
+            with patch("pi_adapter.shutil.which", return_value="pi"):
+                registry, skipped = host_entry.environment_registry(
+                    (lambda: PiAdapter.from_environment(
+                        settings_path=settings),)
+                    + two_family_factories())
+        ids = [d.runtime_id for d in registry.list()]
+        self.assertEqual(sorted(ids), ["pi-cli", "rt-a", "rt-b"])
+        pi = registry.get("pi-cli")
+        self.assertEqual(pi.identity, ("pi-cli", "deepseek", None, "default"))
+        self.assertEqual(pi.model_id, None)
+        self.assertNotIn("pi-cli", skipped)
+
+    def test_pi_without_settings_stays_skipped(self):
+        # P1-1b：settings 缺席 → Pi 维持既有诚实 skip（反伪造不变量
+        # 不变，改的是 PiAdapter 的观察面，不是 registry 的接受面）。
+        from pi_adapter import PiAdapter
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent-settings.json"
+            with patch("pi_adapter.shutil.which", return_value="pi"):
+                registry, skipped = host_entry.environment_registry(
+                    (lambda: PiAdapter.from_environment(
+                        settings_path=missing),)
+                    + two_family_factories())
+        self.assertEqual([d.runtime_id for d in registry.list()],
+                         ["rt-a", "rt-b"])
+        self.assertIn("pi-cli", skipped)
+
     def test_default_factory_table_covers_family_without_probing(self):
         # 默认家族表可枚举（8 家、均可调用），且枚举本身绝不执行探测
         # —— from_environment 只在 environment_registry 循环里被调用。

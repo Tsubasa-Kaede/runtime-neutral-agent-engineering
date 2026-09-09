@@ -17,8 +17,12 @@ Authentication 只通过 pi auth check --provider <p> --json
 （ready/not_ready/invalid）与 authType 标签，不返回凭据材料。
 本模块绝不使用 --credentials、auth print-api-key 或
 auth print-bearer-token（凭据打印面），绝不打开 pi 的凭据存储。
-pi 是多 provider runtime：profile 未指明 provider 时，auth 与
-provider 检查如实上报 UNSUPPORTED，默认 provider 不猜测。
+pi 是多 provider runtime：默认 profile 的 provider 只来自两处 ——
+调用方显式 profile，或 Pi 自己声明的 ~/.pi/agent/settings.json
+defaultProvider（runtime-owned 声明的观察，不是猜测）。settings
+缺失/损坏/空值时 provider=None，auth 与 provider 检查如实上报
+UNSUPPORTED，绝不代造。绝不读凭据存储 auth.json；绝不读
+defaultModel（model 由 pi 自行路由，profile 保持 model=None）。
 minimal_health_check 只在 RUN_REAL_PROVIDER_TESTS=1（REAL
 gate）时执行，否则诚实上报 skipped，绝不伪造通过。
 
@@ -43,6 +47,7 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from external_runtime import (
@@ -54,6 +59,27 @@ from external_runtime import (
     RuntimeProfile,
     new_invocation_id,
 )
+
+
+def _observed_default_provider(settings_path) -> str | None:
+    """观察 Pi runtime 自己声明的 defaultProvider（只读这一个字段）。
+
+    这是 runtime-owned 声明的观察，不是猜测：settings 缺失、JSON
+    损坏、非对象、字段缺失、非字符串或空串一律如实返回 None，绝不
+    代造 provider，异常也绝不外泄到 discovery 层。绝不读取凭据存储
+    （auth.json），绝不读取 defaultModel（model 由 pi 自行路由，
+    profile 保持 model=None）。
+    """
+    try:
+        payload = json.loads(Path(settings_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    provider = payload.get("defaultProvider")
+    if not isinstance(provider, str):
+        return None
+    return provider.strip() or None
 
 
 class PiAdapter:
@@ -74,16 +100,27 @@ class PiAdapter:
     def from_environment(
         cls,
         profile: RuntimeProfile | None = None,
+        *,
+        settings_path=None,
     ) -> "PiAdapter | None":
         # 注册要求可执行文件在场：PATH 上没有 pi 的机器得到的是
         # 诚实的缺席（None），而不是错误或半配置的 adapter。默认
-        # profile 的 provider 为 None —— pi 是多 provider runtime，
-        # provider 必须由配置显式给出，本模块绝不猜测。
+        # profile 的 provider 观察 Pi 自己的 settings 声明
+        # （~/.pi/agent/settings.json 的 defaultProvider —— runtime-
+        # owned 事实，不是猜测）；settings 缺失/损坏/空值时 provider
+        # 为 None，由 registry 按既有反伪造不变量诚实跳过。调用方
+        # 显式 profile 优先于 settings 观察。model 恒 None。
         executable = shutil.which("pi") or shutil.which("pi.exe")
         if not executable:
             return None
+        if profile is not None:
+            return cls(profile, executable)
+        resolved_settings = settings_path or (
+            Path.home() / ".pi" / "agent" / "settings.json")
         return cls(
-            profile or RuntimeProfile("coding-agent", "pi-cli", None, None, "coder", frozenset()),
+            RuntimeProfile("coding-agent", "pi-cli",
+                           _observed_default_provider(resolved_settings),
+                           None, "coder", frozenset()),
             executable,
         )
 

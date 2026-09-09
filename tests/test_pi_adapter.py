@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -449,6 +450,119 @@ class PiAdapterTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.reason_code, ReasonCode.NONE)
         self.assertEqual(result.output_class, "exact_ok")
+
+
+class FromEnvironmentDefaultProviderTests(unittest.TestCase):
+    """P1-1b：from_environment 的 provider 只来自 Pi 自己的 settings
+    （~/.pi/agent/settings.json 的 defaultProvider —— runtime-owned
+    声明的观察，不是猜测）。model 恒 None（defaultModel 绝不读）；
+    settings 缺失/损坏/空值 → provider=None 诚实跳过；绝不依赖凭据
+    （auth.json 若被读取即测试失败）。全部离线：executable 与 settings
+    路径均注入。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.settings = self.base / "settings.json"
+
+    def _write_settings(self, payload):
+        if isinstance(payload, str):
+            self.settings.write_text(payload, encoding="utf-8")
+        else:
+            self.settings.write_text(json.dumps(payload), encoding="utf-8")
+
+    def _from_environment(self, **kwargs):
+        with patch("pi_adapter.shutil.which", return_value="pi"):
+            return PiAdapter.from_environment(settings_path=self.settings,
+                                              **kwargs)
+
+    def test_settings_default_provider_is_observed(self):
+        # A：正常 settings —— provider 来自 defaultProvider。
+        self._write_settings({"defaultProvider": "deepseek",
+                              "defaultModel": "deepseek-v4-pro"})
+        adapter = self._from_environment()
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.profile.provider, "deepseek")
+        self.assertIsNone(adapter.profile.model)
+
+    def test_default_model_never_leaks_into_profile(self):
+        # E：defaultModel 在场与否，provider/model 完全一致且 model
+        # 恒 None —— 证明 provider discovery 不读 defaultModel。
+        self._write_settings({"defaultProvider": "deepseek",
+                              "defaultModel": "deepseek-v4-pro"})
+        with_model = self._from_environment()
+        self._write_settings({"defaultProvider": "deepseek"})
+        without_model = self._from_environment()
+        self.assertEqual(with_model.profile.provider, "deepseek")
+        self.assertIsNone(with_model.profile.model)
+        self.assertEqual(
+            (without_model.profile.provider, without_model.profile.model),
+            (with_model.profile.provider, with_model.profile.model))
+
+    def test_missing_settings_keeps_provider_none(self):
+        # B：settings 缺席 → provider=None（诚实跳过，不猜测）。
+        adapter = self._from_environment()
+        self.assertIsNotNone(adapter)
+        self.assertIsNone(adapter.profile.provider)
+
+    def test_malformed_settings_keeps_provider_none_without_raising(self):
+        # C：坏 JSON → provider=None，且异常绝不出 discovery 层。
+        self._write_settings('{"defaultProvider": "deepseek')
+        adapter = self._from_environment()
+        self.assertIsNotNone(adapter)
+        self.assertIsNone(adapter.profile.provider)
+
+    def test_non_object_settings_keeps_provider_none(self):
+        # C 补：合法 JSON 但非对象 → provider=None。
+        self._write_settings(["deepseek"])
+        adapter = self._from_environment()
+        self.assertIsNotNone(adapter)
+        self.assertIsNone(adapter.profile.provider)
+
+    def test_empty_default_provider_keeps_provider_none(self):
+        # D：空串 / 纯空白 → provider=None。
+        for value in ("", "   "):
+            self._write_settings({"defaultProvider": value})
+            adapter = self._from_environment()
+            self.assertIsNotNone(adapter)
+            self.assertIsNone(adapter.profile.provider)
+
+    def test_non_string_default_provider_keeps_provider_none(self):
+        # D 补：非字符串类型 → provider=None，绝不代造。
+        self._write_settings({"defaultProvider": 42})
+        adapter = self._from_environment()
+        self.assertIsNotNone(adapter)
+        self.assertIsNone(adapter.profile.provider)
+
+    def test_provider_discovery_never_reads_credentials(self):
+        # F：同目录放一个"若被读取必然失败"的 auth.json（目录形态，
+        # 任何 read 都抛 OSError）；provider 仍观察到 deepseek 即证明
+        # discovery 完全不依赖凭据。
+        self._write_settings({"defaultProvider": "deepseek"})
+        (self.base / "auth.json").mkdir()
+        adapter = self._from_environment()
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.profile.provider, "deepseek")
+
+    def test_explicit_profile_wins_over_settings_observation(self):
+        # 调用方显式 profile 优先：settings 存在也不改写其 provider。
+        self._write_settings({"defaultProvider": "deepseek"})
+        explicit = RuntimeProfile(
+            agent_id="coding-agent", runtime="pi-cli",
+            provider="anthropic", model=None, role="coder",
+            capabilities=frozenset())
+        adapter = self._from_environment(profile=explicit)
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.profile.provider, "anthropic")
+
+    def test_missing_executable_returns_none_even_with_settings(self):
+        # 可执行文件缺席 = 未安装：即使 settings 声明了 provider 也
+        # 诚实缺席（None），绝不半配置。
+        self._write_settings({"defaultProvider": "deepseek"})
+        with patch("pi_adapter.shutil.which", return_value=None):
+            adapter = PiAdapter.from_environment(settings_path=self.settings)
+        self.assertIsNone(adapter)
 
 
 if __name__ == "__main__":
