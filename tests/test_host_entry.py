@@ -2261,5 +2261,289 @@ class AdmissionExclusionObservabilityTests(unittest.TestCase):
         self.assertEqual(observed, [("rt-bad", "HEALTH_ERROR")])
 
 
+class PacketStatsObservationTests(unittest.TestCase):
+    """CU-PR-2（Success Path Packet Structure Observation）：成功终态在
+    stderr 获得逐 packet 结构统计行（stage/chars/top_level_keys/
+    brace_balance/bracket_balance）—— 为下一次 REAL 的 packet 可靠性
+    验证建立结构基线（一个成功的 Architect packet 到底多大、结构是否
+    稳定）。
+
+    数据源边界：统计对象=ledger 里 append 期已通过 packet schema +
+    secret-shape 扫描 + 全包 unsafe 扫描的 envelope wire（envelope()
+    重解码 = 读取侧二次验证）—— 只统计已被接受的 packet，绝不重解析
+    raw stdout、绝不复制 parser/scanner、绝不统计 terminal result JSON。
+    chars 来自冻结件 serialize_packet 的确定性规范 wire（与 ledger 存储
+    /transport 比对同一表示）；top_level_keys 来自已解析 packet 对象的
+    dataclass 字段数；bracket_balance 是对规范 wire 的诚实计数（观测
+    指标，非 parser repair）。失败终态零统计行 —— 观察绝不制造成功
+    信号；stdout 恰一行机器 JSON 契约逐字节不变。"""
+
+    TASK = "stats-task"
+
+    STATS_LINE_RE = re.compile(
+        r"^dual-agent: packet stats stage=(architect|coder|tester|reviewer) "
+        r"chars=\d+ top_level_keys=\d+ "
+        r"brace_balance=-?\d+ bracket_balance=-?\d+$")
+
+    # ground truth 由冻结件 structured_packets.serialize_packet 对下列
+    # fixture 一次性导出后硬编码（锁规范 wire 形状的未来漂移；该序列化
+    # 器自身另有专项测试）。规范 wire 恒为合法 JSON → 平衡计数恒 0，
+    # 该值是诚实计数结果而非断言捷径。
+    EXPECTED_FOUR_STAGE = (
+        "dual-agent: packet stats stage=architect chars=307 "
+        "top_level_keys=9 brace_balance=0 bracket_balance=0",
+        "dual-agent: packet stats stage=coder chars=291 "
+        "top_level_keys=8 brace_balance=0 bracket_balance=0",
+        "dual-agent: packet stats stage=tester chars=226 "
+        "top_level_keys=8 brace_balance=0 bracket_balance=0",
+        "dual-agent: packet stats stage=reviewer chars=254 "
+        "top_level_keys=8 brace_balance=0 bracket_balance=0",
+    )
+
+    # -- ledger fixtures（与 RunResultProjectionTests 同型，独立持有）------
+
+    def _arch_packet(self, task=None):
+        return ArchitecturePacket(
+            task_id=task or self.TASK, role="architect",
+            goal=("goal-a", "goal-b"), constraints=("constraint-a",),
+            architecture=("component split",), interfaces=({"name": "iface-1"},),
+            implementation_steps=({"step": 1},),
+            acceptance_criteria=("criteria-a",), risks=({"risk": "latency"},))
+
+    def _impl_packet(self, task=None):
+        return ImplementationPacket(
+            task_id=task or self.TASK, role="coder",
+            changed_files=("parser.py",),
+            implementation_summary="Split parser into a module.",
+            implementation_details=("extracted helpers",),
+            assumptions=("ambient",), unresolved_items=("none",),
+            test_requirements=("unit",))
+
+    def _test_packet(self, task=None):
+        return TestPacket(
+            task_id=task or self.TASK, role="tester",
+            tests_run=("unit",), tests_passed=("unit",), tests_failed=(),
+            failures=(), coverage_or_validation=("manual review only",),
+            remaining_risks=("sample risk",))
+
+    def _review_packet(self, task=None):
+        return ReviewPacket(
+            task_id=task or self.TASK, role="reviewer", status="APPROVED",
+            findings=({"finding": "finding-x"},), severity=("minor",),
+            affected_files=("parser.py",), required_changes=("add docstring",),
+            acceptance_criteria_status=("met",))
+
+    def _envelope(self, payload, correlation, source_role, target_role,
+                  task=None):
+        kind = {
+            "architect": CollaborationPayloadType.ARCHITECTURE,
+            "coder": CollaborationPayloadType.IMPLEMENTATION,
+            "tester": CollaborationPayloadType.TEST,
+            "reviewer": CollaborationPayloadType.REVIEW,
+        }[source_role]
+        return CollaborationPacket(
+            correlation_id=correlation, task_id=task or self.TASK,
+            source_agent=f"addr-{source_role}",
+            target_agent=f"addr-{target_role}",
+            source_role=source_role, target_role=target_role,
+            payload_type=kind, payload=payload, provenance="OFFLINE")
+
+    def _four_stage_state(self):
+        state = SharedCollaborationState()
+        state = state.append_decision(
+            self.TASK, mode="on", complexity="COMPLEX",
+            path="DUAL", runtime_mode="SINGLE_RUNTIME", reason="MODE_ON")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._impl_packet(), "corr-1",
+                           "coder", "architect"),
+            "REPLY", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._test_packet(), "corr-2",
+                           "tester", "reviewer"),
+            "REQUEST", "DELIVERED")
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._review_packet(), "corr-3",
+                           "reviewer", "architect"),
+            "REQUEST", "DELIVERED")
+        return state
+
+    @staticmethod
+    def _stats_lines(text):
+        return [line for line in text.splitlines()
+                if line.startswith("dual-agent: packet stats")]
+
+    def _run_main(self, argv, factories=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                argv,
+                factories=factories or two_family_factories(),
+                evidence=two_family_evidence())
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    @staticmethod
+    def _architect_prose_factory():
+        # architect 应答散文（非 JSON）→ ARCHITECT_PACKET_INVALID 终态。
+        class _ProseArchitect(FakeFamilyAdapter):
+            def invoke(self, request):
+                if request.role == "architect":
+                    return InvocationResult(
+                        InvocationStatus.SUCCESS, output=_PROSE_OUTPUT,
+                        trace=None)
+                return super().invoke(request)
+
+        adapter = _ProseArchitect("rt-a")
+        return (lambda: adapter,
+                lambda: FakeFamilyAdapter("rt-b", "provider-b"))
+
+    # -- T1：成功 fixture → 确定性统计 ---------------------------------------
+
+    def test_t1_successful_fixture_deterministic_stats(self):
+        state = SharedCollaborationState()
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        self.assertEqual(
+            host_entry._packet_stats_lines(state, self.TASK),
+            (self.EXPECTED_FOUR_STAGE[0],))
+
+    # -- T2：四阶段均被观察（ledger 序）--------------------------------------
+
+    def test_t2_four_stages_each_observed_in_ledger_order(self):
+        self.assertEqual(
+            host_entry._packet_stats_lines(
+                self._four_stage_state(), self.TASK),
+            self.EXPECTED_FOUR_STAGE)
+
+    # -- T3 + T4：stdout 契约不变 + stderr additive（e2e）--------------------
+
+    def test_t3_t4_stdout_unchanged_stderr_additive_e2e(self):
+        code, out, err = self._run_main(
+            ["run", "--min-runtimes", "1", "--mode", "on",
+             "redesign architecture across modules"])
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 1)  # stdout 恰一行（T3）
+        payload = json.loads(lines[0])
+        self.assertEqual(
+            sorted(payload),
+            ["failure_category", "mode", "path", "provenance",
+             "stage_counts", "stages", "status", "task_id"])  # schema 不变
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertNotIn("packet stats", out)  # 统计绝不入 stdout（T4）
+        stats = self._stats_lines(err)
+        self.assertEqual(len(stats), 4)  # 四 packet 各一行
+        stages = [line.split(" ")[3].split("=", 1)[1] for line in stats]
+        self.assertEqual(stages,
+                         ["architect", "coder", "tester", "reviewer"])
+        for line in stats:
+            self.assertRegex(line, self.STATS_LINE_RE.pattern)
+        # 既有 CU-R1 结果投影不受影响（additive，非替换）。
+        self.assertIn("dual-agent: result architecture goal[1]: ", err)
+        self.assertIn("dual-agent: result review status: ", err)
+
+    # -- T5：失败终态零统计行 -------------------------------------------------
+
+    def test_t5_failure_path_emits_no_stats(self):
+        code, out, err = self._run_main(
+            ["run", "--min-runtimes", "1", "--mode", "on", self.TASK],
+            factories=self._architect_prose_factory())
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["status"], "ARCHITECT_PACKET_INVALID")
+        self.assertEqual(self._stats_lines(err), [])  # 绝不制造成功信号
+        # 既有失败观测面保持（CU-R2 拒绝行仍在）。
+        self.assertIn("dual-agent: packet reject stage=architect", err)
+
+    # -- T6：零内容泄漏 -------------------------------------------------------
+
+    def test_t6_no_packet_content_leakage(self):
+        lines = host_entry._packet_stats_lines(
+            self._four_stage_state(), self.TASK)
+        joined = "\n".join(lines)
+        for value in ("goal-a", "constraint-a", "component split", "iface-1",
+                      "latency", "criteria-a", "parser.py",
+                      "Split parser into a module.", "extracted helpers",
+                      "ambient", "manual review only", "sample risk",
+                      "APPROVED", "finding-x", "add docstring", "stats-task"):
+            self.assertNotIn(value, joined, value)
+        for identifier in ("addr-architect", "addr-coder", "addr-tester",
+                           "addr-reviewer", "corr-1", "corr-2", "corr-3"):
+            self.assertNotIn(identifier, joined, identifier)
+        for marker in ("token", "secret", "api_key", "authorization",
+                       "bearer"):
+            self.assertNotIn(marker, joined, marker)
+        for line in lines:
+            self.assertRegex(line, self.STATS_LINE_RE.pattern)
+
+    # -- T7：确定性 -----------------------------------------------------------
+
+    def test_t7_deterministic_repeat(self):
+        state = self._four_stage_state()
+        self.assertEqual(
+            host_entry._packet_stats_lines(state, self.TASK),
+            host_entry._packet_stats_lines(state, self.TASK))
+
+    # -- 边界：DECISION/FAILURE 记录零统计 ------------------------------------
+
+    def test_decision_and_failure_records_produce_no_stats(self):
+        state = SharedCollaborationState()
+        state = state.append_decision(
+            self.TASK, mode="off", complexity="SIMPLE",
+            path="SINGLE", runtime_mode="SINGLE_RUNTIME", reason="MODE_OFF")
+        state = state.append_failure(self.TASK,
+                                     status="ARCHITECT_PACKET_INVALID")
+        self.assertEqual(
+            host_entry._packet_stats_lines(state, self.TASK), ())
+
+    # -- 边界：畸形 wire 隔离（绝不中断）--------------------------------------
+
+    def test_undecodable_wire_skipped_not_fatal(self):
+        bad = CollaborationRecord(
+            task_id=self.TASK, correlation_id="corr-bad", sequence=1,
+            direction=CollaborationDirection.REQUEST, wire="{not-json")
+        state = SharedCollaborationState(_records={self.TASK: (bad,)})
+        state = state.append_envelope(
+            self.TASK,
+            self._envelope(self._arch_packet(), "corr-1",
+                           "architect", "coder"),
+            "REQUEST", "DELIVERED")
+        self.assertEqual(
+            host_entry._packet_stats_lines(state, self.TASK),
+            (self.EXPECTED_FOUR_STAGE[0],))
+
+    # -- 边界：空 ledger ------------------------------------------------------
+
+    def test_empty_ledger_yields_no_lines(self):
+        self.assertEqual(
+            host_entry._packet_stats_lines(
+                SharedCollaborationState(), self.TASK), ())
+
+    # -- 边界：多 task 隔离 ---------------------------------------------------
+
+    def test_multiple_tasks_isolated(self):
+        other = "other-task"
+        state = self._four_stage_state()
+        state = state.append_envelope(
+            other,
+            self._envelope(self._arch_packet(other), "corr-x",
+                           "architect", "coder", task=other),
+            "REQUEST", "DELIVERED")
+        self.assertEqual(
+            host_entry._packet_stats_lines(state, self.TASK),
+            self.EXPECTED_FOUR_STAGE)
+        self.assertEqual(
+            len(host_entry._packet_stats_lines(state, other)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

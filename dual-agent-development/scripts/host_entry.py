@@ -97,6 +97,7 @@ import importlib
 import json
 import sys
 import types
+from dataclasses import asdict
 from pathlib import Path
 
 __all__ = (
@@ -213,6 +214,7 @@ from content_safety import (
     next_diagnostic_generation,
 )
 import packet_forensics
+from structured_packets import serialize_packet
 
 # P1-1（multi-runtime composition wiring）：既有 V3.0 组合根的只读复用 ——
 # 本模块零新裁决、零 composition 逻辑复制（agent_host 已按不变量锁定）。
@@ -583,6 +585,57 @@ def _result_projection_lines(state, task_id) -> tuple:
     return tuple(lines)
 
 
+# CU-PR-2：packet_type（envelope 词表值）→ 协作 stage 名的封闭映射
+# （与 _packet_reject_line 的 stage 归属同词表：architect/coder/tester/
+# reviewer）。仅用于统计行标注，绝无裁决语义。
+_STAGE_BY_PAYLOAD_TYPE = {
+    "ARCHITECTURE": "architect",
+    "IMPLEMENTATION": "coder",
+    "TEST": "tester",
+    "REVIEW": "reviewer",
+}
+
+
+def _packet_stats_lines(state, task_id) -> tuple:
+    """CU-PR-2（Success Path Packet Structure Observation）：成功终态的
+    逐 packet 结构统计行（纯函数：无 I/O、无时间、无随机）。
+
+    统计对象 = 账本里 append 期已通过 packet 构造校验（schema +
+    secret-shape 扫描 + 全包 unsafe 扫描）的 envelope wire —— envelope()
+    重解码即读取侧二次验证，统计的恰是"已被接受的 packet"，绝不重解析
+    raw stdout、绝不复制 parser/scanner、绝不统计 terminal result JSON。
+    三个指标全部确定性：
+    - chars：冻结件 serialize_packet 的规范 wire 长度（与 ledger 存储/
+      transport 比对同一表示，即真实交接 payload 的大小）；
+    - top_level_keys：已解析 packet 对象自身的顶层字段数（asdict 投影）；
+    - brace/bracket_balance：规范 wire 上 {} 与 [] 的开合差（诚实计数
+      的观测指标 —— 已接受的 packet 恒平衡，该值记录结构状态，绝不
+      反过来修复或放宽任何 packet）。
+    与 _result_projection_lines 同一隔离纪律：不可解码记录零统计绝不
+    中断；DECISION/FAILURE 无 packet 可统计；SINGLE/OFF 路径 payload
+    不入账本（结构事实）→ 自然零统计。成功门（status == "SUCCESS"）
+    在调用方 _main_run —— 失败终态绝不出现统计行。"""
+    lines = []
+    for record in state.history(task_id):
+        if record.direction.value not in ("REQUEST", "REPLY"):
+            continue
+        stage = _STAGE_BY_PAYLOAD_TYPE.get(record.payload_type)
+        if stage is None:
+            continue
+        try:
+            payload = record.envelope().payload
+            wire = serialize_packet(payload)
+            key_count = len(asdict(payload))
+        except (ValueError, TypeError):
+            continue
+        lines.append(
+            f"dual-agent: packet stats stage={stage} chars={len(wire)} "
+            f"top_level_keys={key_count} "
+            f"brace_balance={wire.count('{') - wire.count('}')} "
+            f"bracket_balance={wire.count('[') - wire.count(']')}")
+    return tuple(lines)
+
+
 def _packet_reject_line(status, generation) -> str | None:
     """CU-R2：*_PACKET_INVALID 终态 → 值安全的拒绝诊断行（或 None）。
 
@@ -817,6 +870,15 @@ def _main_run(argv, *, factories, evidence, qualifier, base_dir,
     # 权威投影）；投影只读 facade.state 账本里已验证的 envelope。
     for line in _result_projection_lines(facade.state, payload["task_id"]):
         print(line, file=sys.stderr, flush=True)
+    # CU-PR-2（Success Path Packet Structure Observation）：成功终态专属
+    # 的 packet 结构统计行 —— 逐 handoff packet 报 chars/top_level_keys/
+    # bracket balance（为 REAL 可靠性验证建立结构基线）。门是封闭成功词
+    # "SUCCESS"：任何失败终态（含 ARCHITECT_PACKET_INVALID / TRANSPORT_
+    # FAILED 等部分交付后失败）绝不输出统计行 —— 观察不得制造成功信号。
+    # 纯 additive stderr：stdout 恰一行机器 JSON 的契约逐字节不变。
+    if payload["status"] == "SUCCESS":
+        for line in _packet_stats_lines(facade.state, payload["task_id"]):
+            print(line, file=sys.stderr, flush=True)
     # CU-R2（Packet Rejection Diagnostics）：packet 拒绝的值安全诊断行
     # （无新鲜诊断 ⇒ G2/G3 消去法形态）。
     reject_line = _packet_reject_line(payload["status"], generation)
