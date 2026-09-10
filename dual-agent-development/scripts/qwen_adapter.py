@@ -20,7 +20,12 @@ RealGateExecutor 的门控运行授予。Authentication 只通过 Qwen Code
 结果，绝不 login/logout/refresh，绝不打开 Qwen 的凭据存储。已知
 #3612：该状态命令不识别 settings/env 配置的 OpenAI-compatible
 provider —— 因此无法可靠解释的输出一律归 UNKNOWN，绝不强行
-AUTHENTICATED。
+AUTHENTICATED。Qwen 0.23.2 已移除 `qwen auth status`（子命令
+整体移除；移除通知走 stdout、exit 0）：该确定性签名
+（"auth has been removed" 与 "use /auth" 双短语合取，仅 stdout、
+仅 exit 0）被分类为 AUTH_OBSERVATION_UNAVAILABLE —— 观察面
+缺席不是认证成功，auth 仍归 UNKNOWN，provider 检查如实上报同一
+受限分类，资格证明由 generic 层转移给受控执行。
 
 输出解析（_parse_output）只信任 stdout 中的 JSON 数组封装
 （system/session_start、assistant、result 三类消息；末元素 result
@@ -88,6 +93,7 @@ class QwenCodeAdapter:
         self.last_invocation_id: str | None = None
         self._auth_provider: str | None = None
         self._auth_authenticated: bool = False
+        self._auth_unobservable: bool = False
 
     @classmethod
     def from_environment(cls, profile: RuntimeProfile | None = None):
@@ -135,9 +141,11 @@ class QwenCodeAdapter:
     def check_authentication(self):
         # Auth 只被"观测"，绝不被执行：只读状态命令让 Qwen Code 汇报
         # 自己的登录状态；本模块只存储分类化结果，绝不读取/打印/存储
-        # 凭据材料，绝不 login/logout。
+        # 凭据材料，绝不 login/logout。每次观察都重置观察面缺席标志
+        # —— 分类只反映本次观察，绝不跨调用残留。
         from runtime_health import AuthenticationCheck
         from runtime_status import AuthenticationState, ReasonCode
+        self._auth_unobservable = False
         try:
             result = subprocess.run(
                 [self.executable, "auth", "status"],
@@ -163,8 +171,25 @@ class QwenCodeAdapter:
             return AuthenticationCheck(
                 AuthenticationState.AUTH_REQUIRED,
                 reason_code=ReasonCode.AUTH_REQUIRED)
+        if result.returncode == 0 and self._auth_surface_removed(
+                (result.stdout or "").lower()):
+            # Qwen 0.23.2：`qwen auth status` 已被移除（通知走 stdout、
+            # exit 0）。这是唯一可精确识别的「观察面缺席」签名：双短语
+            # 合取 + exit 0 + 仅 stdout。它不是认证成功 —— auth 仍是
+            # UNKNOWN；generic 层只认 AUTH_OBSERVATION_UNAVAILABLE，
+            # 绝不认 runtime 名。签名措辞漂移时安全降级回 PROTOCOL_ERROR。
+            self._auth_unobservable = True
+            return AuthenticationCheck(
+                AuthenticationState.UNKNOWN,
+                reason_code=ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
         return AuthenticationCheck(
             AuthenticationState.UNKNOWN, reason_code=ReasonCode.PROTOCOL_ERROR)
+
+    @staticmethod
+    def _auth_surface_removed(stdout_lowered: str) -> bool:
+        """0.23.2 移除通知的确定性签名：双短语合取（仅 stdout，已 lower）。"""
+        return ("auth has been removed" in stdout_lowered
+                and "use /auth" in stdout_lowered)
 
     def check_provider_model(self):
         # Provider 可用性以上方观测到的认证状态为门；_auth_provider
@@ -176,6 +201,14 @@ class QwenCodeAdapter:
         if not self.profile.provider:
             return ProviderModelCheck(
                 None, self.profile.model, False, ReasonCode.UNSUPPORTED_HEALTH_CHECK)
+        if self._auth_unobservable:
+            # auth 观察面缺席时 provider 可用性同样无法观察 —— 如实上报
+            # 分类化的 AUTH_OBSERVATION_UNAVAILABLE。它与 PROVIDER_
+            # UNREACHABLE 不同：后者断言 provider 检查失败，前者只陈述
+            # 观察受限；证明责任由 generic 层转移给受控执行。
+            return ProviderModelCheck(
+                self.profile.provider, self.profile.model, False,
+                ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
         if self._auth_provider != self.profile.provider or not self._auth_authenticated:
             return ProviderModelCheck(
                 self.profile.provider, self.profile.model, False,

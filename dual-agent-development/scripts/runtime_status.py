@@ -18,7 +18,10 @@ class RuntimeState(str, Enum):
 
     READY 表示该 Runtime 在"本次检查"中通过了 discovery、
     authentication、provider/model 检查与最小 Health 调用；它是
-    可续期的快照，不是凭据，也不是能力声明。非 READY 值同样是
+    可续期的快照，不是凭据，也不是能力声明。auth 观察面不可用
+    （AUTH_OBSERVATION_UNAVAILABLE）的 runtime 可以通过 gated
+    执行（最小 Health 调用）证明 READY —— 执行证据不等于 auth
+    观察，两者词汇不同。非 READY 值同样是
     分类语义：AUTH_REQUIRED（身份缺失/被拒）、UNAVAILABLE
     （无法启动/未找到）、ERROR（已启动但行为异常）。"""
 
@@ -45,6 +48,7 @@ class ReasonCode(str, Enum):
     CLI_START_FAILED = "CLI_START_FAILED"
     AUTH_REQUIRED = "AUTH_REQUIRED"
     AUTH_REJECTED = "AUTH_REJECTED"
+    AUTH_OBSERVATION_UNAVAILABLE = "AUTH_OBSERVATION_UNAVAILABLE"
     PROVIDER_UNREACHABLE = "PROVIDER_UNREACHABLE"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"

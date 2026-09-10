@@ -780,5 +780,160 @@ class QwenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(result.output_class, "unexpected_response")
 
 
+class AuthObservationClassificationTests(unittest.TestCase):
+    """CU-QWEN-AUTH-1：auth 观察面缺席的精确分类。
+
+    Qwen 0.23.2 移除了 `qwen auth status` 子命令（整份通知走 stdout、
+    stderr 为空、exit 0）。本类把该事实与其余一切 UNKNOWN 成因
+    （垃圾输出/部分签名/非零退出/超时/子进程失败/畸形输出/stderr 伪造）
+    严格分离：只有确定性双短语签名 + exit 0 才产生
+    AUTH_OBSERVATION_UNAVAILABLE；其余一切照旧 PROTOCOL_ERROR。签名
+    匹配只用 stdout（与实测证据一致，也是本类钉死的契约）。
+    """
+
+    def profile(self, provider="qwen"):
+        return RuntimeProfile(
+            agent_id="coding-agent",
+            runtime="qwen-code",
+            provider=provider,
+            model=None,
+            role="coder",
+            capabilities=frozenset(),
+        )
+
+    def adapter(self, provider="qwen"):
+        return QwenCodeAdapter(profile=self.profile(provider), executable="qwen")
+
+    @staticmethod
+    def removal_notice():
+        """0.23.2 `qwen auth status` 移除通知的离线 fixture（实测形态）。"""
+        return (
+            "⚠  qwen auth has been removed.\n"
+            "\n"
+            "  Interactive   →  run qwen and use /auth to configure providers\n"
+            "  CI / Headless →  set provider environment variables, for example "
+            "OPENAI_API_KEY + OPENAI_BASE_URL + OPENAI_MODEL\n"
+            "  Qwen OAuth    →  run qwen interactively and use /auth; OAuth "
+            "cannot be configured with env vars alone\n"
+            "\n"
+            "  Check auth status → /doctor\n"
+        )
+
+    def auth_run(self, stdout, stderr="", returncode=0):
+        completed = subprocess.CompletedProcess(
+            args=["qwen", "auth", "status"], returncode=returncode,
+            stdout=stdout, stderr=stderr)
+        return patch("qwen_adapter.subprocess.run", return_value=completed)
+
+    def test_removed_surface_notice_maps_to_aou(self):
+        adapter = self.adapter()
+        with self.auth_run(stdout=self.removal_notice()):
+            result = adapter.check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code,
+                         ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+        # AOU 绝不置位 _auth_authenticated（provider 检查的门）。
+        self.assertFalse(adapter._auth_authenticated)
+
+    def test_garbage_stdout_exit0_stays_protocol_error(self):
+        with self.auth_run(stdout="hello world"):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_partial_signature_missing_second_phrase_blocks(self):
+        stdout = "qwen auth has been removed.\n"
+        with self.auth_run(stdout=stdout):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_partial_signature_missing_headline_blocks(self):
+        stdout = "Interactive -> run qwen and use /auth to configure providers\n"
+        with self.auth_run(stdout=stdout):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_notice_with_nonzero_exit_is_auth_required(self):
+        # 签名只认 exit 0：非零退出沿用既有 returncode != 0 分支。
+        with self.auth_run(stdout=self.removal_notice(), returncode=1):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTH_REQUIRED)
+        self.assertEqual(result.reason_code, ReasonCode.AUTH_REQUIRED)
+
+    def test_timeout_stays_protocol_error(self):
+        with patch("qwen_adapter.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd="qwen", timeout=10)):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_malformed_output_stays_protocol_error(self):
+        with self.auth_run(stdout='{"partial": tru'):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_logged_in_regression_authenticated(self):
+        with self.auth_run(stdout="Logged in via Qwen OAuth"):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTHENTICATED)
+
+    def test_not_logged_in_regression_auth_required(self):
+        with self.auth_run(stdout="not logged in"):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.AUTH_REQUIRED)
+        self.assertEqual(result.reason_code, ReasonCode.AUTH_REQUIRED)
+
+    def test_subprocess_failure_regression_unknown(self):
+        with patch("qwen_adapter.subprocess.run", side_effect=OSError("gone")):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_signature_is_stdout_scoped(self):
+        # 契约判据=stdout 包含签名；stderr 携带签名不产生 AOU。
+        with self.auth_run(stdout="", stderr=self.removal_notice()):
+            result = self.adapter().check_authentication()
+
+        self.assertEqual(result.state, AuthenticationState.UNKNOWN)
+        self.assertEqual(result.reason_code, ReasonCode.PROTOCOL_ERROR)
+
+    def test_provider_model_aou_when_auth_unobservable(self):
+        adapter = self.adapter()
+        with self.auth_run(stdout=self.removal_notice()):
+            adapter.check_authentication()
+        # provider 检查不 spawn 子进程：由已观测的 auth 分类推导。
+        with patch("qwen_adapter.subprocess.run",
+                   side_effect=AssertionError("must not probe")):
+            check = adapter.check_provider_model()
+
+        self.assertFalse(check.available)
+        self.assertEqual(check.reason_code,
+                         ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+
+    def test_provider_model_available_after_authenticated_regression(self):
+        adapter = self.adapter()
+        with self.auth_run(stdout="Logged in via Qwen OAuth"):
+            adapter.check_authentication()
+        with patch("qwen_adapter.subprocess.run",
+                   side_effect=AssertionError("must not probe")):
+            check = adapter.check_provider_model()
+
+        self.assertTrue(check.available)
+        self.assertEqual(check.reason_code, ReasonCode.NONE)
+
+
 if __name__ == "__main__":
     unittest.main()
