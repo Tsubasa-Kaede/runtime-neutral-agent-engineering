@@ -491,7 +491,9 @@ class ControlSnapshotTests(unittest.TestCase):
 class ContractSeparationTests(unittest.TestCase):
     """runtime-neutral / 零 engine·adapter·UI 依赖的契约分离。"""
 
-    def test_module_imports_are_stdlib_only(self):
+    def test_module_import_roots_are_locked(self):
+        # CU-CTRL-3 起授权组合 control_journal + threading（V3.2 唯一
+        # 获准的组合方向）；仍为精确集纪律锁，其余依赖一概拒绝。
         tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
         roots = set()
         for node in ast.walk(tree):
@@ -499,7 +501,9 @@ class ContractSeparationTests(unittest.TestCase):
                 roots.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 roots.add(node.module.split(".")[0])
-        self.assertEqual(roots - {"__future__"}, {"dataclasses", "enum"})
+        self.assertEqual(
+            roots - {"__future__"},
+            {"dataclasses", "enum", "threading", "control_journal"})
 
     def test_module_is_runtime_neutral(self):
         text = MODULE_PATH.read_text(encoding="utf-8").lower()

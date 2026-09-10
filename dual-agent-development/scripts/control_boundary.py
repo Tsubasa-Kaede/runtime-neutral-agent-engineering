@@ -1,30 +1,40 @@
-"""V3.2 CU-CTRL-1: Control Domain 的最小不可变值模型（contract-only）。
+"""V3.2 Control Domain：值模型契约（CU-CTRL-1）+ intent authority
+（CU-CTRL-3 ControlBoundary Core）。
 
-Sections 1-6 冻结架构的 control-plane 数据契约：封闭词表（command /
-reason / revision-target / lifecycle / park-point / pending-intent）与
-值对象（ControlCommand / ControlResult / ControlSnapshot /
-PendingIntent / PendingRevision / RevisionPayload）。
+Sections 1-6 冻结架构的 control-plane：封闭词表（command / reason /
+revision-target / lifecycle / park-point / pending-intent）、值对象
+（ControlCommand / ControlResult / ControlSnapshot / PendingIntent /
+PendingRevision / RevisionPayload），以及自 CU-CTRL-3 起的
+ControlBoundary —— intent authority + effect non-authority。
 
-边界（本 CU 只立契约，不做行为）：
-- 只做结构校验：非空标识、词表成员、类型、组合约束。裁决、版本递增、
-  safety policy、journal、replay 缓存、admission 决策属于后续 CU
-  （ControlJournal / ControlBoundary / ControlGate）。
+边界分层：
+- 值模型只做结构校验（非空标识、词表成员、类型、组合约束）。
+- ControlBoundary（CU-CTRL-3）：submit 做确定性 intent 裁决，经自持
+  boundary writer 把 REQUESTED 事实写入账本，是唯一 control-intent
+  写入入口。effect non-authority：不调用 runtime、不改变执行生命周期、
+  不产生 CONFIRMED / APPLIED / SUPERSEDED 事实、不执行 pause/abort、
+  不递增 execution_version（accepted-command epoch 语义属后续单元）、
+  不做 revision 执行或 queue 管理、不做 replay/idempotency 缓存。
 - command_id 由 caller 供应（无默认值 = 结构性禁止隐式生成）；
   replay identity = (execution_id, command_id)，replay 行为后续 CU 实现。
-- runtime-neutral：import 仅标准库（dataclasses/enum），零 runtime 名、
+- runtime-neutral：依赖仅标准库 + 账本（control_boundary →
+  control_journal 是 V3.2 唯一获准的组合方向），零 runtime 名、
   零执行引擎类型、零 UI 框架引用 —— 命令域与执行观察域词汇分离。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import Lock
+
+from control_journal import ControlFactType, ControlJournal
 
 __all__ = (
-    "ControlCommand", "ControlCommandType", "ControlLifecycle",
-    "ControlModelError", "ControlReason", "ControlResult",
-    "ControlSnapshot", "ControlStatus", "ParkPoint", "PendingIntent",
-    "PendingIntentKind", "PendingRevision", "RevisionPayload",
-    "RevisionTarget",
+    "ControlBoundary", "ControlCommand", "ControlCommandType",
+    "ControlLifecycle", "ControlModelError", "ControlReason",
+    "ControlResult", "ControlSnapshot", "ControlStatus", "ParkPoint",
+    "PendingIntent", "PendingIntentKind", "PendingRevision",
+    "RevisionPayload", "RevisionTarget",
 )
 
 
@@ -295,3 +305,146 @@ class ControlSnapshot:
             if not isinstance(entry, PendingRevision):
                 raise ControlModelError(
                     "revision_queue entries must be PendingRevision values")
+
+
+_COMMAND_FACT = {
+    ControlCommandType.PAUSE: ControlFactType.PAUSE_REQUESTED,
+    ControlCommandType.RESUME: ControlFactType.RESUME_REQUESTED,
+    ControlCommandType.REVISE: ControlFactType.REVISE_REQUESTED,
+    ControlCommandType.ABORT: ControlFactType.ABORT_REQUESTED,
+}
+
+
+class ControlBoundary:
+    """Control Domain 的 intent authority（CU-CTRL-3 Core）。
+
+    唯一 control-intent 写入入口：submit(command) 做确定性 intent
+    裁决，经自持的 boundary writer 把 REQUESTED 事实落入账本。
+    effect non-authority：不调用 runtime、不改变执行生命周期、不产生
+    CONFIRMED / APPLIED / SUPERSEDED 事实（它们属于后续 composition /
+    revision / lifecycle 单元）。
+
+    裁决表（intent 层，pending ∈ {NONE, PAUSE, ABORT}）：
+      PAUSE ：NONE→ACCEPTED；PAUSE→NO_OP/ALREADY_REQUESTED；
+              ABORT→REJECTED/ALREADY_ABORTING
+      RESUME：PAUSE→ACCEPTED（清除 pending pause；不做任何唤醒）；
+              NONE→NO_OP/NOT_PAUSED（intent 层读法：无可恢复的
+              pending pause）；ABORT→REJECTED/ALREADY_ABORTING
+      ABORT ：NONE/PAUSE→ACCEPTED（ABORT > PAUSE，intent 翻转为
+              ABORT，不写 SUPERSEDED）；ABORT→NO_OP/ALREADY_REQUESTED
+      REVISE：NONE/PAUSE→ACCEPTED（只记录请求；不执行、不动 queue）；
+              ABORT→REJECTED/ALREADY_ABORTING
+
+    原子性：锁内先落事实、后改 pending —— writer 失败则异常原样传播，
+    状态零变化（不声称 accepted、不伪造 fact、不吞异常）。
+    版本：execution_version 保持构造值，绝不因 submit 自行递增。
+    """
+
+    def __init__(self, journal: ControlJournal, execution_id: str, *,
+                 initial_version: int = 0) -> None:
+        _require_non_empty_string(execution_id, "execution_id")
+        _require_version(initial_version, "initial_version")
+        self._execution_id = execution_id
+        self._version = initial_version
+        self._pending = PendingIntent()
+        self._writer = journal.boundary_writer()
+        self._lock = Lock()
+
+    @property
+    def execution_id(self) -> str:
+        return self._execution_id
+
+    @property
+    def execution_version(self) -> int:
+        return self._version
+
+    @property
+    def pending_intent(self) -> PendingIntent:
+        return self._pending
+
+    def submit(self, command: ControlCommand) -> ControlResult:
+        """裁决一条控制命令；只产生 intent 决策与 REQUESTED 事实。"""
+        if not isinstance(command, ControlCommand):
+            raise ControlModelError("submit expects a ControlCommand")
+        with self._lock:
+            if command.execution_id != self._execution_id:
+                return ControlResult(
+                    command_id=command.command_id,
+                    execution_id=command.execution_id,
+                    status=ControlStatus.REJECTED,
+                    execution_version=self._version,
+                    reason=ControlReason.INVALID_TARGET)
+            status, reason = self._adjudicate(
+                command.command, self._pending.kind)
+            if status is not ControlStatus.ACCEPTED:
+                return ControlResult(
+                    command_id=command.command_id,
+                    execution_id=self._execution_id,
+                    status=status,
+                    execution_version=self._version,
+                    reason=reason)
+            # 先落事实、后改状态：append 失败 ⇒ 异常传播 + pending 不变
+            payload = None
+            if command.command is ControlCommandType.REVISE:
+                payload = {
+                    "revision_id": command.command_id,
+                    "target": command.payload.target.value,
+                }
+            self._writer.append(
+                fact_type=_COMMAND_FACT[command.command],
+                execution_id=self._execution_id,
+                command_id=command.command_id,
+                execution_version=self._version,
+                payload=payload)
+            next_kind = _NEXT_PENDING[command.command]
+            if next_kind is not None:
+                self._pending = self._pending.superseded_by(next_kind)
+            return ControlResult(
+                command_id=command.command_id,
+                execution_id=self._execution_id,
+                status=ControlStatus.ACCEPTED,
+                execution_version=self._version)
+
+    def snapshot(self, lifecycle: ControlLifecycle) -> ControlSnapshot:
+        """control-plane 投影：lifecycle 由持有执行真值的组合方供应，
+        Boundary 绝不自行推导；park point 恒 NONE（park 权威属于
+        Gate，故 PAUSED 投影在此被值模型结构性拒绝）。"""
+        if not isinstance(lifecycle, ControlLifecycle):
+            raise ControlModelError(
+                f"unknown lifecycle: {lifecycle!r}")
+        with self._lock:
+            return ControlSnapshot(
+                execution_id=self._execution_id,
+                execution_version=self._version,
+                lifecycle=lifecycle,
+                pending_intent=self._pending,
+                park_point=ParkPoint.NONE,
+                revision_queue=())
+
+    def _adjudicate(self, command_type, pending_kind):
+        """intent 层确定性裁决；只产生 (status, reason) 决策。"""
+        if command_type is ControlCommandType.ABORT:
+            if pending_kind is PendingIntentKind.ABORT:
+                return ControlStatus.NO_OP, ControlReason.ALREADY_REQUESTED
+            return ControlStatus.ACCEPTED, None
+        if pending_kind is PendingIntentKind.ABORT:
+            # ABORT pending 之下：PAUSE/RESUME/REVISE 一律不再受理
+            return ControlStatus.REJECTED, ControlReason.ALREADY_ABORTING
+        if command_type is ControlCommandType.PAUSE:
+            if pending_kind is PendingIntentKind.PAUSE:
+                return ControlStatus.NO_OP, ControlReason.ALREADY_REQUESTED
+            return ControlStatus.ACCEPTED, None
+        if command_type is ControlCommandType.RESUME:
+            if pending_kind is PendingIntentKind.PAUSE:
+                return ControlStatus.ACCEPTED, None
+            return ControlStatus.NO_OP, ControlReason.NOT_PAUSED
+        # REVISE：NONE/PAUSE 之下只记录请求（queue 属 CTRL-5）
+        return ControlStatus.ACCEPTED, None
+
+
+_NEXT_PENDING = {
+    ControlCommandType.PAUSE: PendingIntentKind.PAUSE,
+    ControlCommandType.RESUME: PendingIntentKind.NONE,
+    ControlCommandType.REVISE: None,  # REVISE 不改变 pending intent
+    ControlCommandType.ABORT: PendingIntentKind.ABORT,
+}
