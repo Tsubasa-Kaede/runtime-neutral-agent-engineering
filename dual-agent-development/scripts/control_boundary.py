@@ -14,9 +14,13 @@ ControlBoundary —— intent authority + effect non-authority。
   写入入口。effect non-authority：不调用 runtime、不改变执行生命周期、
   不产生 CONFIRMED / APPLIED / SUPERSEDED 事实、不执行 pause/abort、
   不递增 execution_version（accepted-command epoch 语义属后续单元）、
-  不做 revision 执行或 queue 管理、不做 replay/idempotency 缓存。
+  不做 revision 执行或 queue 管理。自 CU-CTRL-4 起，submit 以
+  (execution_id, command_id) 为幂等 identity：exact replay 纯查找
+  返回首次结果，同 id 不同 fingerprint → REJECTED/COMMAND_ID_CONFLICT，
+  两者均零副作用。
 - command_id 由 caller 供应（无默认值 = 结构性禁止隐式生成）；
-  replay identity = (execution_id, command_id)，replay 行为后续 CU 实现。
+  replay identity = (execution_id, command_id)，fingerprint 覆盖全部
+  语义字段的不可变规格元组，缓存为 per-boundary 实例域（CU-CTRL-4）。
 - runtime-neutral：依赖仅标准库 + 账本（control_boundary →
   control_journal 是 V3.2 唯一获准的组合方向），零 runtime 名、
   零执行引擎类型、零 UI 框架引用 —— 命令域与执行观察域词汇分离。
@@ -315,6 +319,34 @@ _COMMAND_FACT = {
 }
 
 
+def _command_fingerprint(command: ControlCommand) -> tuple:
+    """命令语义身份的不可变规格元组（CU-CTRL-4 replay 契约）。
+
+    覆盖 ControlCommand 全部语义字段：execution_id、command_id、
+    命令类型、revision 载荷（target/text/task/prompt）、
+    expected_version。刻意不使用哈希内建、不序列化为 JSON —— 规格元组
+    本身即不可变且可精确相等比较。
+    """
+    revision = None
+    if command.payload is not None:
+        revision = (command.payload.target, command.payload.text,
+                    command.payload.task, command.payload.prompt)
+    return (command.execution_id, command.command_id, command.command,
+            revision, command.expected_version)
+
+
+@dataclass(frozen=True)
+class _ReplayEntry:
+    """最小内部 replay 记录：fingerprint → 首次裁决结果。
+
+    不可变、不暴露 mutation API；不是第二套 journal —— 无 seq、无
+    事实语义，仅是 per-boundary 实例域内的 identity→result 幂等缓存。
+    """
+
+    fingerprint: tuple
+    result: ControlResult
+
+
 class ControlBoundary:
     """Control Domain 的 intent authority（CU-CTRL-3 Core）。
 
@@ -338,6 +370,15 @@ class ControlBoundary:
     原子性：锁内先落事实、后改 pending —— writer 失败则异常原样传播，
     状态零变化（不声称 accepted、不伪造 fact、不吞异常）。
     版本：execution_version 保持构造值，绝不因 submit 自行递增。
+
+    幂等（CU-CTRL-4）：replay identity = (execution_id, command_id)。
+    exact replay = 纯查找，返回首次 ControlResult —— 零事实、零
+    pending 变化、零版本变化、不重新裁决（即使 pending 已前进）；
+    同 id 不同 fingerprint → REJECTED/COMMAND_ID_CONFLICT（同样零
+    副作用，且不损坏原 replay）。不同 command_id 的语义重复不是
+    replay：照走 CTRL-3 裁决。并发：查找→裁决→落账→存 replay→
+    改 pending 全在同一临界区 —— 同一新命令的两线程竞争恰走一次
+    accept 路径，输者取存储结果。
     """
 
     def __init__(self, journal: ControlJournal, execution_id: str, *,
@@ -349,6 +390,7 @@ class ControlBoundary:
         self._pending = PendingIntent()
         self._writer = journal.boundary_writer()
         self._lock = Lock()
+        self._replay = {}  # per-instance 幂等缓存：command_id → _ReplayEntry
 
     @property
     def execution_id(self) -> str:
@@ -363,47 +405,75 @@ class ControlBoundary:
         return self._pending
 
     def submit(self, command: ControlCommand) -> ControlResult:
-        """裁决一条控制命令；只产生 intent 决策与 REQUESTED 事实。"""
+        """裁决一条控制命令；只产生 intent 决策与 REQUESTED 事实。
+
+        同 (execution_id, command_id) 的重放走幂等路径：exact replay
+        纯查找返回首次结果；同 id 不同 fingerprint 拒绝为
+        COMMAND_ID_CONFLICT —— 两者均零事实、零状态变化。
+        """
         if not isinstance(command, ControlCommand):
             raise ControlModelError("submit expects a ControlCommand")
         with self._lock:
             if command.execution_id != self._execution_id:
+                # 外域命令不属于本 execution 的 identity 空间：
+                # 照 CTRL-3 拒绝，且不进入本域 replay 缓存
                 return ControlResult(
                     command_id=command.command_id,
                     execution_id=command.execution_id,
                     status=ControlStatus.REJECTED,
                     execution_version=self._version,
                     reason=ControlReason.INVALID_TARGET)
-            status, reason = self._adjudicate(
-                command.command, self._pending.kind)
-            if status is not ControlStatus.ACCEPTED:
+            fingerprint = _command_fingerprint(command)
+            entry = self._replay.get(command.command_id)
+            if entry is not None:
+                if entry.fingerprint == fingerprint:
+                    # EXACT REPLAY：纯查找，零裁决、零事实、零状态变化
+                    return entry.result
                 return ControlResult(
                     command_id=command.command_id,
                     execution_id=self._execution_id,
-                    status=status,
+                    status=ControlStatus.REJECTED,
                     execution_version=self._version,
-                    reason=reason)
-            # 先落事实、后改状态：append 失败 ⇒ 异常传播 + pending 不变
-            payload = None
-            if command.command is ControlCommandType.REVISE:
-                payload = {
-                    "revision_id": command.command_id,
-                    "target": command.payload.target.value,
-                }
-            self._writer.append(
-                fact_type=_COMMAND_FACT[command.command],
-                execution_id=self._execution_id,
-                command_id=command.command_id,
-                execution_version=self._version,
-                payload=payload)
-            next_kind = _NEXT_PENDING[command.command]
-            if next_kind is not None:
-                self._pending = self._pending.superseded_by(next_kind)
+                    reason=ControlReason.COMMAND_ID_CONFLICT)
+            result = self._adjudicate_and_apply(command)
+            # 仅在完整成功路径后落 replay：append 抛异常则无 entry，
+            # 重试照常重新裁决（失败的 submit 不留任何痕迹）
+            self._replay[command.command_id] = _ReplayEntry(
+                fingerprint=fingerprint, result=result)
+            return result
+
+    def _adjudicate_and_apply(self, command: ControlCommand) -> ControlResult:
+        """CTRL-3 首发路径：裁决 → 落事实 → 推进 pending（调用方持锁）。"""
+        status, reason = self._adjudicate(
+            command.command, self._pending.kind)
+        if status is not ControlStatus.ACCEPTED:
             return ControlResult(
                 command_id=command.command_id,
                 execution_id=self._execution_id,
-                status=ControlStatus.ACCEPTED,
-                execution_version=self._version)
+                status=status,
+                execution_version=self._version,
+                reason=reason)
+        # 先落事实、后改状态：append 失败 ⇒ 异常传播 + pending 不变
+        payload = None
+        if command.command is ControlCommandType.REVISE:
+            payload = {
+                "revision_id": command.command_id,
+                "target": command.payload.target.value,
+            }
+        self._writer.append(
+            fact_type=_COMMAND_FACT[command.command],
+            execution_id=self._execution_id,
+            command_id=command.command_id,
+            execution_version=self._version,
+            payload=payload)
+        next_kind = _NEXT_PENDING[command.command]
+        if next_kind is not None:
+            self._pending = self._pending.superseded_by(next_kind)
+        return ControlResult(
+            command_id=command.command_id,
+            execution_id=self._execution_id,
+            status=ControlStatus.ACCEPTED,
+            execution_version=self._version)
 
     def snapshot(self, lifecycle: ControlLifecycle) -> ControlSnapshot:
         """control-plane 投影：lifecycle 由持有执行真值的组合方供应，
