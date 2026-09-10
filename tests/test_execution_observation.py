@@ -617,6 +617,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
             "production_facade.py",            # TERMINAL + execution 通道
             "console_observation.py",          # R7-D4 消费者本体
             "cli.py",                          # R7-D4 CLI 组合点
+            "event_index.py",                  # V3.2 OBS-1 消费者（观察索引）
         }
         for path in sorted(SCRIPTS.glob("*.py")):
             if path.name in authorized:
