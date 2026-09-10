@@ -13,11 +13,13 @@ ControlBoundary —— intent authority + effect non-authority。
   boundary writer 把 REQUESTED 事实写入账本，是唯一 control-intent
   写入入口。effect non-authority：不调用 runtime、不改变执行生命周期、
   不产生 CONFIRMED / APPLIED / SUPERSEDED 事实、不执行 pause/abort、
-  不递增 execution_version（accepted-command epoch 语义属后续单元）、
-  不做 revision 执行或 queue 管理。自 CU-CTRL-4 起，submit 以
-  (execution_id, command_id) 为幂等 identity：exact replay 纯查找
-  返回首次结果，同 id 不同 fingerprint → REJECTED/COMMAND_ID_CONFLICT，
-  两者均零副作用。
+  不递增 execution_version（accepted-command epoch 语义属后续单元）。
+  自 CU-CTRL-4 起，submit 以 (execution_id, command_id) 为幂等
+  identity：exact replay 纯查找返回首次结果，同 id 不同 fingerprint
+  → REJECTED/COMMAND_ID_CONFLICT，两者均零副作用。自 CU-CTRL-5 起，
+  accepted 的 NEXT_INVOCATION revision 进入 FIFO pending 队列并经
+  snapshot.revision_queue 只读投影（accepted ≠ applied ≠ honored；
+  消费与 REVISION_APPLIED 属 REV-1/REV-2）。
 - command_id 由 caller 供应（无默认值 = 结构性禁止隐式生成）；
   replay identity = (execution_id, command_id)，fingerprint 覆盖全部
   语义字段的不可变规格元组，缓存为 per-boundary 实例域（CU-CTRL-4）。
@@ -364,8 +366,9 @@ class ControlBoundary:
               pending pause）；ABORT→REJECTED/ALREADY_ABORTING
       ABORT ：NONE/PAUSE→ACCEPTED（ABORT > PAUSE，intent 翻转为
               ABORT，不写 SUPERSEDED）；ABORT→NO_OP/ALREADY_REQUESTED
-      REVISE：NONE/PAUSE→ACCEPTED（只记录请求；不执行、不动 queue）；
-              ABORT→REJECTED/ALREADY_ABORTING
+      REVISE：NONE/PAUSE→ACCEPTED（CU-CTRL-5：NEXT_INVOCATION 入
+              FIFO pending 队列、SUBMISSION 只落事实不入队——
+              均不执行、不宣称生效）；ABORT→REJECTED/ALREADY_ABORTING
 
     原子性：锁内先落事实、后改 pending —— writer 失败则异常原样传播，
     状态零变化（不声称 accepted、不伪造 fact、不吞异常）。
@@ -391,6 +394,7 @@ class ControlBoundary:
         self._writer = journal.boundary_writer()
         self._lock = Lock()
         self._replay = {}  # per-instance 幂等缓存：command_id → _ReplayEntry
+        self._queue = []  # pending NEXT_INVOCATION 队列（CU-CTRL-5，FIFO）
 
     @property
     def execution_id(self) -> str:
@@ -466,6 +470,14 @@ class ControlBoundary:
             command_id=command.command_id,
             execution_version=self._version,
             payload=payload)
+        if (command.command is ControlCommandType.REVISE
+                and command.payload.target is RevisionTarget.NEXT_INVOCATION):
+            # CU-CTRL-5：NEXT_INVOCATION 入 FIFO pending 队列（append-only，
+            # 不覆盖/不重排/不合并）；SUBMISSION 是 set semantics 只落
+            # 事实、从不入队（CTRL-1 冻结裁决）。accepted ≠ applied——
+            # 消费与 REVISION_APPLIED 属 REV-1/REV-2
+            self._queue.append(PendingRevision(
+                revision_id=command.command_id, text=command.payload.text))
         next_kind = _NEXT_PENDING[command.command]
         if next_kind is not None:
             self._pending = self._pending.superseded_by(next_kind)
@@ -489,7 +501,7 @@ class ControlBoundary:
                 lifecycle=lifecycle,
                 pending_intent=self._pending,
                 park_point=ParkPoint.NONE,
-                revision_queue=())
+                revision_queue=tuple(self._queue))
 
     def _adjudicate(self, command_type, pending_kind):
         """intent 层确定性裁决；只产生 (status, reason) 决策。"""
@@ -508,7 +520,7 @@ class ControlBoundary:
             if pending_kind is PendingIntentKind.PAUSE:
                 return ControlStatus.ACCEPTED, None
             return ControlStatus.NO_OP, ControlReason.NOT_PAUSED
-        # REVISE：NONE/PAUSE 之下只记录请求（queue 属 CTRL-5）
+        # REVISE：NONE/PAUSE 之下入队 NEXT_INVOCATION（CU-CTRL-5）
         return ControlStatus.ACCEPTED, None
 
 
