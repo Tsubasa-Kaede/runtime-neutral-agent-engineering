@@ -19,7 +19,10 @@ ControlBoundary —— intent authority + effect non-authority。
   → REJECTED/COMMAND_ID_CONFLICT，两者均零副作用。自 CU-CTRL-5 起，
   accepted 的 NEXT_INVOCATION revision 进入 FIFO pending 队列并经
   snapshot.revision_queue 只读投影（accepted ≠ applied ≠ honored；
-  消费与 REVISION_APPLIED 属 REV-1/REV-2）。
+  消费与 REVISION_APPLIED 属 REV-1/REV-2）。自 CU-CTRL-6 起，
+  snapshot 为 execution truth × control truth 的 lifecycle 纯投影
+  （_project_lifecycle 零存储；终态压倒 intent；PAUSED 只由真实
+  park 确认兑现；lifecycle 是 derived state，Boundary 不是 Engine）。
 - command_id 由 caller 供应（无默认值 = 结构性禁止隐式生成）；
   replay identity = (execution_id, command_id)，fingerprint 覆盖全部
   语义字段的不可变规格元组，缓存为 per-boundary 实例域（CU-CTRL-4）。
@@ -487,20 +490,43 @@ class ControlBoundary:
             status=ControlStatus.ACCEPTED,
             execution_version=self._version)
 
-    def snapshot(self, lifecycle: ControlLifecycle) -> ControlSnapshot:
-        """control-plane 投影：lifecycle 由持有执行真值的组合方供应，
-        Boundary 绝不自行推导；park point 恒 NONE（park 权威属于
-        Gate，故 PAUSED 投影在此被值模型结构性拒绝）。"""
+    def snapshot(self, lifecycle: ControlLifecycle,
+                 *, park_point: ParkPoint = ParkPoint.NONE) -> ControlSnapshot:
+        """execution truth × control truth → 只读 lifecycle 投影。
+
+        lifecycle 与 park_point 均由持有执行真值的组合方供应（真实
+        park 确认只消费、绝不伪造）；投影经 _project_lifecycle 纯函数
+        派生，零 lifecycle 存储。终态事实压倒一切 pending intent；
+        PAUSED 只由真实 park 确认（DISPATCH/ADMISSION）兑现，
+        PAUSE_REQUESTED 绝不直接投影为 PAUSED。
+        """
         if not isinstance(lifecycle, ControlLifecycle):
             raise ControlModelError(
                 f"unknown lifecycle: {lifecycle!r}")
+        if not isinstance(park_point, ParkPoint):
+            raise ControlModelError(
+                f"unknown park point: {park_point!r}")
+        if lifecycle is ControlLifecycle.PAUSED:
+            if park_point is ParkPoint.NONE:
+                # PAUSED 证据 = 真实 park 确认；无确认一律拒绝
+                # （不因 pending 状态放宽——绝不伪造 parked 投影）
+                raise ControlModelError(
+                    "PAUSED execution truth requires a real park point")
+        elif park_point is not ParkPoint.NONE:
+            # park 证据只能伴随 PAUSED execution truth（不一致输入拒绝）
+            raise ControlModelError(
+                "park point accompanies only PAUSED execution truth")
         with self._lock:
+            projected = _project_lifecycle(lifecycle, self._pending.kind)
+            effective_park = (
+                park_point if projected is ControlLifecycle.PAUSED
+                else ParkPoint.NONE)
             return ControlSnapshot(
                 execution_id=self._execution_id,
                 execution_version=self._version,
-                lifecycle=lifecycle,
+                lifecycle=projected,
                 pending_intent=self._pending,
-                park_point=ParkPoint.NONE,
+                park_point=effective_park,
                 revision_queue=tuple(self._queue))
 
     def _adjudicate(self, command_type, pending_kind):
@@ -530,3 +556,52 @@ _NEXT_PENDING = {
     ControlCommandType.REVISE: None,  # REVISE 不改变 pending intent
     ControlCommandType.ABORT: PendingIntentKind.ABORT,
 }
+
+
+def _project_lifecycle(lifecycle: ControlLifecycle,
+                       pending_kind: PendingIntentKind) -> ControlLifecycle:
+    """execution truth × control truth → 投影 lifecycle（CU-CTRL-6）。
+
+    纯函数、零存储：Boundary 绝不持有 lifecycle 状态、绝不自行推进。
+    规则（Sections 1-8 裁决映射到冻结七值词表）：
+    - 终态优先：COMPLETED / ABORTED 原样压倒一切 intent；自然终态
+      可 supersede control intent，stale intent 绝不遮终态。
+    - FAILED + pending ABORT → ABORTED（abort drain 期间真实失败的
+      既定语义）；其余 FAILED 保持 FAILED（execution outcome 值）。
+    - PAUSED（已由真实 park 确认兑现）：pending ABORT → ABORT_PENDING
+      （abort 压过停驻）；pending NONE（RESUME 已清）→ RUNNING；
+      否则 PAUSED。
+    - PAUSE_PENDING：pending ABORT → ABORT_PENDING；pending NONE →
+      RUNNING（RESUME 恢复非-paused 投影）；否则 PAUSE_PENDING。
+    - ABORT_PENDING：保持 ABORT_PENDING 直到真实 abort confirmation。
+    - RUNNING：pending ABORT → ABORT_PENDING；pending PAUSE →
+      PAUSE_PENDING；否则 RUNNING。
+
+    "ABORTING" 语义即冻结值 ABORT_PENDING；词表无 IDLE——pre-execution
+    无输入可投影，初始可达投影为 RUNNING。
+    """
+    if lifecycle is ControlLifecycle.COMPLETED:
+        return ControlLifecycle.COMPLETED
+    if lifecycle is ControlLifecycle.ABORTED:
+        return ControlLifecycle.ABORTED
+    if lifecycle is ControlLifecycle.FAILED:
+        if pending_kind is PendingIntentKind.ABORT:
+            return ControlLifecycle.ABORTED
+        return ControlLifecycle.FAILED
+    if lifecycle is ControlLifecycle.PAUSED:
+        if pending_kind is PendingIntentKind.ABORT:
+            return ControlLifecycle.ABORT_PENDING
+        if pending_kind is PendingIntentKind.NONE:
+            return ControlLifecycle.RUNNING
+        return ControlLifecycle.PAUSED
+    if pending_kind is PendingIntentKind.ABORT:
+        return ControlLifecycle.ABORT_PENDING
+    if lifecycle is ControlLifecycle.PAUSE_PENDING:
+        if pending_kind is PendingIntentKind.NONE:
+            return ControlLifecycle.RUNNING
+        return ControlLifecycle.PAUSE_PENDING
+    if lifecycle is ControlLifecycle.ABORT_PENDING:
+        return ControlLifecycle.ABORT_PENDING
+    if pending_kind is PendingIntentKind.PAUSE:
+        return ControlLifecycle.PAUSE_PENDING
+    return ControlLifecycle.RUNNING
