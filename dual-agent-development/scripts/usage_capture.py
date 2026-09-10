@@ -5,7 +5,7 @@
 
     AbortGate → RevisionAdapter(未来) → UsageCapture → raw adapter
 
-本层只做两件事：
+本层只做三件事：
 
 1. raw handoff——request 原样转发给被包装方的 invoke、返回值原样
    返回、异常（含 ControlAborted）原样传播；绝不 catch / 替换 /
@@ -14,6 +14,14 @@
 2. usage 观察——在真实 invocation 边界铸造 opaque+unique 的
    invocation_id（本层职责，不经手其他任何层），测量时长，按
    被包装方报告的事实记一条 UsageRecord 到既有 UsageLog。
+3. handoff 观察（CU-REV-2）——把 raw invoke callable 的解引用放在
+   try 之外、try 块内唯一语句是委托调用表达式；调用表达式一旦在
+   当前线程被发起（return / raise / 中断全覆盖的 finally 语义），
+   把 (invocation_id, applied_revisions) 原样通知可选 handoff
+   观察者。认识论等级：只证明调用表达式被发起，不声称被包装方
+   方法体一定进入、不声称 runtime 进程启动。仅携带修订的委托才
+   通知（空 revisions 不触发）；观察者是未来 wrap 层的挂点——
+   本层不落账、不产生应用事实、不新增身份。
 
 usage 三态（结构性耦合，零估算）：
 - KNOWN：trace 双方均报告真实整数计数；
@@ -67,7 +75,8 @@ class UsageCapture:
 
     def __init__(self, raw_adapter, usage_log, *, runtime_id: str,
                  role: str,
-                 capabilities: ObservationCapabilities | None = None):
+                 capabilities: ObservationCapabilities | None = None,
+                 handoff_observer=None):
         if not callable(getattr(raw_adapter, "invoke", None)):
             raise UsageCaptureError(
                 "raw_adapter must expose a callable invoke")
@@ -78,6 +87,8 @@ class UsageCapture:
             if not _recordable_text(value):
                 raise UsageCaptureError(
                     f"{name} must be a non-empty string")
+        if handoff_observer is not None and not callable(handoff_observer):
+            raise UsageCaptureError("handoff_observer must be callable")
         if capabilities is None:
             capabilities = ObservationCapabilities(by_kind={})
         if not isinstance(capabilities, ObservationCapabilities):
@@ -88,20 +99,41 @@ class UsageCapture:
         self._runtime_id = runtime_id
         self._role = role
         self._capabilities = capabilities
+        self._handoff_observer = handoff_observer
 
     def invoke(self, request, *, applied_revisions=()):
         """真实 invocation 边界：铸 id → 交予 raw → 按事实记观察。
 
         raw 参数原样传递（correlation 元数据绝不转发）、返回值原样
-        返回、异常原样传播（无观察可记，诚实缺席）。
+        返回、异常原样传播（无观察可记，诚实缺席）。委托调用表达式
+        发起后经 finally 通知 handoff 观察者（若有、且携带修订）——
+        观察者异常被隔离，绝不改变本方法的 outcome。
         """
         invocation_id = uuid4().hex  # opaque + unique，仅本层铸造
         started_at = monotonic()
-        result = self._raw.invoke(request)
+        raw_invoke = self._raw.invoke  # 解引用在 try 外：解析失败 ⇒ 不触发
+        try:
+            result = raw_invoke(request)
+        finally:
+            self._notify_handoff(invocation_id, applied_revisions)
         duration_ms = int((monotonic() - started_at) * 1000)
         self._record(request, invocation_id, result, duration_ms,
                      applied_revisions)
         return result
+
+    def _notify_handoff(self, invocation_id, applied_revisions):
+        """委托调用表达式已发起后的 handoff 观察（仅携带修订的委托）。
+
+        两参原样：invocation_id 原值、applied_revisions 原对象
+        （不排序 / 不去重 / 不转换 / 不复制）。观察者异常 Exception
+        级隔离——绝不改变执行 outcome。
+        """
+        if self._handoff_observer is None or not applied_revisions:
+            return
+        try:
+            self._handoff_observer(invocation_id, applied_revisions)
+        except Exception:
+            pass  # 观察失败绝不改变执行 outcome（Exception 级隔离）
 
     def _record(self, request, invocation_id, result, duration_ms,
                 applied_revisions):
