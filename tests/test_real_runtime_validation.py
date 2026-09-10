@@ -10,6 +10,7 @@ RUN_REAL_PROVIDER_TESTS=1 with the real Claude Code adapter.
 import os
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -50,10 +51,16 @@ class FakeAdapter:
     invocation_spec = {"timeout_seconds": 60}
 
     def __init__(self, invocation_result=None, auth_state=AuthenticationState.AUTHENTICATED,
-                 available=True):
+                 available=True, auth_reason=None,
+                 provider_available=True, provider_reason=None):
         self.invocation_result = invocation_result or _ok_result()
         self.auth_state = auth_state
         self.available = available
+        # CU-QWEN-AUTH-2 加性注入面：非 AUTHENTICATED 的 auth reason 与
+        # provider 检查形态（沿用既有 fake 模式，不引入新抽象）。
+        self.auth_reason = auth_reason
+        self.provider_available = provider_available
+        self.provider_reason = provider_reason
         self.invoke_calls = []
 
     def discover(self):
@@ -65,11 +72,16 @@ class FakeAdapter:
     def check_authentication(self):
         if self.auth_state is AuthenticationState.AUTHENTICATED:
             return AuthenticationCheck(self.auth_state, "oauth_token")
-        return AuthenticationCheck(self.auth_state, reason_code=ReasonCode.AUTH_REQUIRED)
+        return AuthenticationCheck(
+            self.auth_state,
+            reason_code=self.auth_reason or ReasonCode.AUTH_REQUIRED)
 
     def check_provider_model(self):
         from runtime_health import ProviderModelCheck
-        return ProviderModelCheck(self.provider_id, self.model_id, True, ReasonCode.NONE)
+        if self.provider_available:
+            return ProviderModelCheck(self.provider_id, self.model_id, True, ReasonCode.NONE)
+        reason = self.provider_reason or ReasonCode.PROVIDER_UNREACHABLE
+        return ProviderModelCheck(self.provider_id, self.model_id, False, reason)
 
     def invoke(self, request):
         self.invoke_calls.append(request)
@@ -481,6 +493,121 @@ class RealRuntimeSmokeTests(unittest.TestCase):
         surface = repr(report).lower()
         for marker in ("token", "secret", "api_key", "authorization", "stdout", "stderr"):
             self.assertNotIn(marker, surface)
+
+
+class AouAuthEvidenceTests(unittest.TestCase):
+    """CU-QWEN-AUTH-2：auth 观察面缺席（AOU）时 G2/G3 的 DEFERRED 证据。
+
+    不变量：执行成功绝不铸造 AuthenticationState.AUTHENTICATED；
+    DEFERRED_TO_INVOCATION 只与真实 G5 成功共存于 VERIFIED+REAL。
+    """
+
+    def _gate(self, gate, adapter):
+        executor = RealGateExecutor(adapter, env={"RUN_REAL_PROVIDER_TESTS": "1"})
+        return executor(gate)
+
+    def _aou_adapter(self, **kwargs):
+        return FakeAdapter(
+            auth_state=AuthenticationState.UNKNOWN,
+            auth_reason=ReasonCode.AUTH_OBSERVATION_UNAVAILABLE,
+            provider_available=False,
+            provider_reason=ReasonCode.AUTH_OBSERVATION_UNAVAILABLE,
+            **kwargs)
+
+    def _run_real(self, adapter):
+        return run_real_validation(
+            instance(), adapter, env={"RUN_REAL_PROVIDER_TESTS": "1"},
+            clock=lambda: 1.0, experiment_id="exp-aou")
+
+    @staticmethod
+    def _gate_result(result, gate):
+        return next(g for g in result.gate_results if g.gate is gate)
+
+    def test_g2_observed_labels_observed(self):
+        result = self._gate(ValidationGate.G2_AUTHENTICATION, FakeAdapter())
+        self.assertEqual(result.verdict, GateVerdict.PASS)
+        self.assertEqual(result.evidence["auth_state"], "AUTHENTICATED")
+        self.assertEqual(result.evidence["auth_evidence"], "OBSERVED")
+
+    def test_g2_aou_defers(self):
+        adapter = FakeAdapter(
+            auth_state=AuthenticationState.UNKNOWN,
+            auth_reason=ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+        result = self._gate(ValidationGate.G2_AUTHENTICATION, adapter)
+        self.assertEqual(result.verdict, GateVerdict.PASS)
+        self.assertEqual(result.evidence["auth_state"], "UNKNOWN")
+        self.assertEqual(result.evidence["auth_evidence"],
+                         "DEFERRED_TO_INVOCATION")
+
+    def test_g2_protocol_error_blocks(self):
+        adapter = FakeAdapter(
+            auth_state=AuthenticationState.UNKNOWN,
+            auth_reason=ReasonCode.PROTOCOL_ERROR)
+        result = self._gate(ValidationGate.G2_AUTHENTICATION, adapter)
+        self.assertEqual(result.verdict, GateVerdict.BLOCKED)
+        self.assertIn("AUTH_REQUIRED", result.reason)
+
+    def test_g3_available_passes_observed(self):
+        result = self._gate(ValidationGate.G3_PROVIDER, FakeAdapter())
+        self.assertEqual(result.verdict, GateVerdict.PASS)
+        self.assertEqual(result.evidence["provider_evidence"], "OBSERVED")
+
+    def test_g3_aou_defers(self):
+        adapter = FakeAdapter(
+            provider_available=False,
+            provider_reason=ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+        result = self._gate(ValidationGate.G3_PROVIDER, adapter)
+        self.assertEqual(result.verdict, GateVerdict.PASS)
+        self.assertEqual(result.evidence["provider_evidence"],
+                         "DEFERRED_TO_INVOCATION")
+
+    def test_g3_unreachable_blocks(self):
+        adapter = FakeAdapter(
+            provider_available=False,
+            provider_reason=ReasonCode.PROVIDER_UNREACHABLE)
+        result = self._gate(ValidationGate.G3_PROVIDER, adapter)
+        self.assertEqual(result.verdict, GateVerdict.BLOCKED)
+        self.assertIn("HEALTH_NOT_READY", result.reason)
+
+    def test_aou_full_chain_success_verified_real(self):
+        result, _executor = self._run_real(self._aou_adapter())
+        self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
+        self.assertEqual(result.provenance, "REAL")
+        g2 = self._gate_result(result, ValidationGate.G2_AUTHENTICATION)
+        g3 = self._gate_result(result, ValidationGate.G3_PROVIDER)
+        g5 = self._gate_result(result, ValidationGate.G5_MINIMAL_INVOCATION)
+        # DEFERRED 与 G5 真实成功共存于同一结果 —— 两个事实必须并存。
+        self.assertEqual(g2.verdict, GateVerdict.PASS)
+        self.assertEqual(g2.evidence["auth_state"], "UNKNOWN")
+        self.assertEqual(g2.evidence["auth_evidence"],
+                         "DEFERRED_TO_INVOCATION")
+        self.assertEqual(g3.evidence["provider_evidence"],
+                         "DEFERRED_TO_INVOCATION")
+        self.assertEqual(g5.verdict, GateVerdict.PASS)
+
+    def test_aou_g5_failure_not_verified_not_persistable(self):
+        adapter = self._aou_adapter(
+            invocation_result=_result(status=InvocationStatus.FAILED,
+                                      error="external runtime failed"))
+        result, _executor = self._run_real(adapter)
+        self.assertEqual(result.status, CandidateValidationStatus.FAILED)
+        from evidence_store import save_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                save_evidence(directory, result)
+
+    def test_successful_aou_execution_never_authenticates(self):
+        # 行为化不变量：全链执行成功后 G2 证据仍是 UNKNOWN 模态，
+        # 整个结果的任何 evidence 值都不含 AUTHENTICATED。
+        result, executor = self._run_real(self._aou_adapter())
+        self.assertEqual(result.status, CandidateValidationStatus.VERIFIED)
+        g2 = self._gate_result(result, ValidationGate.G2_AUTHENTICATION)
+        self.assertEqual(g2.evidence["auth_state"], "UNKNOWN")
+        for gate_result in result.gate_results:
+            for value in gate_result.evidence.values():
+                self.assertNotEqual(value, "AUTHENTICATED")
+        self.assertEqual(executor.evidence_summary()["auth_evidence"],
+                         "EXECUTION_PROVEN")
 
 
 if __name__ == "__main__":

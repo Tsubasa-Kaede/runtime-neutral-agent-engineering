@@ -122,6 +122,9 @@ class RealGateExecutor:
         self._trace = None
         self._output_class: str | None = None
         self._failure_category: str | None = None
+        # CU-QWEN-AUTH-2：G2 的 auth 证据模态（OBSERVED /
+        # DEFERRED_TO_INVOCATION）；成功执行后投影为 EXECUTION_PROVEN。
+        self._auth_evidence: str | None = None
         self._executed_at: float | None = None
 
     @property
@@ -186,16 +189,38 @@ class RealGateExecutor:
     def _gate_authentication(self, gate) -> GateResult:
         check = self.adapter.check_authentication()
         state = getattr(getattr(check, "state", None), "value", getattr(check, "state", None))
+        reason = getattr(getattr(check, "reason_code", None), "value",
+                         getattr(check, "reason_code", None))
         if state == "AUTHENTICATED":
-            return GateResult(gate, GateVerdict.PASS, evidence={"auth_state": "AUTHENTICATED"})
+            self._auth_evidence = "OBSERVED"
+            return GateResult(gate, GateVerdict.PASS,
+                              evidence={"auth_state": "AUTHENTICATED",
+                                        "auth_evidence": "OBSERVED"})
+        if state == "UNKNOWN" and reason == "AUTH_OBSERVATION_UNAVAILABLE":
+            # CU-QWEN-AUTH-2：auth 观察面缺席 ≠ 认证失败——放行到受控
+            # 执行（G5）取证；auth_state 保持 UNKNOWN，绝不铸造
+            # AUTHENTICATED，DEFERRED 不经执行成功不得升级。
+            self._auth_evidence = "DEFERRED_TO_INVOCATION"
+            return GateResult(gate, GateVerdict.PASS,
+                              evidence={"auth_state": "UNKNOWN",
+                                        "auth_evidence": "DEFERRED_TO_INVOCATION"})
         return self._blocked(gate, "AUTH_REQUIRED: authentication state not authenticated")
 
     def _gate_provider(self, gate) -> GateResult:
         check = self.adapter.check_provider_model()
+        provider = getattr(check, "provider", None)
         if getattr(check, "available", False):
-            provider = getattr(check, "provider", None)
             return GateResult(gate, GateVerdict.PASS,
-                              evidence={"provider": str(provider or "unknown")})
+                              evidence={"provider": str(provider or "unknown"),
+                                        "provider_evidence": "OBSERVED"})
+        reason = getattr(getattr(check, "reason_code", None), "value",
+                         getattr(check, "reason_code", None))
+        if reason == "AUTH_OBSERVATION_UNAVAILABLE":
+            # CU-QWEN-AUTH-2：provider 观察与 auth 观察同缺（同一次观察面
+            # 移除）——证明同样转移给受控执行；这不断言 provider 可用。
+            return GateResult(gate, GateVerdict.PASS,
+                              evidence={"provider": str(provider or "unknown"),
+                                        "provider_evidence": "DEFERRED_TO_INVOCATION"})
         return self._blocked(gate, "HEALTH_NOT_READY: provider check unavailable")
 
     def _gate_model(self, gate) -> GateResult:
@@ -512,6 +537,11 @@ class RealGateExecutor:
         exit_code = getattr(trace, "exit_code", None)
         success = bool(status_value == "SUCCESS" and exit_code == 0
                        and self._output_class == "exact_ok")
+        # AUTH-2 投影：DEFERRED_TO_INVOCATION 只有在受控执行成功后才升级
+        # 为 EXECUTION_PROVEN；其余模态原样透传，未观察为 None。
+        auth_evidence = self._auth_evidence
+        if auth_evidence == "DEFERRED_TO_INVOCATION" and success:
+            auth_evidence = "EXECUTION_PROVEN"
         if self._identity is not None:
             runtime_id, provider_id, model_id = self._identity[0], self._identity[1], self._identity[2]
         else:
@@ -527,6 +557,7 @@ class RealGateExecutor:
             "duration_ms": getattr(trace, "duration_ms", None),
             "success": success,
             "safe_output_summary": self._output_class or "none",
+            "auth_evidence": auth_evidence,
             "failure_category": self._failure_category or "NONE",
             "executed_at": self._executed_at,
         }

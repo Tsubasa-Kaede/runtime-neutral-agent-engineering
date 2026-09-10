@@ -94,6 +94,68 @@ class Phase10BGenericHealthTests(unittest.TestCase):
         self.assertIsNone(result.status.provider)
         self.assertIsNone(result.status.model)
 
+    # -- AUTH-2：auth 观察面缺席（AOU）的受控旁路 ---------------------------
+
+    def test_aou_auth_falls_through_to_mini_and_ready(self):
+        # UNKNOWN + AOU 不在 auth 早退终结：provider 观察同样受限时
+        # 由 gated mini-check 终裁 READY —— 执行即就绪证明，绝非"已认证"。
+        probe = green_probe()
+        probe.check_authentication.return_value = type("A", (), {
+            "state": AuthenticationState.UNKNOWN, "method": None,
+            "reason_code": ReasonCode.AUTH_OBSERVATION_UNAVAILABLE})()
+        probe.check_provider_model.return_value = type("P", (), {
+            "provider": "p", "model": "m", "available": False,
+            "reason_code": ReasonCode.AUTH_OBSERVATION_UNAVAILABLE})()
+        result = self.health.check(candidate(), probe)
+        self.assertEqual(result.status.status, RuntimeState.READY)
+        self.assertEqual(result.status.reason_code, ReasonCode.NONE)
+        self.assertEqual(result.status.evidence.authentication, "unobservable")
+        self.assertEqual(result.status.evidence.health, "passed")
+
+    def test_aou_mini_failure_is_error(self):
+        # AOU 绝不自动 READY：mini 失败即 ERROR，reason 如实透传。
+        probe = green_probe()
+        probe.check_authentication.return_value = type("A", (), {
+            "state": AuthenticationState.UNKNOWN, "method": None,
+            "reason_code": ReasonCode.AUTH_OBSERVATION_UNAVAILABLE})()
+        probe.check_provider_model.return_value = type("P", (), {
+            "provider": "p", "model": "m", "available": False,
+            "reason_code": ReasonCode.AUTH_OBSERVATION_UNAVAILABLE})()
+        probe.minimal_health_check.return_value = type("H", (), {
+            "passed": False, "reason_code": ReasonCode.HEALTH_CHECK_FAILED,
+            "trace": None, "output_class": "invoke_failed"})()
+        result = self.health.check(candidate(), probe)
+        self.assertEqual(result.status.status, RuntimeState.ERROR)
+        self.assertEqual(result.status.reason_code,
+                         ReasonCode.HEALTH_CHECK_FAILED)
+        self.assertEqual(result.status.evidence.health, "failed")
+
+    def test_unknown_protocol_error_still_error(self):
+        # AOU 是唯一例外：普通 UNKNOWN（PROTOCOL_ERROR）照旧 ERROR，
+        # mini-check 不可达。
+        probe = green_probe()
+        probe.check_authentication.return_value = type("A", (), {
+            "state": AuthenticationState.UNKNOWN, "method": None,
+            "reason_code": ReasonCode.PROTOCOL_ERROR})()
+        result = self.health.check(candidate(), probe)
+        self.assertEqual(result.status.status, RuntimeState.ERROR)
+        self.assertEqual(result.status.reason_code, ReasonCode.PROTOCOL_ERROR)
+        probe.minimal_health_check.assert_not_called()
+
+    def test_aou_with_real_provider_failure_still_unavailable(self):
+        # auth AOU 不吞真实 provider 失败：非 AOU reason 照旧早退。
+        probe = green_probe()
+        probe.check_authentication.return_value = type("A", (), {
+            "state": AuthenticationState.UNKNOWN, "method": None,
+            "reason_code": ReasonCode.AUTH_OBSERVATION_UNAVAILABLE})()
+        probe.check_provider_model.return_value = type("P", (), {
+            "provider": "p", "model": "m", "available": False,
+            "reason_code": ReasonCode.PROVIDER_UNREACHABLE})()
+        result = self.health.check(candidate(), probe)
+        self.assertEqual(result.status.status, RuntimeState.UNAVAILABLE)
+        self.assertEqual(result.status.reason_code,
+                         ReasonCode.PROVIDER_UNREACHABLE)
+
     def test_minimal_health_failure_is_error_with_trace(self):
         trace = Mock(invocation_id="inv-y", exit_code=1, duration_ms=9)
         probe = green_probe(trace)

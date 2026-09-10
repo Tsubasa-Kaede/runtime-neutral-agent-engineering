@@ -19,7 +19,7 @@ from external_runtime import RuntimeProfile
 from generic_runtime_health import GenericRuntimeHealth
 from runtime_discovery import DiscoverySource, RuntimeCandidateDiscovery
 from runtime_pool import RuntimeHealthCache
-from runtime_status import RuntimeState
+from runtime_status import ReasonCode, RuntimeState
 from task_budget import BudgetUsage, TaskBudget
 from loop_guard import LoopGuard
 
@@ -104,13 +104,18 @@ class Phase10BHealthCompatibilityTests(unittest.TestCase):
         popen.assert_not_called()
 
     def test_unknown_auth_maps_to_error_not_ready(self):
+        # CU-QWEN-AUTH-2 精化：非 AOU 的 UNKNOWN（claude 的 not-json
+        # → PROTOCOL_ERROR）仍然 ERROR、绝不 READY —— AOU
+        # （AUTH_OBSERVATION_UNAVAILABLE）是唯一的受控旁路例外，且
+        # claude 的观察面永不产生它。
         adapter = claude_adapter()
         with patch("claude_code_adapter.subprocess.run",
                    side_effect=run_dispatch(auth_rc=0, auth_stdout="not-json")), \
              patch("claude_code_adapter.subprocess.Popen") as popen:
             candidate = self.discover_candidate(adapter)
             result = GenericRuntimeHealth().check(candidate, adapter)
-        self.assertNotEqual(result.status.status, RuntimeState.READY)
+        self.assertEqual(result.status.status, RuntimeState.ERROR)
+        self.assertEqual(result.status.reason_code, ReasonCode.PROTOCOL_ERROR)
         popen.assert_not_called()
 
     def test_cache_hit_skips_full_health_check(self):

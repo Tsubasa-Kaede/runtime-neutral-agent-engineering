@@ -39,10 +39,13 @@ class OfflineAdapter:
     """Fake probe surface; no process, no network, no credentials."""
 
     def __init__(self, runtime_id="rt-a", provider_id="provider-a",
-                 auth_state=AuthenticationState.AUTHENTICATED):
+                 auth_state=AuthenticationState.AUTHENTICATED,
+                 auth_reason=None):
         self._runtime_id = runtime_id
         self._provider_id = provider_id
         self._auth_state = auth_state
+        # CU-QWEN-AUTH-2 加性注入面：非 AUTHENTICATED 的 auth reason。
+        self._auth_reason = auth_reason
         self.discover_calls = 0
 
     def discover(self):
@@ -51,13 +54,11 @@ class OfflineAdapter:
 
     def check_authentication(self):
         from runtime_health import AuthenticationCheck
-        return_value = None
         if self._auth_state is AuthenticationState.AUTHENTICATED:
-            return_value = AuthenticationCheck(self._auth_state, "oauth")
-        else:
-            return_value = AuthenticationCheck(self._auth_state,
-                                               reason_code=ReasonCode.AUTH_REQUIRED)
-        return return_value
+            return AuthenticationCheck(self._auth_state, "oauth")
+        return AuthenticationCheck(
+            self._auth_state,
+            reason_code=self._auth_reason or ReasonCode.AUTH_REQUIRED)
 
     def check_provider_model(self):
         from runtime_health import ProviderModelCheck
@@ -132,6 +133,22 @@ class BootstrapChainTests(unittest.TestCase):
         session = bootstrap(make_registry(adapter))
         self.assertEqual(session.entries[0].health_status, "AUTH_REQUIRED")
         self.assertEqual(session.pool.identities(), ())
+
+    def test_aou_candidate_admitted_when_health_ready_and_verified(self):
+        # CU-QWEN-AUTH-2：AOU runtime 经 health（mini 终裁）达 READY 后，
+        # bootstrap 零 AOU 分支、零 runtime 知识即按既有 VERIFIED+REAL
+        # 证据准入 —— 证明 discovery/bootstrap 不需要为 AUTH-2 改动。
+        adapter = OfflineAdapter(
+            auth_state=AuthenticationState.UNKNOWN,
+            auth_reason=ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+        store = {("rt-a", "provider-a", None, "fp-rt-a"): evidence()}
+        session = bootstrap(make_registry(adapter), store)
+        entry = session.entries[0]
+        self.assertEqual(entry.health_status, "READY")
+        self.assertTrue(entry.admitted)
+        self.assertEqual(entry.reason, "ADMITTED")
+        self.assertEqual(session.pool.identities(),
+                         (("rt-a", "provider-a", None, "fp-rt-a"),))
 
     def test_existing_verified_evidence_is_reused_without_qualification(self):
         adapter = OfflineAdapter()

@@ -82,7 +82,18 @@ class RuntimeHealthController:
                 checked_at,
                 auth.method,
             ))
-        if auth_state != AuthenticationState.AUTHENTICATED.value:
+        # CU-QWEN-AUTH-2：UNKNOWN + AUTH_OBSERVATION_UNAVAILABLE 表示 auth
+        # 观察面缺席（如 qwen 0.23.2 移除 auth 子命令）——既不是认证失败，
+        # 也不是认证成功；它只允许流程继续到受控 mini-check 终裁，其余
+        # 一切非 AUTHENTICATED 仍照旧 ERROR。
+        auth_unobservable = (
+            auth_state == AuthenticationState.UNKNOWN.value
+            and auth.reason_code is ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+        authentication_evidence = (
+            "authenticated"
+            if auth_state == AuthenticationState.AUTHENTICATED.value
+            else "unobservable")
+        if auth_state != AuthenticationState.AUTHENTICATED.value and not auth_unobservable:
             return RuntimeHealthResult(self._status(
                 runtime_id, discovery.version, provider_model.provider, provider_model.model,
                 RuntimeState.ERROR, ReasonCode.PROTOCOL_ERROR,
@@ -90,13 +101,18 @@ class RuntimeHealthController:
                 checked_at,
                 auth.method,
             ))
-        if not provider_model.available:
+        # 观察面缺席时 provider/model 同样只是"未观察到可用"——evidence
+        # 如实记 unverified，绝不预支 mini-check 的结论。
+        observed = "verified" if provider_model.available else "unverified"
+        provider_unobservable = (
+            provider_model.reason_code is ReasonCode.AUTH_OBSERVATION_UNAVAILABLE)
+        if not provider_model.available and not provider_unobservable:
             reason = provider_model.reason_code if provider_model.reason_code != ReasonCode.NONE else ReasonCode.PROVIDER_UNREACHABLE
             state = RuntimeState.UNAVAILABLE if reason != ReasonCode.AUTH_REQUIRED else RuntimeState.AUTH_REQUIRED
             return RuntimeHealthResult(self._status(
                 runtime_id, discovery.version, provider_model.provider, provider_model.model,
                 state, reason,
-                HealthEvidence("verified", "authenticated", "failed", "failed", "not_checked"),
+                HealthEvidence("verified", authentication_evidence, "failed", "failed", "not_checked"),
                 checked_at,
                 auth.method,
             ))
@@ -110,7 +126,7 @@ class RuntimeHealthController:
                 runtime_id, discovery.version, provider_model.provider, provider_model.model,
                 RuntimeState.ERROR, reason,
                 HealthEvidence(
-                    "verified", "authenticated", "verified", "verified", "failed",
+                    "verified", authentication_evidence, observed, observed, "failed",
                     exit_code=getattr(trace, "exit_code", None),
                     duration_ms=getattr(trace, "duration_ms", None),
                     output_class=getattr(health, "output_class", None),
@@ -122,7 +138,7 @@ class RuntimeHealthController:
             runtime_id, discovery.version, provider_model.provider, provider_model.model,
             RuntimeState.READY, ReasonCode.NONE,
             HealthEvidence(
-                "verified", "authenticated", "verified", "verified", "passed",
+                "verified", authentication_evidence, observed, observed, "passed",
                 exit_code=getattr(trace, "exit_code", None),
                 duration_ms=getattr(trace, "duration_ms", None),
                 output_class=getattr(health, "output_class", None),

@@ -427,5 +427,34 @@ class ModuleDisciplineTests(unittest.TestCase):
             self.assertIn(required, source, required)
 
 
+class DeferredAuthEvidencePersistenceTests(unittest.TestCase):
+    """CU-QWEN-AUTH-2：DEFERRED auth 证据的持久化边界。
+
+    持久层零修改即承载契约：_payload 逐 gate 忠实投影 evidence dict；
+    非 VERIFIED+REAL 的 DEFERRED 结果不可落盘（既有 NOT_PERSISTABLE）。
+    """
+
+    def test_payload_carries_deferred_evidence_only_verified_real(self):
+        # Case A：VERIFIED+REAL 的 G2 DEFERRED 证据被忠实投影。
+        deferred = {"auth_state": "UNKNOWN",
+                    "auth_evidence": "DEFERRED_TO_INVOCATION"}
+        result = verified_real_result(gate_evidence={
+            "G2_AUTHENTICATION": deferred})
+        payload = evidence_store._payload(result)
+        g2 = next(g for g in payload["gate_results"]
+                  if g["gate"] == "G2_AUTHENTICATION")
+        self.assertEqual(g2["verdict"], "PASS")
+        self.assertEqual(g2["evidence"], deferred)
+
+        # Case B：带同样 DEFERRED 证据的非 VERIFIED 结果不可持久化。
+        import dataclasses
+        blocked = dataclasses.replace(
+            result, status=CandidateValidationStatus.BLOCKED,
+            block_reason="AUTH_REQUIRED: authentication state not authenticated")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                evidence_store.save_evidence(tmp, blocked)
+
+
 if __name__ == "__main__":
     unittest.main()
