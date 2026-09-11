@@ -1,6 +1,6 @@
-"""V3.2 编排值模型（CU-ORCH-1）：固定顺序管线的返回契约值。
+"""V3.2 固定顺序管线：值模型（CU-ORCH-1）+ 最小执行面（CU-ORCH-2）。
 
-本模块只立值：运行状态词表、步规格、步投影记录、续走值、
+值层只立契约：运行状态词表、步规格、步投影记录、续走值、
 运行结果——全部为不可变值对象，构造期完成全部结构校验
 （复用控制域既有构造期拒绝类型，零新增类型）。
 
@@ -17,18 +17,35 @@
   仅失败态可携带；final_result 仅完成/失败态可携带；终局态
   （完成/失败/中止）一律零续走值。
 
-执行语义（顺序循环、准入、交接、失败即停）属后续单元；
-本文件零执行逻辑、零捕获、零锁。
+执行层（CU-ORCH-2 最小面）：
+
+- 构造期全量校验 + 槽引用探测：缺席槽以 KeyError 原样暴露
+  （零翻译零回退），绝不留待运行期首步才失败；探测是纯读，
+  任何失败路径账本零新事实、零可达半成品。
+- 管线零状态（Model A）：无游标、无缓存、无可变执行上下文——
+  一切续走信息由 caller 持有的 RunState 显式携带；同管线可
+  承载任意多个互不可见的并行续走值。
+- 单次 run = 确定性转移：每步先现读控制真相（ABORT 待定即
+  中止返回；PAUSE 待定即停驻携带续走值），再由 caller 供应的
+  纯函数构造请求，经不可变组合面委托既有执行链，结果状态非
+  成功即失败即停（fail-fast 冻结：零 retry / 零 fallback）。
+- 捕获恰一处（run 边界、两分支）：控制域中止信号只翻译为
+  中止返回（消费不是裁决：零写入、零确认、零终态事实）；
+  普通异常一律译为失败结果，error 携带原异常对象。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
 
-from control_boundary import ControlModelError
+from control_boundary import ControlModelError, PendingIntentKind
+from control_gate import ControlAborted
+from execution_slots import ExecutionSlots
+from external_runtime import InvocationStatus
 
 __all__ = (
-    "RunOutcome", "RunState", "RunStatus", "StepRecord", "StepSpec",
+    "RunOutcome", "RunState", "RunStatus", "SequentialPipeline",
+    "StepRecord", "StepSpec", "build_sequential_pipeline",
 )
 
 
@@ -158,3 +175,95 @@ class RunOutcome:
                 RunStatus.COMPLETED, RunStatus.FAILED):
             raise ControlModelError(
                 "final_result is carried only on COMPLETED or FAILED")
+
+
+class SequentialPipeline:
+    """固定顺序管线的最小执行面：不可变组合上的确定性转移函数。
+
+    (self, 续走值 | None) → RunOutcome。管线自身零状态：无游标、
+    无缓存、无可变执行上下文——一切续走信息由 caller 持有的
+    RunState 显式携带（Model A）；构造产物不可变，slot 集封闭。
+    """
+
+    def __init__(self, slots, steps):
+        self._slots = slots
+        self._steps = steps
+
+    def run(self, run_state=None):
+        """单次转移：逐步「现读准入 → 构造请求 → 委托 → 失败即停」。
+
+        准入每步现读控制真相（零缓存）：ABORT 待定即中止返回，
+        PAUSE 待定即停驻并携带续走值（续步序号 = 下一步序号）。
+        控制域中止信号只在本边界捕获并翻译为中止返回（消费不是
+        裁决：零写入、零确认）；普通异常一律译为失败结果，error
+        携带原异常对象；成功步结果原样成为交接结果与投影记录。
+        """
+        if run_state is None:
+            next_index = 0
+            previous_result = None
+            transcript = ()
+        else:
+            if not isinstance(run_state, RunState):
+                raise ControlModelError(
+                    "run_state must be a RunState value")
+            next_index = run_state.next_step_index
+            previous_result = run_state.previous_result
+            transcript = run_state.transcript
+        try:
+            while next_index < len(self._steps):
+                intent = self._slots.boundary.pending_intent.kind
+                if intent is PendingIntentKind.ABORT:
+                    return RunOutcome(status=RunStatus.ABORTED,
+                                      transcript=transcript)
+                if intent is PendingIntentKind.PAUSE:
+                    return RunOutcome(
+                        status=RunStatus.PARKED, transcript=transcript,
+                        run_state=RunState(
+                            next_step_index=next_index,
+                            previous_result=previous_result,
+                            transcript=transcript))
+                step = self._steps[next_index]
+                request = step.request_builder(previous_result)
+                handle = self._slots.slot(step.slot_id)
+                result = handle.invoke(request)
+                trace = result.trace
+                transcript = transcript + (StepRecord(
+                    step_index=next_index, slot_id=step.slot_id,
+                    status=result.status,
+                    invocation_id=(trace.invocation_id
+                                   if trace is not None else None)),)
+                if result.status is not InvocationStatus.SUCCESS:
+                    return RunOutcome(status=RunStatus.FAILED,
+                                      transcript=transcript,
+                                      final_result=result)
+                previous_result = result
+                next_index += 1
+            return RunOutcome(status=RunStatus.COMPLETED,
+                              transcript=transcript,
+                              final_result=previous_result)
+        except ControlAborted:
+            return RunOutcome(status=RunStatus.ABORTED,
+                              transcript=transcript)
+        except Exception as error:
+            return RunOutcome(status=RunStatus.FAILED,
+                              transcript=transcript, error=error)
+
+
+def build_sequential_pipeline(slots, steps):
+    """构造固定顺序管线：全量结构校验 + 构造期槽探测（零残留）。
+
+    槽引用缺席在构造期即以 KeyError 原样暴露（零翻译、零回退、
+    零捕获），绝不留待运行期首步才失败；探测是纯读——任何失败
+    路径账本零新事实、无可达半成品，同组合重试合法。
+    """
+    if not isinstance(slots, ExecutionSlots):
+        raise ControlModelError("slots must be ExecutionSlots values")
+    steps = tuple(steps)
+    if not steps:
+        raise ControlModelError("at least one step spec is required")
+    for step in steps:
+        if not isinstance(step, StepSpec):
+            raise ControlModelError("steps must be StepSpec values")
+    for step in steps:
+        slots.slot(step.slot_id)  # 构造期探测：缺席槽即刻暴露
+    return SequentialPipeline(slots, steps)
