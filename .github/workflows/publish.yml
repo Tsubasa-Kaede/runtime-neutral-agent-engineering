@@ -6,11 +6,15 @@
 # - Version consistency gate: the tag MUST equal the
 #   dual_agent.__version__ constant (the distribution's single version
 #   truth), and the pyproject dynamic-version wiring must point at that
-#   same constant, or the run fails before building.
+#   same constant, or the run fails before building. The gate is
+#   scripts/version_gate.py — the single, tested implementation
+#   (tests/test_version_gate.py) shared with publish-testpypi.yml.
 # - Trusted Publishing / OIDC only: NO PyPI API token, NO PYPI_TOKEN secret,
 #   NO passwords, NO ~/.pypirc — nothing long-lived is stored anywhere.
-# - Build and publish are separate jobs: the publish job uploads the exact
-#   artifact built by the build job (single, traceable source of truth).
+# - Build, publish, and release are separate jobs: the publish job uploads
+#   the exact artifact built by the build job (single, traceable source of
+#   truth); the release job turns the same tag into a GitHub Release with
+#   the artifacts attached, after PyPI publish succeeds.
 # - The publish job requires the GitHub Environment "pypi" and a matching
 #   PyPI pending publisher; both are configured on the GitHub/PyPI side,
 #   never by this file alone.
@@ -40,47 +44,11 @@ jobs:
           python-version: '3.12'
 
       - name: Version consistency gate (tag == dual_agent.__version__, dynamic wiring)
-        run: |
-          python - <<'PY'
-          import os, pathlib, re, sys, tomllib
-
-          tag = os.environ.get("GITHUB_REF_NAME", "")
-          if not re.fullmatch(r"v\d+\.\d+\.\d+([-a-zA-Z0-9.]+)?", tag):
-              sys.exit(f"tag {tag!r} is not a strict vX.Y.Z[pre] tag; refusing to build")
-
-          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          name = pyproject["project"]["name"]
-
-          # The distribution version is dynamic (single truth =
-          # dual_agent.__version__); [project] carries no literal version,
-          # so the gate verifies the dynamic wiring instead.
-          dynamic = pyproject["project"].get("dynamic", [])
-          attr = (pyproject.get("tool", {}).get("setuptools", {})
-                  .get("dynamic", {}).get("version", {}).get("attr"))
-          if "version" not in dynamic:
-              sys.exit("pyproject does not declare 'version' as dynamic; "
-                       "expected dynamic version with dual_agent.__version__ truth")
-          if attr != "dual_agent.__version__":
-              sys.exit(f"dynamic version attr is {attr!r}; "
-                       "expected 'dual_agent.__version__'")
-
-          # Read the shipped constant directly: importing the mapped package
-          # from the source tree is ambiguous (scripts/ holds a legacy
-          # top-level dual_agent.py module without __version__).
-          init_text = pathlib.Path("dual-agent-development/scripts/__init__.py").read_text(encoding="utf-8")
-          match = re.search(r'__version__\s*=\s*"([^"]+)"', init_text)
-          if match is None:
-              sys.exit("dual_agent __version__ constant not found")
-          pkg_version = match.group(1)
-
-          tag_version = tag[1:]
-          if pkg_version != tag_version:
-              sys.exit(
-                  f"version mismatch: tag={tag_version} "
-                  f"dual_agent.__version__={pkg_version}"
-              )
-          print(f"version gate OK: {name} {tag_version} (dynamic: dual_agent.__version__)")
-          PY
+        # scripts/version_gate.py resolves the version source from pyproject's
+        # own package-dir / dynamic.attr mapping and imports it from this
+        # checkout by explicit path — pyproject [project] carries no literal
+        # version (dynamic = ["version"]), and [project]["version"] is never read.
+        run: python scripts/version_gate.py --tag "${GITHUB_REF_NAME:-}"
 
       - name: Build sdist + wheel
         run: |
@@ -119,3 +87,22 @@ jobs:
         with:
           packages-dir: dist/
           attestations: true
+
+  release:
+    name: GitHub Release (artifacts + generated notes)
+    needs: publish   # a GitHub Release only appears after the PyPI publish succeeded
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release for the pushed tag — this job only
+    steps:
+      - name: Download dist artifact from the build job
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release with the built artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
