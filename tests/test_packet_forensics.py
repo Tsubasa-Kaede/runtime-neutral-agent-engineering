@@ -360,8 +360,18 @@ class AdapterRememberWiringTests(unittest.TestCase):
         envelope = ('{"type":"result","subtype":"success","result":'
                     + json.dumps(payload) + '}')
         with tempfile.TemporaryDirectory() as tmp:
-            stub = Path(tmp) / "fake-claude.cmd"
-            stub.write_text("@echo " + envelope + "\n", encoding="ascii")
+            if sys.platform == "win32":
+                stub = Path(tmp) / "fake-claude.cmd"
+                stub.write_text("@echo " + envelope + "\n", encoding="ascii")
+            else:
+                # POSIX: 可直接 execve 的 shell script（shebang + 执行位），
+                # 与 Windows .cmd 表达同一测试语义 —— fake executable 打印
+                # result envelope 后退出 0；adapter 仍走 shell=False。
+                stub = Path(tmp) / "fake-claude"
+                stub.write_text(
+                    "#!/bin/sh\nprintf '%s\\n' '" + envelope + "'\n",
+                    encoding="ascii")
+                stub.chmod(0o755)
             profile = RuntimeProfile(
                 "coding-agent", "claude-cli", "anthropic", None, "coder",
                 frozenset())
