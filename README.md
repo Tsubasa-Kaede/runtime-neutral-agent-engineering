@@ -201,7 +201,7 @@ Treat adapter-implemented runtimes as unverified until you run
 
 | Agent Runtime | Adapter | Offline Tests | REAL Verification |
 |---|---|---|---|
-| Claude Code CLI | `claude_code_adapter.py` | ✅ | ✅ REAL VERIFIED — full chain + REAL dual-agent collaboration (v2.1.227) |
+| Claude Code CLI | `claude_code_adapter.py` | ✅ | ✅ REAL VERIFIED — full chain + REAL dual-agent collaboration (Claude Code CLI 2.1.227) |
 | Codex CLI | `codex_adapter.py` | ✅ | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
 | Pi | `pi_adapter.py` | ✅ | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
 | Gemini CLI | `gemini_adapter.py` | ✅ | ❌ Not performed — gated REAL assets ship in the suite |
@@ -281,8 +281,8 @@ of every layer (what is offline-tested vs REAL-verified) is tracked in
 
 Published to PyPI via Trusted Publishing (OIDC only — no tokens, no secrets)
 on a pushed `vX.Y.Z` tag; the tag must equal `dual_agent.__version__`, enforced
-by [scripts/version_gate.py](scripts/version_gate.py) before any build. Every
-release also publishes a GitHub Release with attached artifacts and generated
+by [scripts/version_gate.py](scripts/version_gate.py) before any build. Every `vX.Y.Z`
+tag push also creates a GitHub Release with attached artifacts and generated
 notes — see the [Releases page](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases).
 
 Package maturity: pre-1.0; the installed-CLI surface may still change shape.

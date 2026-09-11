@@ -149,8 +149,8 @@ ROLE=RUNTIME_ID [--step ...]` 按序编排多 Agent 协作，所有引用的 run
 
 通过 Trusted Publishing（仅 OIDC，无 token 无密钥）在推送 `vX.Y.Z` tag 时
 发布 PyPI；发布前由 [scripts/version_gate.py](scripts/version_gate.py) 强制
-tag == `dual_agent.__version__`。每次发布同时生成带产物的 GitHub Release ——
-见 [Releases 页面](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases)。
+tag == `dual_agent.__version__`。每次推送 `vX.Y.Z` tag 也会同时创建带产物的
+GitHub Release —— 见 [Releases 页面](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases)。
 
 ## 参与贡献
 
