@@ -136,6 +136,7 @@ Usage:
   dual-agent --help
   dual-agent qualify [--timeout-seconds <seconds>]
   dual-agent run [--mode off|auto|on] [--observe] "<task>"
+  dual-agent cockpit "<task>" --step <ROLE>=<RUNTIME_ID> [--step ...] [--json]
 
 Commands:
   qualify   Explicitly qualify discovered runtimes through the G1-G14 gate
@@ -149,6 +150,15 @@ Commands:
             reading persisted evidence. run never automatically qualifies:
             with no evidence it exits 2 and points to
             `dual-agent qualify`.
+  cockpit   Run a sequential collaboration with an explicit per-step
+            composition: --step ROLE=RUNTIME_ID, repeatable, CLI order
+            is execution order. Reads persisted VERIFIED evidence and
+            never qualifies implicitly (same discipline as run).
+            Exit codes: 0 COMPLETED, 2 FAILED or usage error, 3 ABORTED,
+            4 PARKED. --json prints exactly one machine JSON line on
+            stdout (diagnostics on stderr); the default output is
+            human-readable text. Per-request timeout defaults to 300
+            seconds; --timeout-seconds overrides it.
 
 Run flags:
   --mode off|auto|on    orchestration mode (default auto)
@@ -164,6 +174,7 @@ First use:
 
 try:  # installed-package mode: dependencies are package siblings
     from .cli import main as cli_main, run_cli
+    from .cockpit_entry import cockpit_main
     from .discovery_bootstrap import bootstrap_runtime_session
     from .evidence_store import load_evidence, save_evidence
     from .external_runtime import new_invocation_id
@@ -182,6 +193,7 @@ try:  # installed-package mode: dependencies are package siblings
     from .runtime_discovery import RuntimeCandidateDiscovery
 except ImportError:  # source-tree flat-import mode (tests/examples)
     from cli import main as cli_main, run_cli
+    from cockpit_entry import cockpit_main
     from discovery_bootstrap import bootstrap_runtime_session
     from evidence_store import load_evidence, save_evidence
     from external_runtime import new_invocation_id
@@ -924,6 +936,16 @@ def main(argv=None, *, factories=None, evidence=None, qualifier=None,
         return _main_qualify(argv[1:], factories=factories,
                              qualifier=qualifier, base_dir=base_dir,
                              timeout_seconds=timeout_seconds)
+    if argv and argv[0] == "cockpit":
+        # P0-A dispatch（additive）：显式组合的顺序协作入口。qualifier
+        # 有意不透传 —— cockpit 只读盘证据，绝不隐式 qualification
+        # （D-P0-4；cockpit_entry 内部同样不接受 qualifier）。
+        if any(flag in argv[1:] for flag in ("--help", "-h")):
+            print(_PRODUCT_HELP)
+            return 0
+        return cockpit_main(argv[1:], factories=factories,
+                            evidence=evidence, base_dir=base_dir,
+                            timeout_seconds=timeout_seconds)
     if any(flag in argv for flag in _ARGPARSE_FLAGS):
         # parse-first 先例：--version/--help/-h 由 argparse 在组合之前
         # 处理（SystemExit(0)），无需 facade、无需 evidence。
