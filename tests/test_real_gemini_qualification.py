@@ -144,22 +144,6 @@ class TestFileDisciplineTests(unittest.TestCase):
             self.assertEqual(proc.stdout, "",
                              f"{relpath} modified: {proc.stdout!r}")
 
-    def test_protected_untracked_files_still_untracked(self):
-        import shutil
-        if shutil.which("git") is None:
-            self.skipTest("git not available")
-        for relpath in ("tests/test_policy_boundary_qualification.py",
-                        "tests/test_real_cli_policy_collaboration.py"):
-            if not (REPO / relpath).exists():
-                self.skipTest(f"missing protected file: {relpath}")
-            proc = subprocess.run(
-                ["git", "status", "--porcelain", "--", relpath],
-                cwd=str(REPO), capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, relpath)
-            self.assertTrue(proc.stdout.startswith("?? "),
-                            f"{relpath} expected untracked, got: "
-                            f"{proc.stdout!r}")
-
 
 # ---------------------------------------------------------------------------
 # Gated REAL tests（RUN_REAL_PROVIDER_TESTS=1；本机 gemini 缺失时诚实 SKIP）

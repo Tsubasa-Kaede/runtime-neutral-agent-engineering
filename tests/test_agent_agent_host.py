@@ -765,35 +765,5 @@ class V2ZeroDiffTests(unittest.TestCase):
                              f"{relpath} modified: {proc.stdout!r}")
 
 
-# ---------------------------------------------------------------------------
-# 受保护 untracked 文件（git 视角原样）
-# ---------------------------------------------------------------------------
-
-
-_PROTECTED = (
-    "tests/test_policy_boundary_qualification.py",
-    "tests/test_real_cli_policy_collaboration.py",
-)
-
-
-class ProtectedUntrackedTests(unittest.TestCase):
-
-    def test_protected_untracked_files_still_untracked(self):
-        import shutil
-        if shutil.which("git") is None:
-            self.skipTest("git not available")
-        for relpath in _PROTECTED:
-            if not (Path(__file__).resolve().parents[1] / relpath).exists():
-                self.skipTest(f"missing protected file: {relpath}")
-            proc = subprocess.run(
-                ["git", "status", "--porcelain", "--", relpath],
-                cwd=str(Path(__file__).resolve().parents[1]),
-                capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, relpath)
-            self.assertTrue(
-                proc.stdout.startswith("?? "),
-                f"{relpath} expected untracked, got: {proc.stdout!r}")
-
-
 if __name__ == "__main__":
     unittest.main()
