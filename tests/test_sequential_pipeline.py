@@ -39,13 +39,17 @@ from control_boundary import (  # noqa: E402
     ControlCommandType,
     ControlLifecycle,
     ControlModelError,
+    RevisionPayload,
+    RevisionTarget,
 )
 from control_gate import ControlAborted  # noqa: E402
+from control_journal import ControlFactType  # noqa: E402
 from execution_slots import (  # noqa: E402
     ExecutionSlotSpec,
     build_execution_slots,
 )
 from external_runtime import (  # noqa: E402
+    ExternalAgentRequest,
     InvocationResult,
     InvocationStatus,
     InvocationTrace,
@@ -57,6 +61,35 @@ MODULE_PATH = SCRIPTS / "sequential_pipeline.py"
 
 def _builder(previous_result):
     return "request"
+
+
+def make_request(prompt="base prompt"):
+    """可被 RevisionAdapter overlay 的真实请求值（dataclass.prompt）。"""
+    return ExternalAgentRequest(task_id="task-1", prompt=prompt,
+                                agent_id="agent-1", role="coder")
+
+
+def revise_cmd(command_id="rv1", text="tighten the format",
+               execution_id="exec-1"):
+    """NEXT_INVOCATION 修订命令（唯一合法入队途径）。"""
+    return ControlCommand(
+        command_id=command_id, execution_id=execution_id,
+        command=ControlCommandType.REVISE,
+        payload=RevisionPayload(target=RevisionTarget.NEXT_INVOCATION,
+                                text=text),
+        expected_version=0)
+
+
+def submit_on_first(boundary, command_factory):
+    """首次 invoke 时提交一条控制命令的 hook（在途提交模拟）。"""
+    state = {"done": False}
+
+    def hook(_raw):
+        if not state["done"]:
+            state["done"] = True
+            boundary.submit(command_factory())
+
+    return hook
 
 
 def _success(trace=None):
@@ -87,19 +120,27 @@ def abort_cmd(command_id="a1", execution_id="exec-1"):
 
 
 class _SpyRaw:
-    """真实 spy：方法体自记入口与 request；可抛。"""
+    """真实 spy：方法体自记入口与 request；可抛、可在途提交控制命令；
+    result_factory 供应每次调用互异的结果对象（身份隔离断言用）。"""
 
-    def __init__(self, result=None, raises=None):
+    def __init__(self, result=None, raises=None, hook=None,
+                 result_factory=None):
         self.entries = []
         self.requests = []
         self._result = result
         self._raises = raises
+        self._hook = hook
+        self._result_factory = result_factory
 
     def invoke(self, request):
+        if self._hook is not None:
+            self._hook(self)  # 在途副作用（如提交 PAUSE/ABORT/REVISE）
         self.entries.append(getattr(request, "task_id", None))
         self.requests.append(request)
         if self._raises is not None:
             raise self._raises
+        if self._result_factory is not None:
+            return self._result_factory()
         return self._result
 
 
@@ -447,6 +488,11 @@ class ArchitectureTests(unittest.TestCase):
                     self.assertEqual(len(fields), expected[node.name])
                     self.assertEqual(methods, {"__post_init__"})
 
+    def test_controlaborted_not_redefined(self):
+        # 唯一定义在既有 control_gate；本文件只 import 零重定义
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("class ControlAborted", source)
+
     def test_no_forbidden_tokens(self):
         source = MODULE_PATH.read_text(encoding="utf-8")
         for token in ("threading", "Lock", "acquire", "release", "uuid",
@@ -460,7 +506,8 @@ class ArchitectureTests(unittest.TestCase):
                       "ABORT_CONFIRMED", "PAUSE_CONFIRMED",
                       "ABORT_SUPERSEDED", "submit(", "snapshot(",
                       "drain", "broadcast", "routing", "schedule",
-                      "orchestrat", "ControlLifecycle"):
+                      "orchestrat", "ControlLifecycle",
+                      "retry", "fallback", "DAG"):
             self.assertNotIn(token, source, token)
 
 
@@ -678,6 +725,502 @@ class SingleStepTests(unittest.TestCase):
         self.assertIs(second.status, RunStatus.COMPLETED)
         self.assertIsNot(first, second)  # 每次全新 RunOutcome
         self.assertEqual(len(raw.entries), 2)  # 两次都真实委托
+
+
+class MultiStepHandoffTests(unittest.TestCase):
+    """多步 handoff：caller 函数链 + 编排零解析（assertIs 身份链）。"""
+
+    def test_three_step_handoff_identity_chain(self):
+        results = [_success(make_trace("inv-a")),
+                   _success(make_trace("inv-b")),
+                   _success(make_trace("inv-c"))]
+        raws = [_SpyRaw(result=results[0]), _SpyRaw(result=results[1]),
+                _SpyRaw(result=results[2])]
+        group, journal, raw_map = make_group(slot_ids=("a", "b", "c"),
+                                             raws=raws)
+        seen = {}
+
+        def b0(prev):
+            seen[0] = prev
+            return make_request("step-0")
+
+        def b1(prev):
+            seen[1] = prev
+            return make_request("step-1")
+
+        def b2(prev):
+            seen[2] = prev
+            return make_request("step-2")
+
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", b0), StepSpec("b", b1), StepSpec("c", b2)))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.COMPLETED)
+        self.assertIsNone(seen[0])  # 首步无上游
+        self.assertIs(seen[1], results[0])  # handoff 身份链零复制
+        self.assertIs(seen[2], results[1])
+        self.assertIs(outcome.final_result, results[2])  # 末步原样
+        self.assertEqual(
+            [(r.step_index, r.slot_id, r.invocation_id)
+             for r in outcome.transcript],
+            [(0, "a", "inv-a"), (1, "b", "inv-b"), (2, "c", "inv-c")])
+        for raw, prompt in zip(raws, ("step-0", "step-1", "step-2")):
+            self.assertEqual(len(raw.requests), 1)
+            self.assertEqual(raw.requests[0].prompt, prompt)
+
+    def test_request_passed_verbatim_zero_parsing(self):
+        sentinel = object()  # 不透明请求：编排不得解析/复制/改写
+        raw = _SpyRaw(result=_success())
+        group, journal, raw_map = make_group(raws=[raw])
+        pipeline = build_sequential_pipeline(
+            group, [StepSpec("a", lambda prev: sentinel)])
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.COMPLETED)
+        self.assertIs(raw.requests[0], sentinel)  # 同一对象身份
+
+    def test_same_slot_reuse_across_steps(self):
+        raw_a = _SpyRaw(result=_success())
+        raw_b = _SpyRaw(result=_success())
+        group, journal, raw_map = make_group(
+            slot_ids=("a", "b"), raws=[raw_a, raw_b])
+        steps = (StepSpec("a", _builder), StepSpec("b", _builder),
+                 StepSpec("a", _builder))
+        pipeline = build_sequential_pipeline(group, steps)
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.COMPLETED)
+        self.assertEqual(len(raw_a.entries), 2)  # 复用两次合法
+        self.assertEqual(len(raw_b.entries), 1)
+        self.assertEqual(
+            [(r.step_index, r.slot_id) for r in outcome.transcript],
+            [(0, "a"), (1, "b"), (2, "a")])
+
+
+class MidPipelineFailFastTests(unittest.TestCase):
+    """中步 fail-fast 矩阵（E3/E4/E5 于 step 1，共 3 步；零 retry）。"""
+
+    def _three_step_pipeline(self, raws, builder1=None):
+        group, journal, raw_map = make_group(
+            slot_ids=("a", "b", "c"), raws=raws)
+        builder2_calls = []
+
+        def b2(prev):
+            builder2_calls.append(prev)
+            return make_request("step-2")
+
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder),
+            StepSpec("b", builder1 or _builder),
+            StepSpec("c", b2)))
+        return pipeline, group, journal, raw_map, builder2_calls
+
+    def test_e5_at_step1_stops_rest(self):
+        failed = _failed()
+        raws = [_SpyRaw(result=_success()), _SpyRaw(result=failed),
+                _SpyRaw(result=_success())]
+        pipeline, group, journal, raw_map, builder2_calls = (
+            self._three_step_pipeline(raws))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.FAILED)
+        self.assertIs(outcome.final_result, failed)  # 失败结果原样
+        self.assertIsNone(outcome.error)
+        self.assertEqual(len(outcome.transcript), 2)  # 失败位置==len
+        self.assertIs(outcome.transcript[-1].status,
+                      InvocationStatus.FAILED)
+        self.assertEqual(raws[2].entries, [])  # 后续 slot 零进入
+        self.assertEqual(builder2_calls, [])  # 后续 builder 零调用
+        self.assertIsNone(outcome.run_state)  # 零 continuation
+
+    def test_e3_builder_exception_at_step1_stops_rest(self):
+        boom = ValueError("builder 1 crashed")
+        raws = [_SpyRaw(result=_success()), _SpyRaw(result=_success()),
+                _SpyRaw(result=_success())]
+        pipeline, group, journal, raw_map, builder2_calls = (
+            self._three_step_pipeline(raws, builder1=lambda prev: (
+                (_ for _ in ()).throw(boom))))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.FAILED)
+        self.assertIs(outcome.error, boom)  # 原异常对象
+        self.assertIsNone(outcome.final_result)
+        self.assertEqual(len(outcome.transcript), 1)  # 异常步不入册
+        self.assertEqual(raws[1].entries, [])  # 从未委托
+        self.assertEqual(raws[2].entries, [])
+        self.assertEqual(builder2_calls, [])
+        self.assertIsNone(outcome.run_state)
+
+    def test_e4_invoke_exception_at_step1_stops_rest(self):
+        boom = RuntimeError("slot b raw crashed")
+        raws = [_SpyRaw(result=_success()), _SpyRaw(raises=boom),
+                _SpyRaw(result=_success())]
+        pipeline, group, journal, raw_map, builder2_calls = (
+            self._three_step_pipeline(raws))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.FAILED)
+        self.assertIs(outcome.error, boom)
+        self.assertIsNone(outcome.final_result)
+        self.assertEqual(len(outcome.transcript), 1)
+        self.assertEqual(len(raws[1].entries), 1)  # 委托确实发生
+        self.assertEqual(raws[2].entries, [])
+        self.assertEqual(builder2_calls, [])
+        self.assertIsNone(outcome.run_state)
+
+
+class MidParkResumeTests(unittest.TestCase):
+    """中步停驻→精确续走（核心）+ 停驻窗修订经既有队列携带。"""
+
+    def test_park_at_step1_resume_exact_continuation(self):
+        results = [_success(), _success(), _success()]
+        raws = [_SpyRaw(result=results[0]), _SpyRaw(result=results[1]),
+                _SpyRaw(result=results[2])]
+        group, journal, raw_map = make_group(
+            slot_ids=("a", "b", "c"), raws=raws)
+        raws[0]._hook = submit_on_first(
+            group.boundary, lambda: pause_cmd("p-inflight"))
+        seen = []
+
+        def b1(prev):
+            seen.append(prev)
+            return make_request("step-1")
+
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", b1),
+            StepSpec("c", _builder)))
+        parked = pipeline.run()
+        self.assertIs(parked.status, RunStatus.PARKED)  # step1 admission
+        self.assertEqual(len(parked.transcript), 1)  # 恰 step 0
+        self.assertEqual(parked.run_state.next_step_index, 1)  # NEXT
+        self.assertIs(parked.run_state.previous_result, results[0])
+        self.assertEqual(seen, [])  # b1 尚未被调用
+        self.assertIsNone(parked.final_result)
+        self.assertIsNone(parked.error)
+        group.boundary.submit(ControlCommand(
+            command_id="r1", execution_id="exec-1",
+            command=ControlCommandType.RESUME))
+        resumed = pipeline.run(parked.run_state)
+        self.assertIs(resumed.status, RunStatus.COMPLETED)
+        self.assertIs(seen[0], results[0])  # 续走交接身份
+        self.assertIs(resumed.final_result, results[2])
+        self.assertEqual(len(resumed.transcript), 3)  # 跨续累积
+        self.assertEqual(len(raws[0].entries), 1)  # step 0 不重复执行
+        # 旧 continuation 值零改动；前缀为同对象（不可变累积）
+        self.assertEqual(len(parked.run_state.transcript), 1)
+        self.assertIs(resumed.transcript[0],
+                      parked.run_state.transcript[0])
+
+    def test_parked_revision_carried_via_existing_queue(self):
+        group, journal, raw_map = make_group(slot_ids=("a", "b", "c"))
+        raw_map["a"]._hook = submit_on_first(
+            group.boundary, lambda: pause_cmd("p1"))
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder),
+            StepSpec("b", lambda prev: make_request("step-1")),
+            StepSpec("c", lambda prev: make_request("step-2"))))
+        parked = pipeline.run()
+        self.assertIs(parked.status, RunStatus.PARKED)
+        self.assertEqual(raw_map["a"].requests[0], "request")  # 队列空时未携带
+        # 停驻窗内经唯一合法途径入队修订，再恢复
+        group.boundary.submit(revise_cmd(command_id="rv1",
+                                         text="REV-TEXT"))
+        group.boundary.submit(ControlCommand(
+            command_id="r1", execution_id="exec-1",
+            command=ControlCommandType.RESUME))
+        resumed = pipeline.run(parked.run_state)
+        self.assertIs(resumed.status, RunStatus.COMPLETED)
+        # step 1 与 step 2 的 prompt 均经既有 overlay 携带（不排干）
+        for slot, base in (("b", "step-1"), ("c", "step-2")):
+            prompt = raw_map[slot].requests[0].prompt
+            self.assertIn("[USER REVISION rv1]", prompt)
+            self.assertIn("REV-TEXT", prompt)
+            self.assertIn("[Obey all format rules above. END OF REVISION]",
+                          prompt)
+            self.assertTrue(prompt.startswith(base))  # 原 prompt 逐字在前
+        # 既有 seam 落 REVISION_APPLIED（每携带委托每 revision 一条）；
+        # 事实序列恰控制域产出——编排零自写、零确认类事实
+        fact_types = [fact.fact_type for fact in journal.snapshot()]
+        self.assertEqual(fact_types, [
+            ControlFactType.PAUSE_REQUESTED,
+            ControlFactType.REVISE_REQUESTED,
+            ControlFactType.RESUME_REQUESTED,
+            ControlFactType.REVISION_APPLIED,
+            ControlFactType.REVISION_APPLIED,
+        ])
+
+    def test_revision_between_steps_without_pause(self):
+        group, journal, raw_map = make_group(slot_ids=("a", "b"))
+        raw_map["a"]._hook = submit_on_first(
+            group.boundary, lambda: revise_cmd(command_id="rv9",
+                                               text="MID-REV"))
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", lambda prev: make_request("step-0")),
+            StepSpec("b", lambda prev: make_request("step-1"))))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.COMPLETED)
+        self.assertEqual(raw_map["a"].requests[0].prompt, "step-0")
+        prompt = raw_map["b"].requests[0].prompt  # 下一次委托自动携带
+        self.assertIn("[USER REVISION rv9]", prompt)
+        self.assertIn("MID-REV", prompt)
+
+
+class MidAbortTests(unittest.TestCase):
+    """中步 abort：在途自然完成→下一 admission 终止；admission 直裁。"""
+
+    def test_inflight_abort_step_completes_then_aborted(self):
+        results = [_success(), _success()]
+        raws = [_SpyRaw(result=results[0]), _SpyRaw(result=results[1]),
+                _SpyRaw(result=_success())]
+        group, journal, raw_map = make_group(
+            slot_ids=("a", "b", "c"), raws=raws)
+        raws[1]._hook = submit_on_first(
+            group.boundary, lambda: abort_cmd("a-inflight"))
+        builder2_calls = []
+
+        def b2(prev):
+            builder2_calls.append(prev)
+            return make_request("step-2")
+
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", _builder),
+            StepSpec("c", b2)))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.ABORTED)
+        self.assertIsNone(outcome.error)  # 控制信号不是 error
+        self.assertIsNone(outcome.final_result)
+        self.assertIsNone(outcome.run_state)  # 零 continuation
+        self.assertEqual(len(outcome.transcript), 2)  # 该步自然完成入册
+        self.assertEqual(raws[2].entries, [])  # 后续零执行
+        self.assertEqual(builder2_calls, [])
+
+    def test_parked_then_abort_supersedes_resume(self):
+        group, journal, raw_map = make_group(slot_ids=("a", "b"))
+        raw_map["a"]._hook = submit_on_first(
+            group.boundary, lambda: pause_cmd("p1"))
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", _builder)))
+        parked = pipeline.run()
+        self.assertIs(parked.status, RunStatus.PARKED)
+        group.boundary.submit(abort_cmd("a1"))  # 压过停驻
+        aborted = pipeline.run(parked.run_state)
+        self.assertIs(aborted.status, RunStatus.ABORTED)
+        self.assertEqual(len(aborted.transcript), 1)  # 已完成步保留
+        self.assertEqual(raw_map["b"].entries, [])  # 零新调用
+        self.assertIsNone(aborted.run_state)
+
+    def test_abort_writes_no_confirmation_facts(self):
+        group, journal, raw_map = make_group(slot_ids=("a", "b"))
+        group.boundary.submit(abort_cmd("a1"))
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", _builder)))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.ABORTED)
+        # 账本恰一条 ABORT_REQUESTED：零确认、零 superseded 事实
+        self.assertEqual([fact.fact_type for fact in journal.snapshot()],
+                         [ControlFactType.ABORT_REQUESTED])
+
+
+class TranscriptProjectionTests(unittest.TestCase):
+    """投影完整性：成功/失败步入册、异常步缺席、trace 缺席不伪造。"""
+
+    def test_projection_rules_mixed_run(self):
+        ok_result = _success(make_trace("inv-a"))
+        failed_result = _failed()  # trace 缺席
+        raws = [_SpyRaw(result=ok_result), _SpyRaw(result=failed_result),
+                _SpyRaw(result=_success())]
+        group, journal, raw_map = make_group(
+            slot_ids=("a", "b", "c"), raws=raws)
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", _builder),
+            StepSpec("c", _builder)))
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.FAILED)
+        records = outcome.transcript
+        self.assertIsInstance(records, tuple)  # immutable tuple
+        self.assertEqual(len(records), 2)  # 成功步+失败步；异常步缺席
+        self.assertEqual(records[0].invocation_id, "inv-a")  # 有 trace 投影
+        self.assertIsNone(records[1].invocation_id)  # 无 trace 不伪造
+        self.assertIs(records[1].status, InvocationStatus.FAILED)  # 原样
+        self.assertEqual(raws[2].entries, [])
+
+
+class FinalStateMatrixTests(unittest.TestCase):
+    """四终态收敛矩阵（run 级）+ next==len 收敛（第五态不存在）。"""
+
+    def test_completed_matrix(self):
+        result = _success()
+        group, journal, raw_map = make_group(raws=[_SpyRaw(result=result)])
+        pipeline = build_sequential_pipeline(
+            group, [StepSpec("a", _builder)])
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.COMPLETED)
+        self.assertIsNone(outcome.run_state)
+        self.assertIsNone(outcome.error)
+        self.assertIs(outcome.final_result, result)
+
+    def test_failed_e5_matrix(self):
+        failed = _failed()
+        group, journal, raw_map = make_group(raws=[_SpyRaw(result=failed)])
+        pipeline = build_sequential_pipeline(
+            group, [StepSpec("a", _builder)])
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.FAILED)
+        self.assertIsNone(outcome.run_state)
+        self.assertIsNone(outcome.error)
+        self.assertIs(outcome.final_result, failed)
+
+    def test_failed_e3_matrix(self):
+        boom = ValueError("boom")
+        group, journal, raw_map = make_group()
+        pipeline = build_sequential_pipeline(
+            group, [StepSpec("a", lambda prev: (
+                (_ for _ in ()).throw(boom)))])
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.FAILED)
+        self.assertIsNone(outcome.run_state)
+        self.assertIs(outcome.error, boom)
+        self.assertIsNone(outcome.final_result)
+
+    def test_aborted_matrix(self):
+        group, journal, raw_map = make_group()
+        group.boundary.submit(abort_cmd("a1"))
+        pipeline = build_sequential_pipeline(
+            group, [StepSpec("a", _builder)])
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.ABORTED)
+        self.assertIsNone(outcome.run_state)  # 零 continuation
+        self.assertIsNone(outcome.error)
+        self.assertIsNone(outcome.final_result)
+
+    def test_parked_matrix(self):
+        group, journal, raw_map = make_group()
+        group.boundary.submit(pause_cmd("p1"))
+        pipeline = build_sequential_pipeline(
+            group, [StepSpec("a", _builder)])
+        outcome = pipeline.run()
+        self.assertIs(outcome.status, RunStatus.PARKED)
+        self.assertIsNotNone(outcome.run_state)  # 唯一携带续走值的态
+        self.assertIsNone(outcome.final_result)
+        self.assertIsNone(outcome.error)
+
+    def test_convergence_next_equals_len_multi_step(self):
+        result = _success()
+        records = (StepRecord(0, "a", InvocationStatus.SUCCESS, None),
+                   StepRecord(1, "b", InvocationStatus.SUCCESS, None),
+                   StepRecord(2, "c", InvocationStatus.SUCCESS, None))
+        group, journal, raw_map = make_group(slot_ids=("a", "b", "c"))
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", _builder),
+            StepSpec("c", _builder)))
+        state = RunState(next_step_index=3, previous_result=result,
+                         transcript=records)
+        outcome = pipeline.run(state)
+        self.assertIs(outcome.status, RunStatus.COMPLETED)
+        self.assertIsNone(outcome.run_state)
+        self.assertIsNone(outcome.error)
+        self.assertIs(outcome.final_result, result)
+        self.assertEqual(outcome.transcript, records)  # 原样透传
+        for raw in raw_map.values():
+            self.assertEqual(raw.entries, [])  # 零新调用
+
+
+class TwoRunStateTests(unittest.TestCase):
+    """同管线双独立续走值：隔离推进 + 共享控制真值治理（零锁）。"""
+
+    def _parked_two_runs_at_step1(self):
+        """双 run 各自首走、均停驻于 step 1（共享 PAUSE 真值）。"""
+        raws = [_SpyRaw(result_factory=_success),
+                _SpyRaw(result=_success())]
+        group, journal, raw_map = make_group(slot_ids=("a", "b"),
+                                             raws=raws)
+        counter = [0]
+
+        def hook(_raw):  # 每次 invoke 提交新 PAUSE（唯一 command_id）
+            counter[0] += 1
+            group.boundary.submit(pause_cmd(f"p{counter[0]}"))
+
+        raws[0]._hook = hook
+        seen = []
+
+        def b1(prev):
+            seen.append(prev)
+            return make_request("step-1")
+
+        pipeline = build_sequential_pipeline(group, (
+            StepSpec("a", _builder), StepSpec("b", b1)))
+        parked_a = pipeline.run()  # run A 停驻 step 1
+        group.boundary.submit(ControlCommand(
+            command_id="r-a", execution_id="exec-1",
+            command=ControlCommandType.RESUME))
+        parked_b = pipeline.run()  # run B 独立首走、亦停驻
+        group.boundary.submit(ControlCommand(
+            command_id="r-b", execution_id="exec-1",
+            command=ControlCommandType.RESUME))
+        return (pipeline, group, journal, raw_map, seen,
+                parked_a, parked_b)
+
+    def test_two_runstates_isolated_continuation(self):
+        (pipeline, group, journal, raw_map, seen,
+         parked_a, parked_b) = self._parked_two_runs_at_step1()
+        self.assertIs(parked_a.status, RunStatus.PARKED)
+        self.assertIs(parked_b.status, RunStatus.PARKED)
+        # 各自 previous_result 互异且归属正确（无共享 mutable 状态）
+        prev_a = parked_a.run_state.previous_result
+        prev_b = parked_b.run_state.previous_result
+        self.assertIsNot(prev_a, prev_b)
+        final_a = pipeline.run(parked_a.run_state)
+        final_b = pipeline.run(parked_b.run_state)
+        self.assertIs(final_a.status, RunStatus.COMPLETED)
+        self.assertIs(final_b.status, RunStatus.COMPLETED)
+        self.assertIs(seen[0], prev_a)  # 交接身份各自正确
+        self.assertIs(seen[1], prev_b)
+        # transcript 隔离：前缀同对象且互不串线
+        self.assertIs(final_a.transcript[0],
+                      parked_a.run_state.transcript[0])
+        self.assertIsNot(final_a.transcript[0],
+                         final_b.transcript[0])
+        self.assertEqual(len(raw_map["a"].entries), 2)  # 各自 step 0
+        self.assertEqual(len(raw_map["b"].entries), 2)  # 各自 step 1
+
+    def test_shared_abort_terminates_both_continuations(self):
+        (pipeline, group, journal, raw_map, seen,
+         parked_a, parked_b) = self._parked_two_runs_at_step1()
+        group.boundary.submit(abort_cmd("a-both"))  # 共享真值治理
+        for parked in (parked_a, parked_b):
+            outcome = pipeline.run(parked.run_state)
+            self.assertIs(outcome.status, RunStatus.ABORTED)
+            self.assertIsNone(outcome.run_state)
+        self.assertEqual(raw_map["b"].entries, [])  # 双双零新调用
+        self.assertEqual(seen, [])
+
+    def test_shared_revision_hits_both_next_invocations(self):
+        (pipeline, group, journal, raw_map, seen,
+         parked_a, parked_b) = self._parked_two_runs_at_step1()
+        group.boundary.submit(revise_cmd(command_id="rv-shared",
+                                         text="SHARED-REV"))
+        final_a = pipeline.run(parked_a.run_state)
+        final_b = pipeline.run(parked_b.run_state)
+        self.assertIs(final_a.status, RunStatus.COMPLETED)
+        self.assertIs(final_b.status, RunStatus.COMPLETED)
+        prompts = [raw_map["b"].requests[0].prompt,
+                   raw_map["b"].requests[1].prompt]
+        for prompt in prompts:  # 双 run 的下一次 invocation 均命中
+            self.assertIn("[USER REVISION rv-shared]", prompt)
+            self.assertIn("SHARED-REV", prompt)
+        fact_types = [fact.fact_type for fact in journal.snapshot()]
+        self.assertEqual(fact_types.count(ControlFactType.REVISION_APPLIED),
+                         2)  # 每携带委托一条
+
+
+class FrozenSurfaceGuardTests(unittest.TestCase):
+    """冻结面活守卫：相邻组合件公开面原样（零修改的可执行证明）。"""
+
+    def test_execution_slots_surface_unchanged(self):
+        import execution_slots as execution_slots_module
+        self.assertEqual(execution_slots_module.__all__,
+                         ("ExecutionSlotSpec", "ExecutionSlots",
+                          "SlotHandle", "build_execution_slots"))
+
+    def test_wrap_stack_surface_unchanged(self):
+        import wrap_stack as wrap_stack_module
+        self.assertEqual(wrap_stack_module.__all__,
+                         ("WrapStack", "build_wrap_stack"))
 
 
 if __name__ == "__main__":
