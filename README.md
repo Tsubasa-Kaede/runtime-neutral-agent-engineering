@@ -1,4 +1,4 @@
-# Runtime-Neutral Agent Engineering
+# dual-agent
 
 [![CI](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dual-agent-development.svg)](https://pypi.org/project/dual-agent-development/)
@@ -7,80 +7,65 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **Discover capabilities. Verify execution. Control collaboration.**
+> A verified orchestration layer over coding-agent CLIs — your agents work with receipts.
 
-Runtime-Neutral Agent Engineering is the engineering layer between agents and
-the runtimes they depend on. It discovers coding-agent CLIs, validates what
-they can actually prove, admits them to a verified pool, and orchestrates
-their work under explicit budgets and loop protection.
+**简体中文 → [README.zh-CN.md](README.zh-CN.md)**
 
-**Agent runtime ≠ agent orchestration.** Runtimes execute; this project
-engineers the layer above them. It is **not** a chatbot, a model provider, a
-single-runtime wrapper, a remote agent network, an A2A implementation, a
-distributed execution platform, or a multi-agent network.
+`dual-agent` is an engineering layer between your application and the coding-agent
+CLIs it drives (Claude Code, Codex CLI, Gemini CLI, …). It discovers what is
+installed, verifies what each runtime can actually prove, admits it to a
+verified pool, and orchestrates architect → coder → tester → reviewer work
+under explicit budgets and loop protection — with provenance on every result.
 
-What it does provide today: **Remote Collaboration across a real process
-boundary** — you declare an agent (identity, role, runtime binding), compose
-a remote session with one call, and exchange verified task packets with an
-agent running in its own process, on your machine, under the same
-contract-first discipline as the local pipeline. See
-[Remote Collaboration (V3.1)](#remote-collaboration-v31).
+**Agent runtime ≠ agent orchestration.** Runtimes execute; this project engineers
+the layer above them. It is not a chatbot, a model provider, a single-runtime
+wrapper, or a distributed agent network. No network transport, no credentials
+touched, zero runtime dependencies (pure standard library).
 
-**Agent runtime support today:** ✅ Claude Code CLI — implemented + REAL-verified · ✅ Codex CLI, Pi — REAL-verified in the audited multi-runtime four-stage E2E · ⚠️ Gemini CLI, Qwen Code, OpenCode, Cline, tiny-agents — adapter implemented, offline-tested (not REAL-verified in this repository). Details in [Agent Runtime Support](#agent-runtime-support).
+> Name map: GitHub repository `runtime-neutral-agent-engineering` · PyPI
+> distribution `dual-agent-development` · import `dual_agent` · console
+> script `dual-agent`. One product, one version truth (`dual_agent.__version__`).
 
-## What's new
+## Try it in 30 seconds — offline, zero credentials
 
-**Multi-Agent Collaboration Cockpit (V3.2)** — a fixed sequential
-multi-agent collaboration entry built on the new V3.2 stack:
+No runtime, no login, no API key, no network. A fresh clone is enough:
 
-- `dual-agent cockpit TASK --step ROLE=RUNTIME_ID [--step ...]` — declare
-  the collaboration steps in execution order. Every referenced runtime
-  must hold persisted `VERIFIED` qualification evidence; the cockpit
-  never qualifies implicitly and accepts no qualifier.
-- Runtime-neutral composition — zero runtime-name branches, zero packet
-  parsing: the prior step's plain-text output is embedded (truncated)
-  into the next step's prompt, nothing more.
-- Honest delivery states — exit `0` COMPLETED / `2` FAILED or user
-  error / `3` ABORTED / `4` PARKED; stdout carries exactly one machine
-  JSON line, human diagnostics go to stderr.
-- Architecture layers beneath the entry: control (intent adjudication
-  with an idempotent command journal), observation (three-state honest
-  usage), revision (FIFO revision journal), and sequential orchestration
-  (deterministic step order, fail-fast, zero-state pipeline).
-- The full entry contract is offline-tested — parsing, runtime
-  resolution, composition, delivery, exit codes, and architecture
-  guards (`tests/test_cockpit_entry.py`).
+```bash
+git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
+cd runtime-neutral-agent-engineering
+python examples/offline_mock_run.py
+```
 
-Previously (V3.1) — Remote Collaboration: declared agents collaborate
-across a real process boundary: declare an agent (identity + role +
-runtime binding) → compose a remote session → send a task packet →
-receive the result packet. One honest round trip per interaction,
-verified end-to-end with the real Claude CLI. Offline demo (no runtime,
-no login): `python examples/remote_offline_demo.py`; with the Claude
-Code CLI installed and logged in, `examples/remote_real_claude.py` runs
-the same flow against a real provider. Details in
-[Remote Collaboration (V3.1)](#remote-collaboration-v31).
+Expected output — one closed, secret-free JSON summary:
 
-Previously: the installed CLI became a self-contained product —
-`dual-agent qualify` (gated G1–G14 qualification, persisted `VERIFIED` +
-`REAL` evidence), `dual-agent run` / `run --observe` (reads persisted
-evidence only, never auto-qualifies), stable exit codes with
-stdout-machine-JSON / stderr-human-diagnostics, `python -m dual_agent`, and
-product-only packaging.
+```json
+{"path": "FOUR_STAGE", "status": "SUCCESS", "stages": ["architect", "coder", "tester", "reviewer"], ...}
+```
 
-**Contents:** [What's new](#whats-new) · [Overview](#overview) · [Why](#why) · [Quick Start](#quick-start) · [Integration](#integration) · [Agent Runtime Support](#agent-runtime-support) · [Agent Runtime Ecosystem](#agent-runtime-ecosystem) · [Installation](#installation) · [Configuration](#configuration) · [Core Concepts](#core-concepts) · [Architecture](#architecture) · [Modes](#modes) · [Agent Collaboration](#agent-collaboration) · [Remote Collaboration (V3.1)](#remote-collaboration-v31) · [Extending Runtime](#extending-runtime) · [Security](#security) · [Testing](#testing) · [Verification Status](#verification-status) · [Release](#release) · [Limitations](#limitations) · [Contributing](#contributing) · [License](#license)
+This runs the real production facade end to end with mock adapters — the same
+engine, honestly labeled `OFFLINE`. Terminal demo GIF (render once with
+[`vhs assets/demo.tape`](assets/demo.tape)):
 
-## Overview
+<!-- [![dual-agent terminal demo](assets/demo.gif)](assets/demo.tape) -->
 
-**What** — a runtime-neutral agent engineering and orchestration layer that
-sits between your application and the coding-agent CLIs it drives.
+## Install
 
-**Why** — orchestration logic keeps getting hard-coupled to one runtime.
-This layer decouples the two: your application talks to the engine, and the
-engine discovers, verifies, and orchestrates whatever runtime you plug in
-through the adapter contract. Your code never binds to Claude Code or any
-other runtime by name.
+Python >= 3.10, zero runtime dependencies, no clone needed:
 
-**What it does** — the layer provides:
+```bash
+pip install dual-agent-development
+dual-agent --version
+
+# or run without installing (uv):
+uvx --from dual-agent-development dual-agent --version
+```
+
+Other ways in: editable install (`pip install -e .` from a checkout) or the
+one-command bootstrap (`python scripts/bootstrap.py` — installs this project
+only, never touches runtimes, secrets, or system config). Examples like the
+offline demo ship with the repository, not the wheel.
+
+## What it does
 
 - **Runtime Discovery** — is a runtime present at all?
 - **Runtime Validation** — gated qualification runs (G1–G14) producing real evidence
@@ -89,504 +74,79 @@ other runtime by name.
 - **Structured Collaboration** — validated packets over an append-only ledger
 - **Budget Control** — invocation slots reserved before every call
 - **LoopGuard** — duplicate / repeated-failure / cycle protection before spend
-- **Provenance** — every validation result carries OFFLINE or REAL evidence
+- **Provenance** — every validation result carries `OFFLINE` or `REAL` evidence
 - **Security Boundary** — no-secrets contract, content scanning, protected paths
 
-**Product flow** — one local product entry, two strictly separated commands:
+## Three ways to use it
 
-```text
-dual-agent qualify   Discovery → Health → gated G1–G14 Qualification
-                     → VERIFIED+REAL Evidence persisted to disk
-dual-agent run       Verified Runtime selection → four-stage execution
-                     (architect → coder → tester → reviewer) → Collaboration
-                     packets over the ledger → closed JSON summary
-dual-agent run --observe   + execution observation events streamed to stderr
-```
+**1. Cross-runtime second opinion.** You live in Claude Code but want Codex CLI
+or Gemini CLI on the same task. Adapters normalize every runtime to one
+contract, so the four-stage pipeline runs over whatever you qualified — your
+orchestration code never names a vendor.
 
-`run` reads persisted evidence and never automatically qualifies; `qualify`
-is the only command that performs qualification. See [Modes](#modes).
+**2. Agent work with receipts.** You need to know the work was bounded and
+verified, not just told it succeeded. Every invocation is budgeted before it
+happens, LoopGuard rejects duplicates and cycles before any spend, the ledger
+is append-only, and every result carries provenance — `REAL` only with
+real-call evidence, `OFFLINE` honestly labeled otherwise. No silent fallbacks,
+no fabricated success words.
 
-**What it supports** — support is reported at two strictly separated
-levels: **REAL VERIFIED** · **adapter implemented**. The
-[Agent Runtime Support](#agent-runtime-support) section defines each level,
-and [Agent Runtime Ecosystem](#agent-runtime-ecosystem) lists the runtimes
-with actual integration evidence in this repository.
+**3. Vendor-neutral agent tooling.** You are building a tool and refuse to
+couple it to one runtime. Implement the six-method `ExternalAgentAdapter`
+contract and your runtime plugs into discovery, qualification, and
+orchestration without touching the engine.
 
-**Current Runtime Integration**
-
-- 3 REAL VERIFIED — Claude Code CLI, Codex CLI, Pi (audited multi-runtime
-  four-stage E2E, 2026-09)
-- 5 adapter-level — Gemini CLI, Qwen Code, OpenCode, Cline, tiny-agents
-- + more via the `ExternalAgentAdapter` contract
-
-These counts describe this repository's integrations, not the size of the
-agent ecosystem.
-
-## Why
-
-| Problem | How this project addresses it |
-|---|---|
-| Orchestration logic coupled to one specific runtime | Runtime-neutral engine core; runtimes plug in through an adapter contract. No runtime, provider, or model name is hard-coded in the engine |
-| Runtime state is opaque — installed? logged in? working? | Discovery and Health are explicit, structured checks with closed state vocabularies |
-| Capability and health get conflated | Health (READY) and capability (proven evidence) are separate layers; neither implies the other |
-| Multi-agent collaboration lacks structured contracts | Stages exchange typed packets through a protocol contract and an append-only ledger — never raw model output |
-| Real verification is unclear or claimed without evidence | Provenance is enforced: the runner refuses to grant REAL without real-call evidence; Offline validation is not REAL validation |
-| Agent calls have no unified budget | TaskBudget spans one task lifecycle with reserve-before-invoke semantics |
-| Multi-stage work lacks loop protection | LoopGuard pre-checks duplicates, repeated failures, and cycles before any spend |
-| Runtime-specific logic pollutes the orchestration layer | Adapters own all runtime specifics; the orchestrator only sees the adapter protocol |
-
-## Quick Start
-
-Install the published package from PyPI — Python >= 3.10, zero runtime
-dependencies, no clone needed:
+## Two commands, strictly separated
 
 ```bash
-pip install dual-agent-development==2.4.0
-dual-agent --version
-dual-agent --help
-```
-
-> Name map: the GitHub repository is `runtime-neutral-agent-engineering`;
-> the PyPI distribution is `dual-agent-development` (import `dual_agent`,
-> console script `dual-agent`).
-
-First real run — qualify once, then run tasks (both commands are part of
-the installed CLI; no source checkout needed):
-
-```bash
-dual-agent qualify                                       # gated G1–G14 qualification; persists VERIFIED+REAL evidence
-dual-agent run "Add a slug helper and its test"          # reads persisted evidence
+dual-agent qualify                                        # the ONLY command that qualifies
+dual-agent run "Add a slug helper and its test"           # reads persisted evidence
 dual-agent run --observe "Add a slug helper and its test" # + execution events on stderr
 ```
 
-`qualify` streams per-invocation progress for its real model calls
-(G5 plus the four G14 experiments) to stderr, so long waits are visible;
-each call defaults to a 300-second bound, overridable with
-`--timeout-seconds <seconds>`.
+- `qualify` runs the gated G1–G14 qualification over discovered runtimes and
+  persists `VERIFIED` + `REAL` evidence under `~/.dual-agent/qualification/`.
+  Real model calls require `RUN_REAL_PROVIDER_TESTS=1`; Offline results are
+  reported honestly and never persisted — Offline validation is not REAL
+  validation. Per-call progress streams to stderr; each call defaults to a
+  300-second bound (`--timeout-seconds`).
+- `run` only reads persisted evidence. With no evidence it exits `2` with a
+  machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) — it never
+  auto-qualifies and never falls back.
 
-On a machine with no persisted evidence, `run` exits `2` with a
-machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) and a human hint
-pointing at `dual-agent qualify` — it never automatically qualifies and
-never falls back to offline execution. REAL qualification requires
-`RUN_REAL_PROVIDER_TESTS=1`; offline qualification results are reported
-honestly and are never persisted.
+Modes (`--mode`): `OFF` returns the delegated empty result — never silently
+runs; `AUTO` (default) classifies the task and routes SIMPLE/MEDIUM to the
+single-agent path, COMPLEX to the dual-agent path; `ON` forces the dual-agent
+path. Embedding applications can inject a pre-configured facade directly
+(`cli.main._facade = my_facade`).
 
-Or try it in 30 seconds from a fresh clone — offline, no runtime, login, or
-configuration needed:
+**Multi-Agent Collaboration Cockpit (V3.2)** — `dual-agent cockpit TASK --step
+ROLE=RUNTIME_ID [--step ...]` composes a fixed sequential multi-agent run;
+every referenced runtime must hold persisted `VERIFIED` qualification
+evidence. Exit contract: `0` COMPLETED / `2` FAILED or user error / `3`
+ABORTED / `4` PARKED; exactly one machine JSON line on stdout, human
+diagnostics on stderr.
 
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-python examples/offline_mock_run.py
-```
+## Why not CrewAI / AutoGen / LangGraph?
 
-Expected output — a closed, secret-free JSON summary:
+They are strong tools for building LLM-chaining applications. This project
+solves a different problem — engineering discipline over **coding-agent CLIs**
+that already exist on your machine:
 
-```json
-{"path": "FOUR_STAGE", "status": "SUCCESS", "stages": ["architect","coder","tester","reviewer"], ...}
-```
-
-### Remote Collaboration in 30 seconds
-
-Same clone, still offline — one declared agent, one real process boundary,
-one task packet round trip:
-
-```bash
-python examples/remote_offline_demo.py
-```
-
-Expected output — a closed JSON summary naming the composed agent, the
-derived remote address, and the packet it produced (scripted adapter,
-clearly labeled as an offline demonstration). With the Claude Code CLI
-installed and logged in, `examples/remote_real_claude.py` performs the same
-exchange with a real provider. See
-[Remote Collaboration (V3.1)](#remote-collaboration-v31).
-
-> Examples are **repository examples**: they come with a source checkout
-> and are not included in the wheel or `site-packages`. `pip install`
-> gives you the package and the `dual-agent` CLI; running the examples
-> requires a clone of this repository.
-
-To run real tasks through the CLI, see [Installation](#installation)
-(environment setup) and [Modes](#modes) (CLI usage).
-To connect a real runtime or your own application, see
-[Integration](#integration).
-
-## Integration
-
-Three on-ramps, from a 30-second offline taste to a real application.
-
-### How it fits
-
-```text
-User Application
-      ↓
-Host / Facade  (ProductionFacade via host.py)
-      ↓
-Runtime Discovery  →  Runtime Health  →  G1–G14 Qualification (gated)
-      ↓
-Verified Runtime Pool  (VERIFIED + REAL evidence only)
-      ↓
-Orchestration  (Budget reserve + LoopGuard before every invoke)
-      ↓                                  ↓
-Claude Code CLI                  Your runtime adapter
-(verified integration)           (implement ExternalAgentAdapter)
-```
-
-The agent runtime is an **external dependency**, never a component of this
-project: the engine discovers, verifies, and orchestrates; the runtime
-executes.
-
-### Try Offline
-
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-python examples/offline_mock_run.py
-```
-
-- No runtime, no login, no credentials, no network
-- Runs the real ProductionFacade end to end with mock adapters
-- Prints one closed, secret-free JSON summary
-
-### Run with Claude Code
-
-`RUN_REAL_PROVIDER_TESTS=1` is a safety gate, not a test-only switch: real
-runtime health checks and real invocations — in the gated tests and in
-`minimal_host_app.py` alike — run only when it is explicitly set in the
-environment. It exists so a real call can never happen by accident; do not
-bypass or hard-code it.
-
-```bash
-# Windows (cmd)
-set RUN_REAL_PROVIDER_TESTS=1
-python examples/minimal_host_app.py "Add a slug helper and its test"
-
-# Windows (PowerShell)
-$env:RUN_REAL_PROVIDER_TESTS="1"
-python examples/minimal_host_app.py "Add a slug helper and its test"
-
-# macOS / Linux
-RUN_REAL_PROVIDER_TESTS=1 python examples/minimal_host_app.py "Add a slug helper and its test"
-```
-
-The first run performs the gated G1–G14 qualification (several minutes)
-and admits the runtime to the Verified Runtime Pool; that qualification
-evidence is then reused across tasks instead of re-running per task. The
-example fails honestly — non-zero exit, one-line reason — when the CLI is
-absent, not logged in, or fails qualification. It never falls back to
-mock or offline execution.
-
-### Responsibility Boundary
-
-| Responsibility | Scope | Execution Boundary |
+| | Typical orchestration frameworks | dual-agent |
 |---|---|---|
-| Claude Code installation and authentication | Claude Code CLI installation, authentication, and PATH availability | External to this project |
-| REAL runtime opt-in | Setting `RUN_REAL_PROVIDER_TESTS=1` when REAL tests are intentionally executed | Explicitly controlled outside the project |
-| Protected-path declaration | Paths required by the G13 protection gate | Declared by the execution environment |
-| Runtime qualification and orchestration | Discovery, health checks, G1–G14 qualification, Verified Pool admission, orchestration, budget enforcement, and LoopGuard | Handled by the project |
-| Credentials and runtime configuration | API keys, login/logout, and runtime configuration | Not accessed or managed by the project |
-
-The project does not install, authenticate, or manage Claude Code or its
-credentials. It invokes an already installed and configured runtime through
-the `ExternalAgentAdapter` contract.
-
-### REAL Runtime Usage
-
-The currently REAL-verified runtime is Claude Code CLI. The user installs and
-authenticates Claude Code through its own tooling; this project invokes the
-already configured runtime through the `ExternalAgentAdapter` contract. This
-project never installs or logs in to Claude Code, never manages its
-credentials, and never modifies its runtime configuration.
-
-The REAL dual-agent collaboration fact base (one REAL-verified runtime —
-not two runtimes):
-
-- two role-qualified agent invocations (architect and coder)
-- Architect → `CollaborationPacket` → transport → Coder → reply
-- `provenance=REAL` on both envelopes
-- one shared `correlation_id` across both legs
-- delivery receipts `DELIVERED` in both directions
-- no fallback and no mock standing in for REAL
-
-### Integrate into Your Application
-
-The same chain as a library (runnable file:
-[`examples/minimal_host_app.py`](examples/minimal_host_app.py)):
-
-```python
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "dual-agent-development" / "scripts"))
-
-from claude_code_adapter import ClaudeCodeAdapter
-from generic_runtime_health import GenericRuntimeHealth
-from host import build_facade_from_bootstrap
-from mode_gate import Mode
-from real_validation_executor import run_real_validation
-from runtime_adapter_registry import (
-    AdapterDescriptor, AdapterRegistry, discovery_sources)
-from runtime_discovery import RuntimeCandidateDiscovery
-
-adapter = ClaudeCodeAdapter.from_environment()   # None when not installed
-if adapter is None:
-    raise SystemExit("Claude Code CLI not found on PATH")
-
-registry = AdapterRegistry()
-registry.register(AdapterDescriptor(
-    runtime_id="claude-cli", provider_id="anthropic", model_id=None,
-    runtime_type="coding-agent", display_name="Claude Code",
-    adapter_factory=lambda: adapter, config_fingerprint="installed"))
-
-def qualify(instance):
-    validation, _ = run_real_validation(
-        instance, instance.probe, timeout_seconds=300.0,
-        protected_paths=(Path.home() / ".claude" / ".credentials.json",))
-    return validation
-
-health = {}
-for candidate in RuntimeCandidateDiscovery(
-        discovery_sources(registry)).discover_all():
-    if candidate.available:
-        item = registry.get(candidate.runtime_id)
-        checked = GenericRuntimeHealth().check(candidate, item.adapter_factory())
-        health[candidate.runtime_id] = checked.status
-
-facade = build_facade_from_bootstrap(
-    registry, qualifier=qualify, current_health=health)
-result = facade.run(task_id="my-task", task=task, prompt=task, mode=Mode.ON)
-```
-
-`facade.run` omits `provenance` on purpose: the HostFacade labels every run
-from the qualification evidence, so a real run can never be mislabeled
-OFFLINE at the CLI seam. To drive the same facade from the `dual-agent`
-CLI, inject it — `cli.main._facade = facade` — see [Modes](#modes).
-
-For any other runtime, implement the six-method adapter contract — see
-[Extending Runtime](#extending-runtime).
-
-## Agent Runtime Support
-
-This project does **not** bundle, replace, or depend on a specific agent
-runtime. It integrates with external coding-agent CLIs through adapters,
-and support is reported at two strictly separated levels:
-
-- **REAL VERIFIED** — an adapter ships in this repository, discovery works,
-  offline tests cover it, and a gated REAL qualification run produced
-  `VERIFIED` + `REAL` evidence with Verified Runtime Pool admission.
-- **Adapter implemented** — an adapter ships and is covered by offline
-  tests, but no REAL qualification run has ever been performed for it.
-  Adapter implemented, but not REAL-verified.
-
-### Runtime Compatibility Matrix
-
-| Agent Runtime / Tool | Adapter | Discovery | Offline Tests | REAL Verification |
-|---|---|---|---|---|
-| Claude Code CLI | `claude_code_adapter.py` | `claude` executable available on PATH | ✅ `tests/test_claude_health.py` | ✅ REAL VERIFIED — Discovery → Health → G1–G14 qualification → Verified Pool admission → REAL dual-agent collaboration (v2.1.227) |
-| Codex CLI | `codex_adapter.py` | `codex` executable available on PATH | ✅ `tests/test_codex_adapter.py` | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
-| Pi | `pi_adapter.py` | `pi` executable available on PATH | ✅ `tests/test_pi_adapter.py` | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
-| Gemini CLI | `gemini_adapter.py` | `gemini` executable available on PATH | ✅ `tests/test_gemini_adapter.py` | ❌ Not run on the reference machine (no `gemini` installed); gated REAL test assets ship in the suite |
-| Qwen Code | `qwen_adapter.py` | `qwen` executable available on PATH | ✅ `tests/test_qwen_adapter.py` | ❌ Not performed |
-| OpenCode | `opencode_adapter.py` | `opencode` executable available on PATH | ✅ `tests/test_opencode_adapter.py` | ❌ Not performed |
-| Cline | `cline_adapter.py` | `cline` executable available on PATH | ✅ `tests/test_cline_adapter.py` | ❌ Not performed |
-| tiny-agents | `tiny_agents_adapter.py` | Runtime entry provided by `TINY_AGENTS_AGENT_PATH` / `TINY_AGENTS_COMMAND` | ✅ `tests/test_tiny_agents_adapter.py` | ❌ Not performed |
-
-### What "Supported" Means
-
-Support is reported at exactly two levels:
-
-- **REAL VERIFIED** — an adapter is implemented and has passed real runtime
-  qualification / REAL verification.
-- **Adapter implemented** — an adapter is implemented and covered by
-  offline tests, but REAL runtime verification has not been performed.
-
-Treat an adapter-implemented runtime as unverified until you run a REAL
-qualification in your own environment.
-
-### Which runtime should I use?
-
-| If you use… | Do this |
-|---|---|
-| Claude Code CLI | Supported today (REAL VERIFIED) — [Integration](#integration) → "Run with Claude Code" |
-| Codex CLI / Pi | REAL VERIFIED in the audited multi-runtime E2E — install the CLI yourself, log in through its own flow, then `dual-agent qualify` in your environment |
-| Gemini CLI / Qwen Code / OpenCode / Cline | Adapter is ready: install the CLI yourself, log in through its own flow, then REAL-verify it in your environment before production use |
-| tiny-agents | Adapter is ready: install the executable, set both `TINY_AGENTS_*` variables, then REAL-verify it in your environment before production use |
-| Your own CLI or runtime | Implement the six-method `ExternalAgentAdapter` contract; the orchestrator never needs modification |
-
-### Current Support Boundary
-
-Three runtimes — Claude Code CLI, Codex CLI, and Pi — hold REAL-proven
-capability evidence in this repository (Claude Code individually and in
-the audited multi-runtime four-stage E2E). Nothing else is supported in
-the verified sense, and the boundary is enforced by the engine itself: no
-admission without `VERIFIED` + `REAL` evidence, and no fallback to weaker
-paths.
-
-## Agent Runtime Ecosystem
-
-This section lists the runtimes that currently have actual integration
-evidence in this repository — a shipped adapter and, where stated, REAL
-verification. It makes no claim about tools not listed here.
-
-| Tool / Runtime | Category | Integration Status |
-|---|---|---|
-| Claude Code CLI | Coding Agent CLI | **REAL VERIFIED** |
-| Codex CLI | Coding Agent CLI | **REAL VERIFIED** (multi-runtime four-stage E2E, 2026-09 audit) |
-| Pi | Coding Agent CLI | **REAL VERIFIED** (multi-runtime four-stage E2E, 2026-09 audit) |
-| Gemini CLI | Coding Agent CLI | **Adapter implemented** |
-| Qwen Code | Coding Agent CLI | **Adapter implemented** |
-| OpenCode | Multi-provider coding agent harness | **Adapter implemented** |
-| Cline | Coding Agent CLI | **Adapter implemented** |
-| tiny-agents (Hugging Face) | Minimal Agent Runtime | **Adapter implemented** |
-
-The "Integration Status" column uses two fixed values: **REAL VERIFIED**
-and **Adapter implemented**. Gemini CLI, Qwen Code, OpenCode, Cline, and
-tiny-agents are adapter-implemented, but not REAL-verified.
-
-## Installation
-
-Python 3.10+ (3.10 / 3.11 / 3.12 tested in CI). The engine is pure standard
-library with zero runtime dependencies. Published on PyPI as
-**`dual-agent-development`** — install from the registry or from source:
-
-### Option 1 — Install from PyPI (recommended)
-
-The published distribution — no clone, no build step:
-
-```bash
-pip install dual-agent-development==2.4.0
-```
-
-- Distribution [`dual-agent-development` on PyPI](https://pypi.org/project/dual-agent-development/) — note the GitHub repository name (`runtime-neutral-agent-engineering`) and the PyPI package name are different
-- Installs the `dual_agent` package, the `dual-agent` console script, and the skill assets (`SKILL.md`, references, templates, agents, examples)
-- Python >= 3.10, zero runtime dependencies; `dual-agent --version` verifies the install
-
-### Option 2 — Clone and Run
-
-The fastest first taste: nothing is installed, and the example runs
-straight from the checkout.
-
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-python examples/offline_mock_run.py
-```
-
-- Python 3.10+ is the only prerequisite
-- No agent runtime required, no login, no credentials, no network
-- No package installation for the offline example
-
-### Option 3 — Editable Installation
-
-The regular development setup:
-
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-python -m venv .venv
-
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS / Linux
-
-python -m pip install -e .
-dual-agent --version
-```
-
-This installs the `dual_agent` package (mapped from
-`dual-agent-development/scripts/`), the `dual-agent` console script, and
-the skill assets (`SKILL.md`, references, templates, agents, examples).
-For development on the engine itself, `pip install -e .` from a checkout
-is the editable equivalent of the PyPI install.
-
-### Option 4 — One-command Bootstrap
-
-```bash
-python scripts/bootstrap.py
-```
-
-The bootstrap creates (or reuses) `.venv`, installs this project into it,
-and prints the next steps. It installs **this project only**: it never
-installs or logs into a third-party agent runtime, never reads secrets or
-`.env` files, and never modifies system-level configuration, `PATH`, or
-shell profiles. `--check` runs a no-side-effect preflight (Python version
-and repository layout — no files created, no network used):
-
-```bash
-python scripts/bootstrap.py --check
-```
-
-### Install with an AI Coding Agent
-
-You can hand the setup to a user-side coding agent (Claude Code, Codex
-CLI, Gemini CLI, Cursor, Cline, ...) with a prompt like:
-
-> Clone this repository, inspect its README installation instructions,
-> create the recommended Python environment, and install this project
-> only. Then run `dual-agent --version` and the offline smoke example,
-> and report the result. Do not install any third-party Agent Runtime.
-> Do not read or configure API keys, secrets, or credentials, and do not
-> log in to or out of any service. Do not modify system-level
-> configuration.
-
-This is user-side assistance — not a dependency of this project, and not
-a statement that these agents are integrated or verified by it.
-
-## Configuration
-
-### Runtime Configuration
-
-No project-specific runtime configuration file is required. The engine
-reads environment variables when the corresponding runtime integration
-uses them.
-
-| Variable | Purpose |
-|---|---|
-| `RUN_REAL_PROVIDER_TESTS` | Enables gated REAL runtime tests when set to `1` |
-| `TINY_AGENTS_AGENT_PATH` | Path to the tiny-agents agent executable or configuration |
-| `TINY_AGENTS_COMMAND` | Command used to invoke the configured tiny-agents agent |
-
-These variables are optional. They are not required for the core engine or
-for the currently verified Claude Code path.
-
-Runtime prerequisites (runtime-level, not dependencies of this package):
-
-| Runtime | Prerequisite |
-|---|---|
-| Claude Code CLI | `claude` on PATH, logged in through its own flow (the CLI itself requires Node.js) |
-| Codex CLI | `codex` on PATH, logged in through its own flow |
-| tiny-agents | Executable + both environment variables above |
-
-Additional behavior is set through constructor parameters, not environment:
-mode is a CLI flag (`--mode`), and health-check timeouts are parameters
-(discovery checks use 10 s; the minimal health check is capped at 30 s).
-
-**Secrets:** never put API keys or tokens in the repository, in examples, or
-in committed environment files. The engine never reads, stores, prints, or
-modifies credentials; runtime authentication belongs to the runtime, not to
-this layer.
-
-## Core Concepts
-
-| Concept | Meaning |
-|---|---|
-| Runtime Discovery | Does the runtime exist? (`DISCOVERED` / `NOT_FOUND`) |
-| Runtime Health | Is it usable right now? (`READY` / `AUTH_REQUIRED` / `UNAVAILABLE` / `ERROR`) |
-| Agent Capability | What a runtime has *proven* it can do (architecture, coding, testing, review) — built only from gate evidence, never from declarations |
-| Candidate Validation | The gated qualification run (G1–G14) over a runtime candidate |
-| Verified Runtime | A runtime whose validation concluded `VERIFIED` with `REAL` provenance |
-| Runtime Selection | Choosing agents by verified capability subset; the verified path is score-less and never falls back to the ready pool |
-| Mode Gate | Caller intent: OFF / AUTO / ON routing |
-| Collaboration Packet | The protocol contract between stages — who owes what work, on a frozen envelope schema |
-| Collaboration Transport | The delivery mechanism — an in-process mailbox today |
-| Provenance | Evidence class of a validation result: `OFFLINE` (mock) or `REAL` (real calls under an explicit gate) |
-| Task Budget | Per-task invocation accounting; a call either happened-and-was-paid or never happened |
-| LoopGuard | Pre-invoke protection against duplicate tasks, repeated failures, and cycles |
-
-## Architecture
-
-Two execution paths share one engine; the entry point decides which runs:
+| What is orchestrated | LLM API calls you wire up yourself | external coding-agent CLIs, via adapters |
+| Runtime coupling | often one provider or SDK | runtime-neutral: nothing names a vendor |
+| Admission | configure and go | gated G1–G14 qualification, `VERIFIED` + `REAL` evidence only |
+| Result claims | framework-reported | provenance on every envelope; `REAL` refused without real-call evidence |
+| Failure behavior | fallbacks and retries are common features | no fallback, no silent success — closed failure vocabulary |
+| Dependencies | heavy SDK stacks | pure standard library, zero runtime dependencies |
+| Transport | often cloud/network | local process boundary only; no network transport |
+
+Use them together if you like: this layer does not replace your app framework —
+it sits between your application and the agent CLIs.
+
+## How it works
 
 ```mermaid
 flowchart TD
@@ -615,389 +175,129 @@ flowchart TD
     G --> OUT["Closed, secret-free summary"]
 ```
 
-- The **ReadyPool path** (classic engine) admits runtimes on health and scores
-  candidates from registry evidence.
-- The **Verified path** (production stack) requires a gated qualification run,
-  `VERIFIED` + `REAL` evidence, and Verified Runtime Pool admission before
-  execution — and it **never falls back**.
-- Load-bearing invariant: **the verified path never silently borrows the
-  ReadyPool.** An empty verified selection normalizes to `NO_CAPABLE_AGENT`
-  instead of consulting the ready-pool registry, and the verified orchestrator
-  executes with an empty fallback policy.
-- The five distinctions the engine never blurs: Discovery ≠ Health,
-  Health ≠ Qualification, Qualification ≠ Verification, Verification ≠
-  Admission, READY ≠ VERIFIED.
+Load-bearing invariant: the verified path never silently borrows the ReadyPool.
+An empty verified selection normalizes to `NO_CAPABLE_AGENT` instead of
+consulting the ready-pool registry. The five distinctions the engine never
+blurs: Discovery ≠ Health, Health ≠ Qualification, Qualification ≠
+Verification, Verification ≠ Admission, READY ≠ VERIFIED.
 
-Task lifecycle: one `ProductionFacade` owns exactly one task. Budget, guard,
-and ledger are per-task and never reset between runs. SINGLE path: at most 1
-real invocation. Four-stage path: at most 4 (each role exactly once); beyond
-that, `BUDGET_EXHAUSTED`. A new task needs a new facade.
+Task lifecycle: one `ProductionFacade` owns exactly one task; budget, guard,
+and ledger are per-task. SINGLE path: at most 1 real invocation; four-stage
+path: at most 4 (each role exactly once). Failures are structured and
+terminal — `*_INVOKE_FAILED`, `*_PACKET_INVALID`, `MISSING_HANDOFF`,
+`BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED`, `NO_CAPABLE_AGENT`,
+`NO_VERIFICATION_CAPABILITY`. Honest retries require a new `task_id`.
 
-### Remote collaboration layering
+Deeper architecture: [docs/architecture/](docs/architecture/overview.md)
+(overview, collaboration, execution, ready-vs-verified, runtime lifecycle).
 
-Remote collaboration reuses the same engine discipline one level up: the
-local side declares and composes; the remote side runs in its own process
-and answers under the same packet contract. Five steps, one honest round
-trip:
+## Agent runtime support
 
-```text
-you                                          remote agent (own process)
-──                                          ─────────────────────────
-1  declare: identity + role + binding
-2  compose: build_remote_session(...)  ───► child process starts
-                                             3  endpoint reads the task packet
-                                             4  runtime CLI → real model
-                                                 (scripted adapter in the
-                                                 offline demo)
-                                             5  output parsed through the
-                                                 same packet contract
-6  receive: result packet              ◄───┘
-7  close: the interaction ends
-```
+Support is reported at exactly two levels — **REAL VERIFIED** (gated
+qualification produced evidence and pool admission) and **adapter
+implemented** (offline-tested, not yet REAL-verified in this repository).
+Treat adapter-implemented runtimes as unverified until you run
+`dual-agent qualify` in your own environment.
 
-The boundary carries packets only — never conversations, never
-credentials — and a delivery receipt never claims execution. See
-[Remote Collaboration (V3.1)](#remote-collaboration-v31).
+| Agent Runtime | Adapter | Offline Tests | REAL Verification |
+|---|---|---|---|
+| Claude Code CLI | `claude_code_adapter.py` | ✅ | ✅ REAL VERIFIED — full chain + REAL dual-agent collaboration (v2.1.227) |
+| Codex CLI | `codex_adapter.py` | ✅ | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
+| Pi | `pi_adapter.py` | ✅ | ✅ REAL VERIFIED — audited multi-runtime four-stage E2E (2026-09) |
+| Gemini CLI | `gemini_adapter.py` | ✅ | ❌ Not performed — gated REAL assets ship in the suite |
+| Qwen Code | `qwen_adapter.py` | ✅ | ❌ Not performed |
+| OpenCode | `opencode_adapter.py` | ✅ | ❌ Not performed |
+| Cline | `cline_adapter.py` | ✅ | ❌ Not performed |
+| tiny-agents (Hugging Face) | `tiny_agents_adapter.py` | ✅ | ❌ Not performed |
 
-## Modes
+Prerequisites are runtime-level, never this package's: the CLI is on PATH and
+logged in through its own flow (tiny-agents needs `TINY_AGENTS_AGENT_PATH` +
+`TINY_AGENTS_COMMAND`). The engine never installs, logs in to, or configures a
+runtime, and never reads credentials.
 
-The `dual-agent` console script is self-contained: it composes the default
-host stack (environment discovery → health observation → persisted
-evidence → Verified Runtime Pool → facade) and runs the task. Two
-commands, strictly separated:
+**Help REAL-verify the remaining adapters** — it is the highest-value
+contribution right now: install the CLI, run `dual-agent qualify` with
+`RUN_REAL_PROVIDER_TESTS=1`, and report your evidence. See
+[CONTRIBUTING.md](CONTRIBUTING.md#real-verify-an-adapter-community-program).
 
-```bash
-dual-agent qualify                                          # the only command that qualifies
-dual-agent run --mode off  "Implement a GitHub webhook"
-dual-agent run --mode auto "Implement a GitHub webhook"
-dual-agent run --mode on   "Implement a GitHub webhook"
-```
+## Remote collaboration across a process boundary
 
-- `qualify` performs the gated G1–G14 qualification over discovered
-  runtimes and persists `VERIFIED` + `REAL` evidence under
-  `~/.dual-agent/qualification/`. REAL invocation requires
-  `RUN_REAL_PROVIDER_TESTS=1`; offline results are reported honestly and
-  are never persisted. Each G5/G14 model call waits up to 300 seconds by
-  default — `--timeout-seconds <seconds>` overrides it per invocation,
-  and per-call progress lines stream to stderr while stdout stays a
-  single machine-readable JSON summary.
-- `run` only reads persisted evidence. With no evidence it exits `2` with
-  a machine-readable reason (`NO_EVIDENCE_NO_QUALIFIER`) and a human hint
-  pointing at `dual-agent qualify` — it never automatically qualifies and
-  never re-qualifies implicitly.
-
-Observation: `--observe` streams human-readable execution events to
-stderr while stdout stays exactly one machine-readable JSON line:
+Declare an agent (identity + role + runtime binding), compose a remote
+session with one call, and exchange verified task packets with an agent
+running in its own process on your machine — under the same packet contract
+as the local pipeline. The boundary carries packets only — never
+conversations, never credentials — and a `DELIVERED` receipt never claims
+execution.
 
 ```bash
-dual-agent run --observe "Implement a GitHub webhook"
+python examples/remote_offline_demo.py   # offline, scripted adapter
+python examples/remote_real_claude.py    # with Claude Code CLI installed + logged in
 ```
 
-stdout/stderr contract: the execution result is one closed, secret-free
-JSON line on stdout (exit `0` on `SUCCESS`, `2` on any closed failure
-word); human diagnostics and observation go to stderr.
+Full flow, agent addressing (`agent:{agent-id}:{role}`), and the common
+failures table: [docs/architecture/collaboration.md](docs/architecture/collaboration.md).
 
-Honest limitation: the engine layer still never creates runtimes,
-adapters, or credentials. Embedding applications that want full control
-over the composition can inject a pre-configured facade directly:
+## Extending: add a runtime
 
-```python
-from dual_agent import cli
-cli.main._facade = my_configured_facade   # embedding surface, unchanged
-```
-
-See `examples/offline_mock_run.py` for constructing the facade from real
-engine components, `examples/minimal_host_app.py` for the full REAL-path
-chain (discovery → qualification → facade), and `host.py`
-(`build_facade`) for the host-facing construction API.
-
-| Mode | Behavior |
-|---|---|
-| `OFF` | No orchestration; returns the delegated empty result — never silently runs |
-| `AUTO` (default) | Classify the task; SIMPLE / MEDIUM / UNRESOLVED take the single-agent path, COMPLEX takes the dual-agent path |
-| `ON` | Force the dual-agent path (architect + coder; tester + reviewer when qualified candidates exist) |
-
-Task classification is a closed keyword table (SIMPLE / MEDIUM / COMPLEX /
-UNRESOLVED) — a deterministic classifier, not a model. Tasks with no keyword
-hit classify as UNRESOLVED and take the orchestration path.
-
-Without verified tester / reviewer candidates, dual-agent success is reported
-as `NO_VERIFICATION_CAPABILITY` — never a silent two-stage success, never a
-fabricated four-stage success.
-
-Failures are structured and terminal; downstream stages do not run after an
-upstream failure:
-
-- `*_INVOKE_FAILED`, `*_PACKET_INVALID` — a stage failed on the runtime or the packet contract
-- `MISSING_HANDOFF` — a required upstream packet is absent from the ledger
-- `BUDGET_EXHAUSTED`, `LOOP_GUARD_REJECTED` — task-lifecycle guards
-- `NO_CAPABLE_AGENT`, `NO_VERIFICATION_CAPABILITY` — no verified candidates
-
-Honest retries require a new `task_id`; the loop guard rejects re-running the
-same stage of the same task.
-
-## Agent Collaboration
-
-Four stages, four contracts:
-
-```text
-Architect
-    ↓  ArchitecturePacket
-Coder
-    ↓  ImplementationPacket
-Tester
-    ↓  TestPacket
-Reviewer
-    ↓  ReviewPacket
-```
-
-| Role | Reads | Produces |
-|---|---|---|
-| architect | the task itself | `ArchitecturePacket` |
-| coder | architecture packet wire text | `ImplementationPacket` |
-| tester | latest implementation packet | `TestPacket` |
-| reviewer | architecture + implementation + test | `ReviewPacket` |
-
-Two layers that are easy to conflate but are not the same:
-
-- **`CollaborationPacket` is the protocol contract** — who owes what work, on
-  a frozen envelope schema.
-- **Transport is the delivery mechanism** — an in-process mailbox for local
-  collaboration, or a real subprocess stdio boundary for remote
-  collaboration (single machine). There is **no** network transport, no
-  A2A protocol, no distributed execution, and no multi-agent network.
-
-## Remote Collaboration (V3.1)
-
-Declared agents collaborating across a **real process boundary**, on one
-machine: the remote agent runs in its own process, receives one task
-packet, and answers with one result packet. The whole exchange is
-contract-driven — the remote side sees exactly the task packet, never a
-conversation, never your credentials.
-
-The user flow is five steps:
-
-```text
-declare   an agent: identity + role + runtime binding   (AgentManifest)
-compose   one call: build_remote_session(registry, agent_id, role, you)
-send      one task packet (session.send)
-receive   one result packet (session.receive)
-close     the session when the interaction ends          (session.close)
-```
-
-**Agent address.** Every participant has an opaque address of the form
-`agent:{agent-id}:{role}` — for example `agent:my-coder:coder`. Addresses
-are stable logical names: they contain no runtime, provider, or model
-facts, and they survive rebinding to a different runtime.
-
-**Delivery is not execution.** A `DELIVERED` receipt means the remote
-process received the task packet — nothing more. Execution success shows
-up as a valid, parsed result packet on `receive()`. The vocabulary never
-blurs the two.
-
-**Two experiences, one flow:**
-
-| | Offline demo | REAL example |
-|---|---|---|
-| Entry | `python examples/remote_offline_demo.py` | `python examples/remote_real_claude.py` |
-| Remote side | a scripted adapter module (`examples/scripted_coder.py`), clearly labeled | the real Claude Code CLI → real provider |
-| Prerequisites | Python only — no runtime, login, or configuration | Claude Code CLI installed on PATH and logged in through its own flow |
-| Result | closed JSON summary, provenance honestly `OFFLINE` | closed JSON summary from real model output |
-
-Both run from a source checkout (examples are repository examples — see
-the note in [Quick Start](#quick-start)). The remote collaboration flow is
-verified end-to-end with the real Claude CLI; the same declaration pattern
-works for the other adapters shipped by this project.
-
-### Common failures
-
-| Failure | What it means | What to do |
-|---|---|---|
-| `ValueError: unknown agent: …` | No agent with that id is registered | Check the id you pass to `build_remote_session` against your registry |
-| `ValueError: role not declared by agent: …` | The agent's declaration does not include that role | Declare the role in the manifest, or compose a role the agent declares |
-| `ValueError: adapter factory is not remotely constructible` | The manifest's factory cannot be carried across the process boundary | Build it with `importable_adapter_factory` |
-| `ValueError: profile conflicts with agent binding: …` | The adapter profile and the runtime binding declare different runtime facts | Make runtime/provider/model identical in both declarations |
-| `FAILED` receipt | The child process failed (bad import, adapter construction, or crash); diagnostics are captured from its stderr | Check the failure reason printed by the example; verify the module path |
-| `ModuleNotFoundError` in child diagnostics | The declared module was not importable by the remote process | For a custom adapter module, pass its directory as `source_path` |
-| Claude CLI not found | The real example requires the Claude Code CLI | Install it, log in through its own flow, retry — the example exits non-zero and never falls back |
-| `provenance: OFFLINE` on a real run | The composition did not carry REAL qualification evidence — reported honestly, never faked | Expected for plain example runs; REAL provenance requires the qualified path |
-
-## Extending Runtime
-
-Adding a runtime means implementing the adapter contract — the
-architecture allows it, and you own the adapter and its verification.
-
-New runtimes integrate through the `ExternalAgentAdapter` protocol
-(`dual-agent-development/scripts/external_agent_adapter.py`) with six
-methods — three core invocation methods plus three health methods:
-
-Core invocation:
-
-- `discover()` → `RuntimeDiscovery` — is the runtime present?
-- `invoke(request)` → `InvocationResult` — run one agent request
-- `cancel(invocation_id)` → `InvocationResult` — cancel an in-flight invocation
-
-Health (required to pass the health pipeline and G1-G14 qualification):
-
-- `check_authentication()` → `AuthenticationCheck` — observe the runtime's own read-only auth state
-- `check_provider_model()` → `ProviderModelCheck` — gated on observed authentication, never guessed
-- `minimal_health_check(timeout_seconds)` → `MinimalHealthCheck` — honest `skipped`/`unsupported` without the REAL gate
-
-A runtime whose CLI has no observable authentication surface cannot be
-faked into this shape — see the runtime's adapter notes for its declared
-conformance level.
-
-Adapters own all runtime specifics — executable resolution, authentication
-state, subprocess environment (whitelisted: `PATH` / `HOME` / `USERPROFILE` /
-`SYSTEMROOT`), error normalization. The orchestrator only sees the protocol,
-so adding a runtime never means modifying the orchestrator.
-
-Registration goes through the runtime adapter registry
-(`runtime_adapter_registry.py`, `register(AdapterDescriptor)`) and the
-discovery bootstrap (`discovery_bootstrap.py`). The full contract is
-documented in
-[`dual-agent-development/references/adapter-contract.md`](dual-agent-development/references/adapter-contract.md),
-and `adapter_probe.py` is a small developer probe for exercising an adapter
-by hand.
-
-Note: there is no third-party plugin package API in this release — extending
-means implementing the protocol inside a checkout, as the built-in adapters
-do.
+Implement the six-method `ExternalAgentAdapter` protocol — three core
+invocation methods (`discover`, `invoke`, `cancel`) plus three health methods
+(`check_authentication`, `check_provider_model`, `minimal_health_check`).
+Adapters own all runtime specifics (executable resolution, auth state,
+subprocess environment whitelist); the orchestrator only sees the protocol,
+so adding a runtime never means modifying the orchestrator. Full contract:
+[dual-agent-development/references/adapter-contract.md](dual-agent-development/references/adapter-contract.md);
+hand probe: `adapter_probe.py`. A step-by-step guide is in
+[CONTRIBUTING.md](CONTRIBUTING.md#add-a-new-runtime-adapter).
 
 ## Security
 
 - **No-secrets contract**: raw output, secrets, and model reasoning never
-  enter packets, the ledger, traces, or public results; `content_safety` is
-  the single scan authority.
-- **Raw-output quarantine**: stage inputs are always upstream packets; raw
-  output must pass the packet contract and content scan before reaching the
-  next stage.
-- **Protected paths**: REAL validation snapshots caller-declared protected
-  files (credentials / config); any change during the run fails gate G13.
-- **Minimal environment**: adapters start subprocesses with a whitelist env
+  enter packets, the ledger, traces, or results; `content_safety` is the
+  single scan authority.
+- **Protected paths**: REAL validation snapshots caller-declared credential
+  files; any change during the run fails gate G13.
+- **Minimal environment**: adapter subprocesses start with a whitelist env
   (`PATH` / `HOME` / `USERPROFILE` / `SYSTEMROOT`) — credential-bearing
   variables are never forwarded.
-- **Safe error normalization**: adapter error text is shape-scrubbed before
-  reaching traces or reports.
-- The engine never reads, stores, prints, or modifies credentials; never logs
-  in or out; never touches runtime configuration. Authentication belongs to
-  the runtime.
-- Real runtime calls are opt-in and off by default (`RUN_REAL_PROVIDER_TESTS=1`
-  gates the real tests).
-- CLI output is a closed allow-list summary.
+- Real runtime calls are opt-in and off by default (`RUN_REAL_PROVIDER_TESTS=1`).
+- The engine never reads, stores, prints, or modifies credentials. See
+  [SECURITY.md](SECURITY.md) for reporting policy.
 
-## Testing
-
-### Offline Tests
+## Testing & verification status
 
 ```bash
-python -m pytest tests/ -q                     # offline suite + gated skips
-python -m unittest discover -s tests           # equivalent stdlib runner
-python -m compileall -q dual-agent-development # syntax gate
+python -m pytest tests/ -q        # offline suite + gated skips
+python -m compileall -q dual-agent-development
 ```
 
-Offline baseline: **2177 passed / 24 skipped / 520 subtests** in the
-development workspace, which carries two protected local test assets;
-a clean checkout reports **2150 passed / 31 skipped / 520 subtests**.
-Skips are opt-in REAL-gated entries, plus — on a clean checkout —
-missing protected local test assets.
+Offline suite: 3400+ tests green in CI (a handful of entries are opt-in
+REAL-gated skips). REAL tests invoke real runtimes and require
+`RUN_REAL_PROVIDER_TESTS=1` plus a logged-in CLI — see
+[docs/development/testing.md](docs/development/testing.md). The honest status
+of every layer (what is offline-tested vs REAL-verified) is tracked in
+[docs/architecture/](docs/architecture/overview.md) and the release notes.
 
-### REAL Runtime Tests
+## Release & versioning
 
-REAL tests invoke real runtimes and require a logged-in `claude` on PATH:
+Published to PyPI via Trusted Publishing (OIDC only — no tokens, no secrets)
+on a pushed `vX.Y.Z` tag; the tag must equal `dual_agent.__version__`, enforced
+by [scripts/version_gate.py](scripts/version_gate.py) before any build. Every
+release also publishes a GitHub Release with attached artifacts and generated
+notes — see the [Releases page](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases).
 
-```bash
-# Windows (cmd)
-set RUN_REAL_PROVIDER_TESTS=1
-python -m pytest tests/test_rc3_real_discovery.py -v -s
-
-# Windows (PowerShell)
-$env:RUN_REAL_PROVIDER_TESTS="1"
-python -m pytest tests/test_rc3_real_discovery.py -v -s
-
-# macOS / Linux
-RUN_REAL_PROVIDER_TESTS=1 python -m pytest tests/test_rc3_real_discovery.py -v -s
-```
-
-This qualification run takes several minutes, produces `VERIFIED` + `REAL`
-evidence with all four capabilities, and admits the runtime to the Verified
-Runtime Pool. One sanctioned qualification is then reused across tasks — the
-runtime is never re-qualified per task.
-
-A dual-agent collaboration smoke, gated by `RUN_REAL_PROVIDER_TESTS=1`
-(`tests/test_collaboration_session.py`, Claude Code CLI v2.1.227),
-additionally proves the architect → packet → transport → coder → reply loop
-end to end: two real invocations under two role-qualified agent addresses on
-one REAL-verified runtime, `provenance=REAL` on both envelopes, one shared
-`correlation_id`, `DELIVERED` receipts in both directions, and
-credential-file invariance across the run.
-
-## Verification Status
-
-| Area | Status |
-|---|---|
-| Runtime Discovery | Implemented + offline-tested |
-| Runtime Health | Implemented + offline-tested |
-| Capability Validation (G1–G14) | Implemented + offline-tested |
-| Verified Runtime Pool | Implemented + offline-tested |
-| Agent Selection (both paths) | Implemented + offline-tested |
-| Collaboration contract & packets | Implemented + offline-tested |
-| Local transport | Implemented + offline-tested |
-| Remote transport | Real subprocess stdio boundary (single machine) — no network transport |
-| Remote collaboration (declare → remote session → result packet) | ✅ Real verified — end-to-end with the real Claude CLI: real provider, real model output through the packet contract |
-| Four-stage orchestration | Implemented; proven end-to-end offline |
-| Dual-agent collaboration (architect → coder) | ✅ Real verified — one REAL-verified runtime, two role-qualified agent invocations, `provenance=REAL` both directions (gated `tests/test_collaboration_session.py`) |
-| Multi-runtime four-stage execution (claude + codex + pi) | ✅ Real verified — audited multi-runtime E2E, each runtime qualified and admitted before execution (2026-09) |
-| Claude Code CLI REAL verification | ✅ Real verified — full chain, v2.1.227, all four capabilities, pool admission |
-| Codex CLI / Pi REAL verification | ✅ Real verified — audited multi-runtime four-stage E2E (2026-09) |
-| Gemini CLI / Qwen Code / OpenCode / Cline adapters | Implemented + offline-tested; REAL verification not performed |
-| tiny-agents REAL verification | Not performed (adapter implemented; offline-tested) |
-| Installed CLI surface (`qualify` / `run` / `--observe`) | Implemented + offline-tested + packaging smoke (build → isolated venv install → console & module entries) |
-| Provenance enforcement | Implemented — the runner refuses REAL without real-call evidence |
-| Security boundary | Implemented + offline-tested (content safety, protected paths, env whitelist) |
-
-## Release
-
-Distribution version: **2.4.0** (`dual-agent --version`; single source of
-truth `dual_agent.__version__`, read dynamically by the build). Latest
-tagged GitHub release:
-**[Runtime-Neutral Agent Engineering v2.3.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.3.0)**.
-The 2.4.0 distribution adds the V3.2 collaboration stack — the
-`dual-agent cockpit` fixed sequential multi-agent entry with a
-VERIFIED-only evidence gate, plus the control, observation, revision,
-and sequential orchestration layers beneath it.
-
-## Limitations
-
-- Three runtimes (Claude Code CLI, Codex CLI, Pi) hold REAL-proven
-  evidence from audited runs; the Gemini CLI, Qwen Code, OpenCode, Cline,
-  and tiny-agents adapters ship offline-tested but without
-  repository-run REAL verification. Treat every adapter as unverified
-  until you run `dual-agent qualify` in your own environment.
-- Runtime availability depends on your environment: PATH executables, login
-  state, and (for tiny-agents) two environment variables. Missing pieces mean
-  honest absence, never partial registration.
-- Task classification is a closed keyword table, not a model.
-- The dual-agent path covers architect + coder; tester + reviewer run as
-  verification stages gated on dual-agent success.
-- Qualification is a point-in-time proof; stability over repeated runs is a
-  separate measurement, not a guarantee.
-- Package maturity: pre-1.0. The installed-CLI surface (`qualify`,
-  `run --observe`, the persisted evidence store under
-  `~/.dual-agent/qualification/`) is new (2026-09) and may still change
-  shape.
-- Remote collaboration runs across a real process boundary on a single
-  machine — no network transport, no A2A, no cross-machine execution.
+Package maturity: pre-1.0; the installed-CLI surface may still change shape.
+Remaining limitations (point-in-time qualification, closed keyword
+classifier, single-machine remote boundary) are listed honestly in
+[docs/roadmap/v2-to-v3.md](docs/roadmap/v2-to-v3.md).
 
 ## Contributing
 
-Simple GitHub workflow:
-
-1. Fork the repository
-2. Create a branch for your change
-3. Make the change
-4. Run the offline suite (`python -m pytest tests/ -q`) and keep it green
-5. Open a Pull Request
+Fork → branch → keep the offline suite green → PR. The two highest-value
+contributions right now are [adding a runtime
+adapter](CONTRIBUTING.md#add-a-new-runtime-adapter) and [REAL-verifying an
+existing one](CONTRIBUTING.md#real-verify-an-adapter-community-program).
+Details and the code of conduct: [CONTRIBUTING.md](CONTRIBUTING.md) ·
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 
