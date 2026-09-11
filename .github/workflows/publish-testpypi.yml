@@ -50,36 +50,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Version consistency gate (pyproject == dual_agent == expected)
+      - name: Version consistency gate (dual_agent.__version__ == expected)
+        # scripts/version_gate.py is the single tested gate implementation
+        # (shared with publish.yml). The distribution version is dynamic
+        # (single truth = dual_agent.__version__, imported from this
+        # checkout by explicit path); [project]["version"] does not exist
+        # and is never read.
         env:
           EXPECTED_VERSION: ${{ inputs.expected-version }}
-        run: |
-          python - <<'PY'
-          import os, pathlib, re, sys, tomllib
-
-          expected = os.environ.get("EXPECTED_VERSION", "").strip()
-          if not expected:
-              sys.exit("expected-version input is empty; refusing to build")
-
-          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          name, declared = pyproject["project"]["name"], pyproject["project"]["version"]
-
-          # Read the shipped constant directly: importing the mapped package
-          # from the source tree is ambiguous (scripts/ holds a legacy
-          # top-level dual_agent.py module without __version__).
-          init_text = pathlib.Path("dual-agent-development/scripts/__init__.py").read_text(encoding="utf-8")
-          match = re.search(r'__version__\s*=\s*"([^"]+)"', init_text)
-          if match is None:
-              sys.exit("dual_agent __version__ constant not found")
-          pkg_version = match.group(1)
-
-          if declared != expected or pkg_version != expected:
-              sys.exit(
-                  f"version mismatch: expected={expected} pyproject={declared} "
-                  f"dual_agent.__version__={pkg_version}"
-              )
-          print(f"version gate OK: {name} {declared} (TestPyPI drill build)")
-          PY
+        run: python scripts/version_gate.py --expected "$EXPECTED_VERSION"
 
       - name: Build sdist + wheel
         run: |
