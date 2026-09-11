@@ -29,23 +29,36 @@ contract-first discipline as the local pipeline. See
 
 ## What's new
 
-**Remote Collaboration (V3.1)** — declared agents now collaborate across a
-real process boundary:
+**Multi-Agent Collaboration Cockpit (V3.2)** — a fixed sequential
+multi-agent collaboration entry built on the new V3.2 stack:
 
-- Declare an agent (identity + role + runtime binding) → compose a remote
-  session → send a task packet → receive the result packet. One honest
-  round trip per interaction, verified end-to-end with the real Claude CLI.
-- Try it in 30 seconds — offline, no runtime, no login, no configuration:
+- `dual-agent cockpit TASK --step ROLE=RUNTIME_ID [--step ...]` — declare
+  the collaboration steps in execution order. Every referenced runtime
+  must hold persisted `VERIFIED` qualification evidence; the cockpit
+  never qualifies implicitly and accepts no qualifier.
+- Runtime-neutral composition — zero runtime-name branches, zero packet
+  parsing: the prior step's plain-text output is embedded (truncated)
+  into the next step's prompt, nothing more.
+- Honest delivery states — exit `0` COMPLETED / `2` FAILED or user
+  error / `3` ABORTED / `4` PARKED; stdout carries exactly one machine
+  JSON line, human diagnostics go to stderr.
+- Architecture layers beneath the entry: control (intent adjudication
+  with an idempotent command journal), observation (three-state honest
+  usage), revision (FIFO revision journal), and sequential orchestration
+  (deterministic step order, fail-fast, zero-state pipeline).
+- The full entry contract is offline-tested — parsing, runtime
+  resolution, composition, delivery, exit codes, and architecture
+  guards (`tests/test_cockpit_entry.py`).
 
-```bash
-git clone https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering.git
-cd runtime-neutral-agent-engineering
-python examples/remote_offline_demo.py
-```
-
-- With the Claude Code CLI installed and logged in,
-  `examples/remote_real_claude.py` runs the same flow against a real
-  provider. Details in [Remote Collaboration (V3.1)](#remote-collaboration-v31).
+Previously (V3.1) — Remote Collaboration: declared agents collaborate
+across a real process boundary: declare an agent (identity + role +
+runtime binding) → compose a remote session → send a task packet →
+receive the result packet. One honest round trip per interaction,
+verified end-to-end with the real Claude CLI. Offline demo (no runtime,
+no login): `python examples/remote_offline_demo.py`; with the Claude
+Code CLI installed and logged in, `examples/remote_real_claude.py` runs
+the same flow against a real provider. Details in
+[Remote Collaboration (V3.1)](#remote-collaboration-v31).
 
 Previously: the installed CLI became a self-contained product —
 `dual-agent qualify` (gated G1–G14 qualification, persisted `VERIFIED` +
@@ -128,7 +141,7 @@ Install the published package from PyPI — Python >= 3.10, zero runtime
 dependencies, no clone needed:
 
 ```bash
-pip install dual-agent-development==2.3.0
+pip install dual-agent-development==2.4.0
 dual-agent --version
 dual-agent --help
 ```
@@ -443,7 +456,7 @@ library with zero runtime dependencies. Published on PyPI as
 The published distribution — no clone, no build step:
 
 ```bash
-pip install dual-agent-development==2.3.0
+pip install dual-agent-development==2.4.0
 ```
 
 - Distribution [`dual-agent-development` on PyPI](https://pypi.org/project/dual-agent-development/) — note the GitHub repository name (`runtime-neutral-agent-engineering`) and the PyPI package name are different
@@ -945,13 +958,14 @@ credential-file invariance across the run.
 
 ## Release
 
-Distribution version: **2.3.0** (`dual-agent --version`; single source of
+Distribution version: **2.4.0** (`dual-agent --version`; single source of
 truth `dual_agent.__version__`, read dynamically by the build). Latest
 tagged GitHub release:
 **[Runtime-Neutral Agent Engineering v2.3.0](https://github.com/Tsubasa-Kaede/runtime-neutral-agent-engineering/releases/tag/v2.3.0)**.
-The 2.3.0 distribution adds Remote Collaboration — declare → compose →
-send → receive → close across a real process boundary, with repository
-examples and honest offline/REAL provenance.
+The 2.4.0 distribution adds the V3.2 collaboration stack — the
+`dual-agent cockpit` fixed sequential multi-agent entry with a
+VERIFIED-only evidence gate, plus the control, observation, revision,
+and sequential orchestration layers beneath it.
 
 ## Limitations
 

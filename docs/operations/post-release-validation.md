@@ -1,16 +1,21 @@
 # Post-Release Validation Protocol
 
-Status: active · Current release: **2.3.0** (RELEASED) ·
-V3.2: **DEFERRED / WAIT FOR USER FEEDBACK**
+Status: active · Current release: **2.3.0** (RELEASED) · Next release:
+**2.4.0** (IN PREPARATION) · V3.2: **IMPLEMENTED — SHIPS IN 2.4.0**
 
 ## 1. Current state
 
 - Release **2.3.0** (tag `v2.3.0`, commit `2dc0dda`) is published:
   PyPI, GitHub Release, CI 9/9 green, fresh-install verified.
-- The project is in **post-release validation**, not development.
-- **V3.2 is deferred.** A roadmap number is not a schedule: V3.2 does
-  not start merely because "V3.2" exists in
-  `docs/roadmap/v2-to-v3.md`.
+- **2.4.0 is in preparation**: release metadata committed; the V3.2
+  Release-Gate review passed (2026-09-11, ready with documented
+  non-blocking concerns); push, tag, and PyPI publish each await their
+  separate authorizations.
+- **V3.2 is implemented and ships in 2.4.0**: control, observation,
+  revision, composition, sequential orchestration, and the
+  `dual-agent cockpit` CLI entry, completed through the authorized CU
+  chain (2026-09-10/11). Sections 3–11 below record the observation
+  protocol as it governed the 2.3.0 window that preceded that chain.
 
 ## 2. Purpose
 
@@ -129,7 +134,6 @@ IMPLEMENTATION".
 
 The post-release audit's debt map is advisory and does not
 automatically create implementation work. Known items, untouched by
-this protocol: untracked protected policy tests, diagnostics public
-read surface, historical share data-file behavior, the v2.2.1 GitHub
-Release gap, E/F spec/plan tracking, PyPI metadata, stale dist
-artifacts.
+this protocol: diagnostics public read surface, historical share
+data-file behavior, the v2.2.1 GitHub Release gap, E/F spec/plan
+tracking, PyPI metadata, stale dist artifacts.
