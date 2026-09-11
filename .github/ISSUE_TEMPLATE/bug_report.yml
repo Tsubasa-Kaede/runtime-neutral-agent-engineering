@@ -1,0 +1,80 @@
+name: Bug report
+description: Something broke, or the engine reported a state you believe is wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. This project never asks for credentials —
+        do **not** paste API keys, tokens, or logged-in runtime output that
+        could contain secrets. The engine's own stdout summaries are
+        secret-free by design; stderr diagnostics may contain paths, so trim
+        anything private.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `dual-agent --version`
+      placeholder: 2.4.0
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      options:
+        - CLI — qualify
+        - CLI — run / run --observe
+        - CLI — cockpit
+        - Python API (facade / host composition)
+        - Remote collaboration
+        - Adapter (tell us which runtime in the description)
+        - Packaging / install
+        - Docs
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Agent runtime involved (if any)
+      options:
+        - Claude Code CLI
+        - Codex CLI
+        - Pi
+        - Gemini CLI
+        - Qwen Code
+        - OpenCode
+        - Cline
+        - tiny-agents
+        - None / not runtime-specific
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Include the exact exit code and the machine JSON reason line from stdout if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Commands (with environment variables like RUN_REAL_PROVIDER_TESTS noted) and OS. A reproduction that runs offline is ideal.
+    validations:
+      required: true
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: Honesty gates
+      options:
+        - label: This report contains no secrets, tokens, or credential material
+          required: true
+        - label: I ran with RUN_REAL_PROVIDER_TESTS unset (offline) or note explicitly that REAL mode was on
+          required: true

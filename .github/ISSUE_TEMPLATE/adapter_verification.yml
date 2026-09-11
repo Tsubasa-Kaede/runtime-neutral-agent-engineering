@@ -1,0 +1,72 @@
+name: Adapter REAL-verification report
+description: You ran a gated REAL qualification for an adapter that was adapter-implemented only — report your evidence here.
+labels: ["adapter-verification", "good first issue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Highest-value contribution right now. Several adapters ship
+        offline-tested but are not REAL-verified in this repository (see the
+        runtime matrix in the README). REAL verification means **you** ran the
+        gated qualification in **your** environment and can show the evidence.
+        Never paste credentials or logged-in runtime output containing secrets —
+        the qualification JSON summary is secret-free by design.
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Which runtime did you REAL-verify?
+      options:
+        - Gemini CLI
+        - Qwen Code
+        - OpenCode
+        - Cline
+        - tiny-agents
+        - Other (custom adapter)
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: Runtime CLI version
+      description: e.g. the output of `gemini --version`
+    validations:
+      required: true
+  - type: input
+    id: engine-version
+    attributes:
+      label: dual-agent version
+      description: Output of `dual-agent --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Qualification evidence
+      description: |
+        The command you ran (typically `RUN_REAL_PROVIDER_TESTS=1 dual-agent qualify`)
+        and the persisted-evidence summary it reported. Include the four
+        capabilities outcome and the VERIFIED + REAL provenance fields. Redact
+        anything environment-specific you do not want public.
+    validations:
+      required: true
+  - type: checkboxes
+    id: honesty
+    attributes:
+      label: Honesty contract
+      options:
+        - label: The run was REAL (RUN_REAL_PROVIDER_TESTS=1) — not an offline rehearsal
+          required: true
+        - label: I have not edited or fabricated any evidence field
+          required: true
+        - label: No secrets or credentials are included in this report
+          required: true

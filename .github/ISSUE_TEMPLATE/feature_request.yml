@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a change to the engine, CLI, or docs.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What can you not do today? Describe the workflow, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What would the CLI/API surface look like? Include the exit-code and stdout/stderr contract if it touches the CLI.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Architecture boundaries
+      description: This engine has hard boundaries — proposals that respect them are much easier to accept.
+      options:
+        - label: This does not require the engine to install, log in to, or configure any agent runtime
+        - label: This does not introduce a network transport or a second fallback path
+        - label: This keeps the verified path free of silent fallback to weaker pools
