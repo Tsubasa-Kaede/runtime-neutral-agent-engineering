@@ -45,19 +45,13 @@ import json
 import sys
 from typing import NamedTuple
 
-try:  # installed-package mode: dependencies are package siblings
-    from .candidate_validation import CandidateValidationStatus
-    from .content_safety import REDACTED_ERROR, contains_unsafe_content
-    from .control_journal import ControlJournal
-    from .execution_slots import ExecutionSlotSpec, build_execution_slots
-    from .external_runtime import ExternalAgentRequest
-    from .sequential_pipeline import (
-        RunStatus,
-        StepSpec,
-        build_sequential_pipeline,
-    )
-    from .usage_log import UsageLog
-except ImportError:  # source-tree flat-import mode (tests/examples)
+# 单一 module graph 纪律（P1-U4 先例，同款注释见 host_entry；2.4.2-A）：
+# 平铺名在两种模式下都解析（shim 保证安装态可用）；若包相对导入优先，
+# 安装态会把每个兄弟模块实例化第二份，enum/class 身份比较跨图必假
+# （validation.status is VERIFIED 与 ExecutionSlots isinstance 均断裂）。
+# 相对拼写仅作无 shim 嵌入场景的回退。
+try:  # flat-import mode (source tree/tests/examples; also installed: the
+      # dual_agent shim keeps flat names resolvable and the graph single)
     from candidate_validation import CandidateValidationStatus
     from content_safety import REDACTED_ERROR, contains_unsafe_content
     from control_journal import ControlJournal
@@ -69,6 +63,18 @@ except ImportError:  # source-tree flat-import mode (tests/examples)
         build_sequential_pipeline,
     )
     from usage_log import UsageLog
+except ImportError:  # embedded package context without the flat shim
+    from .candidate_validation import CandidateValidationStatus
+    from .content_safety import REDACTED_ERROR, contains_unsafe_content
+    from .control_journal import ControlJournal
+    from .execution_slots import ExecutionSlotSpec, build_execution_slots
+    from .external_runtime import ExternalAgentRequest
+    from .sequential_pipeline import (
+        RunStatus,
+        StepSpec,
+        build_sequential_pipeline,
+    )
+    from .usage_log import UsageLog
 
 __all__ = ("cockpit_main",)
 
