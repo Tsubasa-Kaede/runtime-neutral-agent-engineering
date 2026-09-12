@@ -54,3 +54,34 @@ jobs:
 
       - name: Offline end-to-end example
         run: python examples/offline_mock_run.py
+
+  # CU 2.4.2-B: the test job above installs from the source tree, where flat
+  # imports form a single module graph by construction. The 2.4.2-A defect
+  # (cockpit judging every persisted VERIFIED evidence as absent) only
+  # existed in the INSTALLED package, where the dual_agent shim makes flat
+  # and package-relative import spellings both resolvable. This job builds
+  # the wheel, installs it into a fresh venv, and runs the standalone
+  # install-state verification from a neutral cwd — no pytest, no source
+  # tree on sys.path, no runtime CLI, no REAL provider, no credentials.
+  install-smoke:
+    name: wheel install smoke (ubuntu / py3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel
+        run: python -m pip wheel . --no-deps -w dist
+
+      - name: Fresh venv install from the built wheel (offline)
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke-venv"
+          "$RUNNER_TEMP/smoke-venv/bin/python" -m pip install --no-index --find-links dist dual_agent_development
+
+      - name: Install-state verification (neutral cwd)
+        run: cd "$RUNNER_TEMP" && "$RUNNER_TEMP/smoke-venv/bin/python" "$GITHUB_WORKSPACE/scripts/verify_installed.py"
