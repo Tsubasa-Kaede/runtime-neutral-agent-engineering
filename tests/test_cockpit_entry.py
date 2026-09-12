@@ -721,8 +721,8 @@ class ExitCodeTests(unittest.TestCase):
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
     "candidate_validation", "content_safety", "control_journal",
-    "execution_slots", "external_runtime", "host_entry",
-    "sequential_pipeline", "usage_log",
+    "execution_observation", "execution_slots", "external_runtime",
+    "host_entry", "sequential_pipeline", "usage_log",
 }
 
 _BANNED_RUNTIME_NAMES = (
@@ -765,7 +765,12 @@ class ArchitectureGuardTests(unittest.TestCase):
             self.assertNotIn(token, self.source)
 
     def test_never_invokes_slots_directly(self):
-        self.assertNotIn(".invoke(", self.source)
+        # CU-TUI-1: exactly one .invoke( exists — the runtime-neutral
+        # observation wrapper delegating to the raw adapter it wraps
+        # (the adapter product sits in the slot's raw position, so the
+        # wrapper is not a second execution path). Everything else
+        # still goes through the single pipeline execution call.
+        self.assertEqual(self.source.count(".invoke("), 1)
 
     def test_no_control_or_journal_writes(self):
         for token in (".submit(", "on_handoff", "journal.append"):

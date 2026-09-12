@@ -55,6 +55,11 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
     from candidate_validation import CandidateValidationStatus
     from content_safety import REDACTED_ERROR, contains_unsafe_content
     from control_journal import ControlJournal
+    from execution_observation import (
+        ExecutionEvent,
+        ExecutionEventType,
+        ObservationError,
+    )
     from execution_slots import ExecutionSlotSpec, build_execution_slots
     from external_runtime import ExternalAgentRequest
     from sequential_pipeline import (
@@ -67,6 +72,11 @@ except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
     from .content_safety import REDACTED_ERROR, contains_unsafe_content
     from .control_journal import ControlJournal
+    from .execution_observation import (
+        ExecutionEvent,
+        ExecutionEventType,
+        ObservationError,
+    )
     from .execution_slots import ExecutionSlotSpec, build_execution_slots
     from .external_runtime import ExternalAgentRequest
     from .sequential_pipeline import (
@@ -348,14 +358,22 @@ def _human_lines(task: str, step_plan, outcome) -> list:
 
 
 def _make_request_builder(task_text: str, task_id: str, role: str,
-                          provider, timeout_seconds: float):
+                          provider, timeout_seconds: float, *,
+                          emit=None, runtime_id=None, previous_role=None):
     """Build one StepSpec request_builder closure (pure function).
 
     The prior step's output is embedded as plain text (truncated)
     inside a fresh prompt; it is never parsed, never forwarded as the
     whole prompt, and never interpreted as a packet. agent_id is
     role-derived (never runtime-derived); model is left to the
-    adapter's own default (ORCH-4 REAL-proven shape)."""
+    adapter's own default (ORCH-4 REAL-proven shape).
+
+    The optional emit/runtime_id/previous_role arguments are the
+    CU-TUI-1 observation seam (keyword-only, absent on the default
+    path). When a prior output is actually embedded into this step's
+    prompt, exactly one HANDOFF event records the producing role
+    (stage) and the receiving runtime (runtime_id) — composition
+    facts about the prompt, with no transport or delivery meaning."""
     def request_builder(previous_result):
         prompt = _PROMPT_TEMPLATE.format(role=role, task=task_text)
         if previous_result is not None:
@@ -364,6 +382,11 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
                 if len(prior) > _EMBED_LIMIT:
                     prior = prior[:_EMBED_LIMIT]
                 prompt = prompt + _PROMPT_PREVIOUS_SECTION + prior
+                if emit is not None:
+                    emit(ExecutionEventType.HANDOFF,
+                         stage=previous_role,
+                         runtime_id=runtime_id,
+                         status="EMBEDDED", reason="EMBEDDED")
         return ExternalAgentRequest(
             task_id=task_id,
             prompt=prompt,
@@ -376,11 +399,114 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     return request_builder
 
 
+# ---------------------------------------------------------- observation
+
+# Scope label for orchestration-level facts (the TERMINAL event when no
+# invocation started, mirroring the production facade's label).
+_ORCHESTRATION_SCOPE = "ORCHESTRATION"
+
+
+def _observation_channel(task_id, execution_id, sink, index):
+    """Execution-local observation channel for one cockpit run.
+
+    Mirrors the production facade's proven isolation shape: the
+    sequence is execution-scoped (starts at 0, strictly increasing,
+    never shared across runs), event construction refusals surface as
+    ObservationError and are dropped (a value-contract problem in
+    observation never touches the execution), and each consumer call
+    is individually isolated — an observation failure never changes an
+    invocation result, the run outcome, or the delivery. The caller
+    passes no consumer at all on the default path, so no channel and
+    no event exist there."""
+    counter = [0]
+    last_runtime = [None]
+
+    def emit(event_type, *, stage, runtime_id, status, reason,
+             duration_ms=None):
+        if runtime_id is not None:
+            last_runtime[0] = runtime_id
+        resolved_runtime = (runtime_id if runtime_id is not None else
+                            (last_runtime[0] or _ORCHESTRATION_SCOPE))
+        sequence = counter[0]
+        counter[0] += 1
+        try:
+            event = ExecutionEvent(
+                event_type=event_type,
+                sequence=sequence,
+                task_id=task_id,
+                correlation_id=execution_id,
+                stage=stage,
+                runtime_id=resolved_runtime,
+                status=status,
+                reason=reason,
+                duration_ms=duration_ms)
+        except ObservationError:
+            return
+        if sink is not None:
+            try:
+                sink.on_event(event)
+            except Exception:
+                pass
+        if index is not None:
+            try:
+                index.observe(event)
+            except Exception:
+                pass
+
+    return emit
+
+
+class _ObservingAdapter:
+    """Runtime-neutral observation wrapper around one raw adapter.
+
+    The wrapped product sits in the slot's raw position, so every
+    invocation still executes through the single sequential pipeline
+    path. The wrapper depends only on the duck-type execution contract
+    — invoke(request) returning an InvocationResult — so any adapter,
+    local or bridged through any seam, flows through unchanged.
+
+    INVOCATION_STARTED precedes delegation. INVOCATION_FINISHED
+    exists only when a real InvocationResult returned: its status is
+    the result's own status value verbatim, and its duration is only a
+    value the result's trace already holds. When the raw adapter
+    raises there is no result to observe — no FINISHED event is
+    fabricated and the exception propagates unchanged; the failure
+    truth is observed later, at the real terminal boundary. stage and
+    runtime_id are composition facts injected as data; this wrapper
+    holds no runtime knowledge of its own."""
+
+    def __init__(self, raw_adapter, emit, *, stage, runtime_id):
+        self._raw = raw_adapter
+        self._emit = emit
+        self._stage = stage
+        self._runtime_id = runtime_id
+
+    def invoke(self, request):
+        self._emit(ExecutionEventType.INVOCATION_STARTED,
+                   stage=self._stage,
+                   runtime_id=self._runtime_id,
+                   status="STARTED", reason="STARTED")
+        result = self._raw.invoke(request)
+        status = getattr(result, "status", None)
+        status_value = getattr(status, "value", None)
+        if status_value is not None:
+            trace = getattr(result, "trace", None)
+            self._emit(ExecutionEventType.INVOCATION_FINISHED,
+                       stage=self._stage,
+                       runtime_id=self._runtime_id,
+                       status=status_value, reason=status_value,
+                       duration_ms=(None if trace is None
+                                    else getattr(trace, "duration_ms",
+                                                 None)))
+        return result
+
+
 # ---------------------------------------------------------------- main
 
 
 def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
-                 timeout_seconds=None, boundary_hook=None) -> int:
+                 timeout_seconds=None, boundary_hook=None,
+                 observation_sink=None, event_index=None) -> int:
     """`dual-agent cockpit` entry (called by the host_entry dispatch).
 
     Composition + delivery only. Injection surface mirrors the
@@ -395,7 +521,15 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
     execution_id) after assembly and before the single execution call;
     it is not reachable from argv and backs no product control surface
     (v1 has none). It exists so the ABORTED/PARKED delivery contracts
-    stay testable offline."""
+    stay testable offline.
+
+    ``observation_sink`` / ``event_index`` (CU-TUI-1) are in-process
+    execution-event consumers for this composition root — the only
+    observation surface. Both default to None and argv cannot reach
+    either parameter: the default path emits no event and constructs
+    no event store, and stdout/exit codes are byte-identical whether
+    or not observation is injected. Consumer failures stay isolated from
+    the execution path (see _observation_channel)."""
     argv = list(argv)
     parsed, error = _parse_cockpit_arguments(argv)
     json_mode = (parsed.json_mode if parsed is not None
@@ -456,13 +590,22 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
 
     journal = ControlJournal()
     usage_log = UsageLog()
+    emit = (_observation_channel(task_id, execution_id,
+                                 observation_sink, event_index)
+            if (observation_sink is not None
+                or event_index is not None)
+            else None)
     slot_specs = []
     step_specs = []
     for index, (role, runtime_id) in enumerate(parsed.steps):
         slot_id = f"step-{index}-{role}"
+        raw_adapter = resolved[runtime_id].adapter_factory()
+        if emit is not None:
+            raw_adapter = _ObservingAdapter(
+                raw_adapter, emit, stage=role, runtime_id=runtime_id)
         slot_specs.append(ExecutionSlotSpec(
             slot_id=slot_id,
-            raw_adapter=resolved[runtime_id].adapter_factory(),
+            raw_adapter=raw_adapter,
             usage_log=usage_log,
             runtime_id=runtime_id,
             role=role))
@@ -470,13 +613,20 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
             slot_id=slot_id,
             request_builder=_make_request_builder(
                 parsed.task, task_id, role,
-                resolved[runtime_id].provider_id, effective_timeout)))
+                resolved[runtime_id].provider_id, effective_timeout,
+                emit=emit, runtime_id=runtime_id,
+                previous_role=(parsed.steps[index - 1][0]
+                               if index > 0 else None))))
     slots = build_execution_slots(journal, tuple(slot_specs),
                                   execution_id=execution_id)
     pipeline = build_sequential_pipeline(slots, tuple(step_specs))
     if boundary_hook is not None:
         boundary_hook(slots.boundary, execution_id)
     outcome = pipeline.run()
+    if emit is not None:
+        emit(ExecutionEventType.TERMINAL,
+             stage="SEQUENTIAL", runtime_id=None,
+             status=outcome.status.value, reason=outcome.status.value)
 
     if parsed.json_mode:
         payload = _outcome_payload(task_id, outcome, parsed.steps)
