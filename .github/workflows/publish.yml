@@ -15,6 +15,12 @@
 #   the exact artifact built by the build job (single, traceable source of
 #   truth); the release job turns the same tag into a GitHub Release with
 #   the artifacts attached, after PyPI publish succeeds.
+# - Install-state gate (CU 2.4.2-D): before the dist artifact is uploaded,
+#   the build job installs the built wheel into a fresh venv (offline,
+#   --no-index --find-links dist) and runs scripts/verify_installed.py
+#   from a neutral cwd — the same single tested implementation the ci.yml
+#   install-smoke job uses. A gate failure fails the build job before the
+#   upload, so an unverified wheel can never be published or released.
 # - The publish job requires the GitHub Environment "pypi" and a matching
 #   PyPI pending publisher; both are configured on the GitHub/PyPI side,
 #   never by this file alone.
@@ -54,6 +60,17 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
+
+      - name: Wheel install-state gate (fresh venv, offline)
+        # CU 2.4.2-D: verifies the exact bytes headed for upload — the same
+        # recipe as the ci.yml install-smoke job (fresh venv, --no-index
+        # install from this dist/, neutral cwd, scripts/verify_installed.py;
+        # no second implementation, no second build). A failure here fails
+        # the build job BEFORE the artifact upload.
+        run: |
+          python -m venv "$RUNNER_TEMP/release-smoke-venv"
+          "$RUNNER_TEMP/release-smoke-venv/bin/python" -m pip install --no-index --find-links dist dual_agent_development
+          cd "$RUNNER_TEMP" && "$RUNNER_TEMP/release-smoke-venv/bin/python" "$GITHUB_WORKSPACE/scripts/verify_installed.py"
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
