@@ -126,6 +126,15 @@ _QUALIFY_TIMEOUT_FLAG = "--timeout-seconds"
 
 _HINT_QUALIFY = "no persisted qualification evidence: run `dual-agent qualify` first"
 
+# CU 2.4.2-C：REAL gate 关闭时的失败呈现提示（与 _HINT_QUALIFY 同形态的
+# 纯静态文本）。仅在全部 health 受阻段病因均为 UNSUPPORTED_HEALTH_CHECK
+# 时注入 —— mixed 真故障在场绝不提示（会误导为"开门即好"）。不改 gate
+# 行为本身：REAL 仍默认关闭、绝不隐式发生。
+_HINT_REAL_GATE = (
+    "runtime health is REAL-gated and reports UNSUPPORTED honestly; "
+    "set RUN_REAL_PROVIDER_TESTS=1 to enable runtime health "
+    "observation and qualification")
+
 # 顶层产品帮助（P1-U4 §6）：cli.py 的 argparse 只认 run 子命令（V2 冻结
 # 零修改），qualify 的可发现性由本组合根提供。纯静态文本：无证据、无
 # 发现、无组合、无网络即可打印；run 绝不自动 qualify 在此明示。
@@ -483,28 +492,56 @@ def _composition_reason(message: str) -> str:
 
     消息形如 "no admitted verified runtime (rt-a:REASON; rt-b:REASON)"：
     取首个 per-runtime 原因（词表封闭：NO_EVIDENCE_NO_QUALIFIER /
-    HEALTH_* / NOT ADMITTED ... / NO RUNTIMES REGISTERED）。绝不改写
-    语义 —— 完整原文始终在 detail 字段。"""
+    HEALTH_* / NOT ADMITTED ... / NO RUNTIMES REGISTERED）。CU 2.4.2-C
+    起 health 受阻段可携带 " (CODE)" 病因括注（现有词表值均不含
+    " ("）—— 投影时剥离括注，reason 词表字节不变。绝不改写语义 ——
+    完整原文始终在 detail 字段。"""
     inner = message[message.find("(") + 1:] if "(" in message else message
     first = inner.split(";", 1)[0].rstrip(")")
     if ":" in first:
-        return first.split(":", 1)[1].strip()
+        return first.split(":", 1)[1].split(" (", 1)[0].strip()
     return first.strip()
+
+
+def _real_gate_closed(message: str) -> bool:
+    """detail 中全部 health 受阻段的病因都是 REAL gate 关闭（纯呈现判定）。
+
+    分段形如 "rt:HEALTH_ERROR (UNSUPPORTED_HEALTH_CHECK)"（末段额外
+    携带消息收尾括号）。仅当至少一个 health 受阻段且每段病因均为
+    UNSUPPORTED_HEALTH_CHECK 时为 True —— mixed 真故障（CLI_START_FAILED
+    / PROTOCOL_ERROR 等）绝不触发 REAL hint。只服务失败呈现，绝不参与
+    任何判定分支。"""
+    inner = message[message.find("(") + 1:] if "(" in message else ""
+    segments = [part.strip() for part in inner.split(";") if part.strip()]
+
+    def _gate_code(text: str) -> bool:
+        if text.endswith("))"):  # 末段：剥掉消息收尾括号（恰一个）
+            text = text[:-1]
+        return text.endswith("(UNSUPPORTED_HEALTH_CHECK)")
+
+    health_blocked = [part for part in segments if ":HEALTH_" in part]
+    return bool(health_blocked) and all(map(_gate_code, health_blocked))
 
 
 def _semantic_failure(reason: str, message: str, human: str | None = None) -> int:
     """P1-U3 语义失败契约：stdout 机器 JSON + stderr 人类行 + exit 2。
 
     human 可覆盖 stderr 人类行（CU-R3b：ledger 安全拒收不是 runtime
-    资格问题，不得误导）；缺省行为与 P1-U3 逐字节一致。"""
+    资格问题，不得误导）；缺省行为与 P1-U3 逐字节一致。CU 2.4.2-C
+    （presentation-only）：detail 全部 health 受阻段均为 gate 关闭时，
+    复用既有可选 hint 键注入 _HINT_REAL_GATE 并在 stderr 追加提示行。"""
     payload = {"status": "NOT_QUALIFIED", "reason": reason, "detail": message}
     if "NO_EVIDENCE_NO_QUALIFIER" in message:
         payload["hint"] = _HINT_QUALIFY
+    elif _real_gate_closed(message):
+        payload["hint"] = _HINT_REAL_GATE
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     human_default = ("No qualified runtime evidence is available. "
                      "Run `dual-agent qualify` first."
                      if "NO_EVIDENCE_NO_QUALIFIER" in message
                      else f"dual-agent: no admitted verified runtime ({reason})")
+    if human is None and payload.get("hint") is _HINT_REAL_GATE:
+        human_default += "\n" + _HINT_REAL_GATE
     print(human or human_default, file=sys.stderr)
     return 2
 

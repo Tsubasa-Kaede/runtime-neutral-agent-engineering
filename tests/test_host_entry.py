@@ -185,6 +185,17 @@ class HealthFailingFamilyAdapter(FakeFamilyAdapter):
                                   output_class="skipped")
 
 
+class GenuineHealthFailureFamilyAdapter(FakeFamilyAdapter):
+    """真健康故障家族（非 gate 语义）：mini 探测以 CLI_START_FAILED
+    失败 —— 与 UNSUPPORTED_HEALTH_CHECK（REAL gate 关闭）同为 ERROR 态
+    但病因不同。CU 2.4.2-C mixed 诚实性测试用。"""
+
+    def minimal_health_check(self, timeout_seconds):
+        from runtime_health import MinimalHealthCheck
+        return MinimalHealthCheck(False, ReasonCode.CLI_START_FAILED,
+                                  output_class="runtime_unavailable")
+
+
 def evidence_for(runtime_id="rt-a", provider_id="provider-a",
                  fingerprint="default"):
     return CandidateValidationResult(
@@ -1751,6 +1762,132 @@ class RunExceptionRenderingTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")  # 不伪造 JSON
         finally:
             host_entry.run_cli = original
+
+
+class RealGateFailurePresentationTests(unittest.TestCase):
+    """CU 2.4.2-C（REAL-gate 失败呈现分层）：presentation-only。
+
+    HEALTH_ERROR 词表/reason 投影/exit code 全部不变；变化仅在 detail
+    携带真实 ReasonCode + 全部 health 受阻段均为 gate 关闭时注入 REAL
+    hint。mixed 真故障绝不触发 hint（提示会误导为"开门即好"）。
+    NO_EVIDENCE 路径逐字节保持原行为。全部离线 fake adapter，REAL=0。"""
+
+    @staticmethod
+    def _run_main(argv, *, factories, evidence):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(argv, factories=factories,
+                                   evidence=evidence)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    # -- N1：全部 health 受阻 = REAL gate 关闭 → detail 带病因 + hint ----
+
+    def test_all_gate_closed_shows_reason_code_and_real_hint(self):
+        factories = (lambda: HealthFailingFamilyAdapter("rt-a"),
+                     lambda: HealthFailingFamilyAdapter("rt-b"))
+        code, out, err = self._run_main(
+            ["run", "--mode", "on", "redesign architecture across modules"],
+            factories=factories, evidence={})
+        self.assertEqual(code, 2)                      # N6：exit 不变
+        self.assertEqual(len(out.splitlines()), 1)     # stdout 恰 1 行 JSON
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "NOT_QUALIFIED")
+        self.assertEqual(payload["reason"], "HEALTH_ERROR")  # 词表不变
+        # detail 携带真实病因（gate 关闭 ≠ 真故障的区分信息）
+        self.assertIn("rt-a:HEALTH_ERROR (UNSUPPORTED_HEALTH_CHECK)",
+                      payload["detail"])
+        self.assertIn("rt-b:HEALTH_ERROR (UNSUPPORTED_HEALTH_CHECK)",
+                      payload["detail"])
+        # 全部受阻段均为 gate 关闭 → REAL hint（复用既有可选 hint 键）
+        self.assertEqual(payload.get("hint"), host_entry._HINT_REAL_GATE)
+        # stderr：人类行 + 提示行（qualify :817 先例形态）
+        self.assertIn(
+            "dual-agent: no admitted verified runtime (HEALTH_ERROR)", err)
+        self.assertIn("RUN_REAL_PROVIDER_TESTS=1", err)
+        self.assertIn(host_entry._HINT_REAL_GATE, err)
+
+    # -- N2：mixed（gate 关闭 + 真故障）→ 病因双方可见、绝不 REAL hint ---
+
+    def test_mixed_genuine_failure_shows_codes_without_real_hint(self):
+        factories = (lambda: HealthFailingFamilyAdapter("rt-a"),
+                     lambda: GenuineHealthFailureFamilyAdapter("rt-b"))
+        code, out, err = self._run_main(
+            ["run", "--mode", "on", "redesign architecture across modules"],
+            factories=factories, evidence={})
+        self.assertEqual(code, 2)                      # N6：exit 不变
+        payload = json.loads(out)
+        self.assertEqual(payload["reason"], "HEALTH_ERROR")
+        # 双方病因都可见（真故障不被 gate 措辞吞掉）
+        self.assertIn("rt-a:HEALTH_ERROR (UNSUPPORTED_HEALTH_CHECK)",
+                      payload["detail"])
+        self.assertIn("rt-b:HEALTH_ERROR (CLI_START_FAILED)",
+                      payload["detail"])
+        # 诚实性：真故障在场 → 绝不提示"开门即好"
+        self.assertNotIn("hint", payload)
+        self.assertNotIn("RUN_REAL_PROVIDER_TESTS", err)
+
+    # -- N3：NO_EVIDENCE 路径逐字节保持原行为 -------------------------------
+
+    def test_no_evidence_path_unchanged_legacy_behavior(self):
+        factories = (lambda: FakeFamilyAdapter("rt-a"),)
+        code, out, err = self._run_main(
+            ["run", "--mode", "on", "redesign architecture across modules"],
+            factories=factories, evidence={})
+        self.assertEqual(code, 2)                      # N6：exit 不变
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "NOT_QUALIFIED")
+        self.assertEqual(payload["reason"], "NO_EVIDENCE_NO_QUALIFIER")
+        self.assertEqual(payload.get("hint"), host_entry._HINT_QUALIFY)
+        self.assertEqual(
+            "No qualified runtime evidence is available. "
+            "Run `dual-agent qualify` first.", err.strip())
+        self.assertNotIn("RUN_REAL_PROVIDER_TESTS", err)
+
+    # -- N4：_composition_reason 投影稳定（富化 detail → 原 reason） --------
+
+    def test_composition_reason_projects_enriched_detail_stably(self):
+        proj = host_entry._composition_reason
+        # 富化形态：括注被剥离，reason 词表字节不变
+        self.assertEqual(proj(
+            "no admitted verified runtime (rt-a:HEALTH_ERROR "
+            "(UNSUPPORTED_HEALTH_CHECK); rt-b:HEALTH_AUTH_REQUIRED "
+            "(AUTH_REQUIRED))"), "HEALTH_ERROR")
+        self.assertEqual(proj(
+            "no admitted verified runtime (rt-x:HEALTH_AUTH_REQUIRED "
+            "(AUTH_REQUIRED))"), "HEALTH_AUTH_REQUIRED")
+        # 末段富化（外层右括号紧贴）同样剥离干净
+        self.assertEqual(proj(
+            "no admitted verified runtime (rt-a:HEALTH_ERROR "
+            "(CLI_START_FAILED))"), "HEALTH_ERROR")
+        # 既有词表零漂移：多词 reason 不受剥离影响
+        self.assertEqual(proj(
+            "no admitted verified runtime (rt-x:NOT ADMITTED "
+            "status=VERIFIED provenance=OFFLINE)"),
+            "NOT ADMITTED status=VERIFIED provenance=OFFLINE")
+        self.assertEqual(proj(
+            "no admitted verified runtime (rt-a:HEALTH_ERROR)"),
+            "HEALTH_ERROR")
+        self.assertEqual(proj(
+            "no admitted verified runtime (NO RUNTIMES REGISTERED)"),
+            "NO RUNTIMES REGISTERED")
+
+    # -- N5：qualify summary / entry.reason 词表零变化 ----------------------
+
+    def test_qualify_summary_reason_stays_plain_vocabulary(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = host_entry.main(
+                ["qualify"],
+                factories=(lambda: HealthFailingFamilyAdapter("rt-a"),),
+                evidence={})
+        self.assertEqual(code, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["status"], "NOT_QUALIFIED")
+        self.assertEqual(len(payload["entries"]), 1)
+        entry = payload["entries"][0]
+        self.assertEqual(entry["reason"], "HEALTH_ERROR")  # 纯词表，无括注
+        self.assertNotIn("(", entry["reason"])
+        self.assertEqual(entry["health_status"], "ERROR")
 
 
 class PacketForensicsCaptureTests(unittest.TestCase):

@@ -196,8 +196,14 @@ def build_facade_from_bootstrap(
     )
     admitted = [entry for entry in session.entries if entry.admitted]
     if not admitted:
+        # CU 2.4.2-C（presentation-only）：健康受阻段携带观测到的
+        # ReasonCode 括注（gate 关闭 vs 真故障的区分信息）。不改变
+        # entry 列表/顺序/资格判定，也不改写 entry.reason 词表本身。
         reasons = "; ".join(
-            f"{entry.runtime_id}:{entry.reason}" for entry in session.entries
+            f"{entry.runtime_id}:{entry.reason}"
+            + (f" ({entry.health_reason_code})"
+               if entry.health_reason_code else "")
+            for entry in session.entries
         ) or "NO RUNTIMES REGISTERED"
         raise RuntimeError(f"no admitted verified runtime ({reasons})")
     entry = admitted[0]

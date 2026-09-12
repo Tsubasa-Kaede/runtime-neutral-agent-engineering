@@ -38,6 +38,11 @@ class RuntimeBootstrapEntry:
     capabilities: tuple
     admitted: bool
     reason: str
+    # CU 2.4.2-C（presentation-only）：健康受阻时观测到的 ReasonCode 原文
+    # （如 UNSUPPORTED_HEALTH_CHECK=REAL gate 关闭 vs PROTOCOL_ERROR=真
+    # 故障）。纯诊断携带 —— 不进任何判定分支/status 机；其余构造点保持
+    # 默认 None，__post_init__ 既有约束不变。
+    health_reason_code: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("runtime_id", "health_status", "validation_status",
@@ -109,6 +114,7 @@ def bootstrap_runtime_session(
                 health_status=health_status, validation_status=None,
                 provenance=None, capabilities=(), admitted=False,
                 reason=f"HEALTH_{health_status}",
+                health_reason_code=health_result.status.reason_code.value,
             ))
             continue
 
