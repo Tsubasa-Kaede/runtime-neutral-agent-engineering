@@ -1,17 +1,20 @@
 # Post-Release Validation Protocol
 
-Status: active · Current release: **2.3.0** (RELEASED) · Next release:
-**2.4.0** (IN PREPARATION) · V3.2: **IMPLEMENTED — SHIPS IN 2.4.0**
+Status: active · Current release: **2.4.0** (RELEASED) · Next release:
+**2.4.1** (IN PREPARATION — CI-hygiene maintenance, no product
+capability added)
 
 ## 1. Current state
 
-- Release **2.3.0** (tag `v2.3.0`, commit `2dc0dda`) is published:
-  PyPI, GitHub Release, CI 9/9 green, fresh-install verified.
-- **2.4.0 is in preparation**: release metadata committed; the V3.2
-  Release-Gate review passed (2026-09-11, ready with documented
-  non-blocking concerns); push, tag, and PyPI publish each await their
-  separate authorizations.
-- **V3.2 is implemented and ships in 2.4.0**: control, observation,
+- Release **2.4.0** (tag `v2.4.0`, commit `e82de4a`) is published:
+  PyPI, GitHub Release, fresh-install verified.
+- **2.4.1 is in preparation**: CI-hygiene maintenance only (stale
+  protected-untracked lists cleared, Python 3.10 test compatibility,
+  cross-platform forensics fixture, README wording accuracy, release
+  automation) — no product capability added; the wheel differs from
+  2.4.0 only in version and README metadata. Push, tag, and PyPI
+  publish each await their separate authorizations.
+- **V3.2 is implemented and shipped in 2.4.0**: control, observation,
   revision, composition, sequential orchestration, and the
   `dual-agent cockpit` CLI entry, completed through the authorized CU
   chain (2026-09-10/11). Sections 3–11 below record the observation
