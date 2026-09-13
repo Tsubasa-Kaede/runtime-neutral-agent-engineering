@@ -11,9 +11,12 @@ Approved product entry chain (P0 Review, D-P0-1..4):
       -> delivery (human text, or exactly one machine JSON line) + exit
 
 This module is a composition and delivery layer ONLY:
-- the single run call on the built pipeline is the whole execution:
-  no second orchestration loop, no execution-position state, no second
-  attempts, no alternate-path selection, no persistence;
+- execution lifecycle is delegated to CockpitSession (CU-TUI-2): the
+  session owns the RunState continuation value and the control
+  submission gate, and this module makes exactly one segment execution
+  call through it — no second orchestration loop here, no
+  execution-position state of its own, no second attempts, no
+  alternate-path selection, no persistence;
 - journal / control / observation / invocation truth all live in the
   frozen stack: a fresh journal is constructed and handed to the frozen
   assembler, and this module never writes a control fact and never
@@ -53,7 +56,9 @@ from typing import NamedTuple
 try:  # flat-import mode (source tree/tests/examples; also installed: the
       # dual_agent shim keeps flat names resolvable and the graph single)
     from candidate_validation import CandidateValidationStatus
+    from cockpit_session import CockpitSession
     from content_safety import REDACTED_ERROR, contains_unsafe_content
+    from control_boundary import RevisionPayload, RevisionTarget
     from control_journal import ControlJournal
     from execution_observation import (
         ExecutionEvent,
@@ -65,12 +70,13 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
     from sequential_pipeline import (
         RunStatus,
         StepSpec,
-        build_sequential_pipeline,
     )
     from usage_log import UsageLog
 except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
+    from .cockpit_session import CockpitSession
     from .content_safety import REDACTED_ERROR, contains_unsafe_content
+    from .control_boundary import RevisionPayload, RevisionTarget
     from .control_journal import ControlJournal
     from .execution_observation import (
         ExecutionEvent,
@@ -596,7 +602,6 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
                 or event_index is not None)
             else None)
     slot_specs = []
-    step_specs = []
     for index, (role, runtime_id) in enumerate(parsed.steps):
         slot_id = f"step-{index}-{role}"
         raw_adapter = resolved[runtime_id].adapter_factory()
@@ -609,20 +614,39 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
             usage_log=usage_log,
             runtime_id=runtime_id,
             role=role))
-        step_specs.append(StepSpec(
-            slot_id=slot_id,
-            request_builder=_make_request_builder(
-                parsed.task, task_id, role,
-                resolved[runtime_id].provider_id, effective_timeout,
-                emit=emit, runtime_id=runtime_id,
-                previous_role=(parsed.steps[index - 1][0]
-                               if index > 0 else None))))
     slots = build_execution_slots(journal, tuple(slot_specs),
                                   execution_id=execution_id)
-    pipeline = build_sequential_pipeline(slots, tuple(step_specs))
+
+    def _steps(submission):
+        """CU-TUI-2 submission 缝：submission 值 → 受影响 StepSpecs。
+
+        纯闭包：捕获本组合的角色计划与观察参数，按 submission
+        文本构造每步 builder。task 为权威任务文本；prompt-only
+        修订按同一文本位生效（v1 任务面单文本）；全空时回落
+        初始任务。SUBMISSION 修订由 session 在 fresh segment
+        起点消费后经本工厂重建（旧 builders 不再被引用）。"""
+        text = (submission.task if submission.task is not None
+                else (submission.prompt if submission.prompt is not None
+                      else parsed.task))
+        return tuple(
+            StepSpec(
+                slot_id=f"step-{index}-{role}",
+                request_builder=_make_request_builder(
+                    text, task_id, role,
+                    resolved[runtime_id].provider_id, effective_timeout,
+                    emit=emit, runtime_id=runtime_id,
+                    previous_role=(parsed.steps[index - 1][0]
+                                   if index > 0 else None)))
+            for index, (role, runtime_id) in enumerate(parsed.steps))
+
+    session = CockpitSession(
+        boundary=slots.boundary, slots=slots,
+        submission=RevisionPayload(target=RevisionTarget.SUBMISSION,
+                                   task=parsed.task),
+        steps_factory=_steps)
     if boundary_hook is not None:
         boundary_hook(slots.boundary, execution_id)
-    outcome = pipeline.run()
+    outcome = session.run_segment()
     if emit is not None:
         emit(ExecutionEventType.TERMINAL,
              stage="SEQUENTIAL", runtime_id=None,

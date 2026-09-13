@@ -720,7 +720,8 @@ class ExitCodeTests(unittest.TestCase):
 
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
-    "candidate_validation", "content_safety", "control_journal",
+    "candidate_validation", "cockpit_session", "content_safety",
+    "control_boundary", "control_journal",
     "execution_observation", "execution_slots", "external_runtime",
     "host_entry", "sequential_pipeline", "usage_log",
 }
@@ -781,11 +782,16 @@ class ArchitectureGuardTests(unittest.TestCase):
             self.assertNotIn(token, self.source)
 
     def test_pipeline_built_only_through_factory(self):
-        self.assertIn("build_sequential_pipeline(", self.source)
+        # CU-TUI-2: pipeline 构建移入 session 组件；本层只构造
+        # session 与 steps 工厂——直接构造器零出现、构建函数零引用
+        self.assertIn("CockpitSession(", self.source)
         self.assertNotIn("SequentialPipeline(", self.source)
+        self.assertNotIn("build_sequential_pipeline(", self.source)
 
     def test_exactly_one_pipeline_execution_call(self):
-        self.assertEqual(self.source.count(".run("), 1)
+        # CU-TUI-2: 恰一次段执行调用（经 session）；裸 .run( 零出现
+        self.assertEqual(self.source.count(".run_segment("), 1)
+        self.assertNotIn(".run(", self.source)
 
     def test_no_second_orchestration_loop(self):
         self.assertNotIn("while ", self.source)
