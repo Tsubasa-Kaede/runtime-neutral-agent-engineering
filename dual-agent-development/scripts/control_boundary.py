@@ -529,6 +529,40 @@ class ControlBoundary:
                 park_point=effective_park,
                 revision_queue=tuple(self._queue))
 
+    def consume_revisions(self, revision_ids) -> tuple:
+        """消费已跨越真实委托边界的 pending 修订（G1：one-shot
+        trailing FIFO）。
+
+        与 submit/snapshot 同一临界区内按 revision_id 精确移除：FIFO
+        序保持、未匹配 id 零作用、在途新提交的不同 id 绝不误删；
+        返回实际移除条目（快照序）。不落任何事实——消费真值即既有
+        REVISION_APPLIED（journaler 旁路），本方法只闭合 pending 缓冲
+        的生命周期。bare string / 不可迭代 / 空串或非串 id 一律拒绝
+        （宁可拒绝不可误拆误删）。
+        """
+        if isinstance(revision_ids, (str, bytes)):
+            raise ControlModelError(
+                "consume_revisions expects an iterable of revision ids")
+        try:
+            candidates = list(revision_ids)
+        except TypeError as error:
+            raise ControlModelError(
+                "consume_revisions expects an iterable of revision ids"
+            ) from error
+        for revision_id in candidates:
+            _require_non_empty_string(revision_id, "revision_id")
+        with self._lock:
+            consumed = set(candidates)
+            remaining = []
+            removed = []
+            for entry in self._queue:
+                if entry.revision_id in consumed:
+                    removed.append(entry)
+                else:
+                    remaining.append(entry)
+            self._queue[:] = remaining
+            return tuple(removed)
+
     def _adjudicate(self, command_type, pending_kind):
         """intent 层确定性裁决；只产生 (status, reason) 决策。"""
         if command_type is ControlCommandType.ABORT:

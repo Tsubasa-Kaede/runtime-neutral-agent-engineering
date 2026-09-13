@@ -15,8 +15,8 @@
 - accepted ≠ applied：ABORT pending ⇒ ControlAborted、raw 零进入、
   零 APPLIED；APPLIED 仅由真实 handoff 产生。
 - APPLIED ≠ HONORED：B 级证据，不声称 runtime 遵守。
-- 队列不排干：同队列二次 invoke ⇒ 两组 APPLIED（invocation_id
-  互异）为合法真实物理事件，零 suppression。
+- G1 one-shot 排干：委托发起后消费所携带修订 ⇒ 二次 invoke 零携带、
+  零新 APPLIED；D2 并发下的重复携带为有界合法物理事件。
 - ControlGate 不接线（无 pause hold/park/lifecycle）。
 """
 import ast
@@ -236,7 +236,7 @@ class AbortSemanticsTests(unittest.TestCase):
 
 
 class IdempotencyTests(unittest.TestCase):
-    """S8-S9：replay 零副作用 / 同队列两次两组 APPLIED。"""
+    """S8-S9：replay 零副作用 / 同队列两次恰一组 APPLIED（G1 one-shot）。"""
 
     def test_command_replay_zero_side_effects(self):
         stack, journal, _, _ = make_stack()
@@ -252,18 +252,19 @@ class IdempotencyTests(unittest.TestCase):
             ControlLifecycle.RUNNING).revision_queue,
             queue_after_first)  # 零新队列
 
-    def test_same_queue_twice_two_applied_distinct_invocations(self):
+    def test_same_queue_consumed_after_first_invocation(self):
+        # G1：首次委托携带并消费；第二次零携带、零新 APPLIED
         stack, journal, log, _ = make_stack()
         stack.boundary.submit(next_rev("rev-1", "t"))
         stack.invoke(make_request(task_id="task-a"))
         stack.invoke(make_request(task_id="task-b"))
         applied = applied_facts(journal)
-        self.assertEqual(len(applied), 2)  # 合法重复，零 suppression
-        self.assertEqual([f.command_id for f in applied], ["rev-1", "rev-1"])
-        ids = [f.payload["invocation_id"] for f in applied]
-        self.assertNotEqual(ids[0], ids[1])  # 物理事件互异
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0].command_id, "rev-1")
+        self.assertEqual(stack.boundary.snapshot(
+            ControlLifecycle.RUNNING).revision_queue, ())
         record_ids = [r.invocation_id for r in log.snapshot()]
-        self.assertEqual(sorted(ids), sorted(record_ids))  # 与记录对齐
+        self.assertIn(applied[0].payload["invocation_id"], record_ids)
 
 
 class QueueSemanticsTests(unittest.TestCase):

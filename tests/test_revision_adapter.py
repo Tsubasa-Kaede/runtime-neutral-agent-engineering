@@ -299,31 +299,33 @@ class QueueSemanticsTests(unittest.TestCase):
         pending_before = boundary.pending_intent
         adapter.invoke(make_request())
         self.assertEqual(journal.snapshot(), facts_before)
+        # G1：委托发起后一次性消费——队列不再原封（sticky 反证）
         self.assertEqual(boundary.snapshot(
-            ControlLifecycle.RUNNING).revision_queue, queue_before)
+            ControlLifecycle.RUNNING).revision_queue, ())
         self.assertEqual(boundary.execution_version, version_before)
         self.assertEqual(boundary.pending_intent, pending_before)
         self.assertEqual(boundary.pending_intent.kind,
                          PendingIntentKind.NONE)
 
-    def test_queue_not_drained_by_rev1(self):
-        # 移除/排干属 REV-2（APPLIED @ raw handoff）：REV-1 只读不删
+    def test_queue_drained_once_after_delegation(self):
+        # G1：委托发起后一次性精确消费所携带全集（one-shot trailing FIFO）
         adapter, boundary, _, _ = make_adapter()
         boundary.submit(next_rev("rev-1", "a"))
         boundary.submit(next_rev("rev-2", "b"))
         adapter.invoke(make_request())
         queue = boundary.snapshot(ControlLifecycle.RUNNING).revision_queue
-        self.assertEqual([entry.revision_id for entry in queue],
-                         ["rev-1", "rev-2"])
+        self.assertEqual([entry.revision_id for entry in queue], [])
 
-    def test_repeated_invoke_same_overlay_when_queue_stable(self):
-        # 构造纯函数：队列不变 ⇒ 两次 overlay 逐字相同、顺序稳定
+    def test_second_invoke_after_drain_carries_nothing(self):
+        # G1：首次委托携带并消费；第二次零 overlay、原样下传
         adapter, boundary, _, spy = make_adapter()
         boundary.submit(next_rev("rev-1", "a"))
         adapter.invoke(make_request())
         adapter.invoke(make_request())
         first, second = spy.calls[0][0], spy.calls[1][0]
-        self.assertEqual(first.prompt, second.prompt)
+        self.assertIn("[USER REVISION rev-1]", first.prompt)
+        self.assertEqual(second.prompt, "base prompt")
+        self.assertEqual(spy.calls[1][1], ())
 
 
 class CorrelationTests(unittest.TestCase):

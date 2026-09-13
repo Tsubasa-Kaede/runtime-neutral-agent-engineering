@@ -15,8 +15,9 @@
   同一真相的只读观察者；执行异常（含控制域中止异常）原样穿透，
   零捕获、零确认事实、零终态。
 - 共享修订队列 execution-scoped：每 slot invoke 读同一 detached
-  快照、当前全部 pending 修订随该次委托携带——零排干/零过滤/
-  零路由（targeted revision 属未来编排单元）。
+  快照、当前全部 pending 修订随该次委托携带——G1 委托发起后
+  一次性精确消费（D2 并发下有界重复）、零过滤/零路由
+  （targeted revision 属未来编排单元）。
 - identity 零新增：execution_id caller 供应；invocation 身份仍由
   既有唯一铸造点生成；slot_id 只是组合映射键。
 - 组装一次性、不可变：零组合域锁、零动态拓扑；构造失败零残留。
@@ -42,6 +43,7 @@ from execution_slots import (  # noqa: E402
 from control_boundary import (  # noqa: E402
     ControlCommand,
     ControlCommandType,
+    ControlLifecycle,
     ControlModelError,
     ControlStatus,
     RevisionPayload,
@@ -159,36 +161,41 @@ class TwoSlotTests(unittest.TestCase):
     """T2：双 slot 各自 raw 收到各自 request / overlay。"""
 
     def test_two_slots_receive_own_requests_and_overlay(self):
+        # G1：slot a 首次委托携带并消费 r1；随后提交 r2 由 slot b 的
+        # 委托携带——共享 boundary 真相仍对任意 slot 可达
         group, _, specs = make_group()
         group.boundary.submit(next_rev("r1", "shared text"))
         group.slot("a").invoke(make_request(task_id="task-a"))
+        group.boundary.submit(next_rev("r2", "second text"))
         group.slot("b").invoke(make_request(task_id="task-b"))
         raw_a, raw_b = spec_raw(specs[0]), spec_raw(specs[1])
         self.assertEqual(raw_a.entries, ["task-a"])  # 各自只收自己的
         self.assertEqual(raw_b.entries, ["task-b"])
-        for raw in (raw_a, raw_b):
-            self.assertIn("[USER REVISION r1]", raw.requests[0].prompt)
-            self.assertIn("shared text", raw.requests[0].prompt)
+        self.assertIn("[USER REVISION r1]", raw_a.requests[0].prompt)
+        self.assertIn("shared text", raw_a.requests[0].prompt)
+        self.assertIn("[USER REVISION r2]", raw_b.requests[0].prompt)
+        self.assertIn("second text", raw_b.requests[0].prompt)
+        self.assertNotIn("[USER REVISION r1]", raw_b.requests[0].prompt)
 
 
 class SingleBoundaryTests(unittest.TestCase):
     """T3：所有 slot 引用同一个 Boundary（行为证明：控制真相全 slot 生效）。"""
 
     def test_revision_and_abort_obeyed_by_all_slots(self):
-        # 经 THE boundary 提交的修订到达所有 slot 的 overlay；
-        # 经 THE boundary 提交的中止拒绝所有 slot 的后续委托
+        # 修订真相：经 THE boundary 提交的修订由首个跨边界的 slot 委托
+        # 携带（G1 one-shot）；控制真相：经 THE boundary 提交的中止
+        # 拒绝所有 slot 的后续委托
         group, _, specs = make_group()
         group.boundary.submit(next_rev("r1", "t"))
         group.slot("a").invoke(make_request(task_id="ta"))
-        group.slot("b").invoke(make_request(task_id="tb"))
-        self.assertIn("[USER REVISION r1]", spec_raw(specs[0]).requests[0].prompt)
-        self.assertIn("[USER REVISION r1]", spec_raw(specs[1]).requests[0].prompt)
+        self.assertIn("[USER REVISION r1]",
+                      spec_raw(specs[0]).requests[0].prompt)
         group.boundary.submit(abort_cmd())
         for slot_id in ("a", "b"):
             with self.assertRaises(ControlAborted):
                 group.slot(slot_id).invoke(make_request())
         self.assertEqual(spec_raw(specs[0]).entries, ["ta"])  # 零新进入
-        self.assertEqual(spec_raw(specs[1]).entries, ["tb"])
+        self.assertEqual(spec_raw(specs[1]).entries, [])
 
 
 class SingleJournalTests(unittest.TestCase):
@@ -202,9 +209,9 @@ class SingleJournalTests(unittest.TestCase):
         group.slot("a").invoke(make_request())
         group.slot("b").invoke(make_request())
         types = [f.fact_type for f in journal.snapshot()]
+        # G1：slot a 携带并消费 ⇒ 恰一组 APPLIED；slot b 零携带
         self.assertEqual(types,
                          [ControlFactType.REVISE_REQUESTED,
-                          ControlFactType.REVISION_APPLIED,
                           ControlFactType.REVISION_APPLIED])
 
 
@@ -223,23 +230,28 @@ class InvocationIdentityTests(unittest.TestCase):
 
 
 class SharedRevisionTests(unittest.TestCase):
-    """T6：shared revision 双 slot 各自携带 → 同 journal 两条 APPLIED。"""
+    """T6：shared revision 由首个跨边界 slot 委托携带（G1 one-shot）。"""
 
-    def test_shared_revision_two_applied_distinct_invocations(self):
+    def test_shared_revision_carried_once_then_consumed(self):
         group, journal, specs = make_group()
         group.boundary.submit(next_rev("R1", "t"))
         group.slot("a").invoke(make_request(task_id="ta"))
         group.slot("b").invoke(make_request(task_id="tb"))
+        # 首个 invocation 携带；后续 invocation plain（零 overlay）
+        self.assertIn("[USER REVISION R1]",
+                      spec_raw(specs[0]).requests[0].prompt)
+        self.assertNotIn("[USER REVISION R1]",
+                         spec_raw(specs[1]).requests[0].prompt)
         applied = [f for f in journal.snapshot()
                    if f.fact_type is ControlFactType.REVISION_APPLIED]
-        self.assertEqual(len(applied), 2)
-        self.assertEqual({f.command_id for f in applied}, {"R1"})
-        ids = [f.payload["invocation_id"] for f in applied]
-        self.assertEqual(len(set(ids)), 2)  # invocation_id 互异
-        # 每条 APPLIED 的 invocation_id 与对应 slot 的 record 对应
-        log_ids = {spec_log(specs[0]).snapshot()[0].invocation_id,
-                   spec_log(specs[1]).snapshot()[0].invocation_id}
-        self.assertEqual(set(ids), log_ids)
+        self.assertEqual(len(applied), 1)  # G1：恰一组
+        self.assertEqual(applied[0].command_id, "R1")
+        # invocation_id 与首个 slot 的 record 对齐
+        self.assertEqual(applied[0].payload["invocation_id"],
+                         spec_log(specs[0]).snapshot()[0].invocation_id)
+        # queue 最终为空
+        self.assertEqual(group.boundary.snapshot(
+            ControlLifecycle.RUNNING).revision_queue, ())
 
 
 class AbortTests(unittest.TestCase):
@@ -348,8 +360,9 @@ class ConcurrencyTests(unittest.TestCase):
             {f"task-{n}" for n in range(per_slot, per_slot * 2)})
 
     def test_t11_two_revisions_concurrent_two_slots(self):
-        # 冻结语义：队列 execution-scoped ⇒ 每 slot 的该次委托
-        # 携带当前全部 pending（R1+R2），各自 handoff
+        # G1 + D2 冻结语义：队列 execution-scoped 且携带即消费 ⇒
+        # 每委托携带集只能完整 pending 集（R1+R2）或空集；
+        # APPLIED ∈ {2,4}、pending 终空
         group, journal, specs = make_group()
         group.boundary.submit(next_rev("R1", "text-1"))
         group.boundary.submit(next_rev("R2", "text-2"))
@@ -358,23 +371,31 @@ class ConcurrencyTests(unittest.TestCase):
                 make_request(task_id=f"task-{n}")))
         self.assertEqual(errors, [])
         for raw in (spec_raw(specs[0]), spec_raw(specs[1])):
-            prompt = raw.requests[0].prompt
-            self.assertIn("[USER REVISION R1]", prompt)  # 双修订全携带
-            self.assertIn("[USER REVISION R2]", prompt)
+            self.assertEqual(len(raw.requests), 1)  # 各恰一次委托
         applied = [f for f in journal.snapshot()
                    if f.fact_type is ControlFactType.REVISION_APPLIED]
-        self.assertEqual(len(applied), 4)  # 2 invocation × 2 revisions
+        self.assertIn(len(applied), (2, 4))
+        # 首个跨边界委托恒携带全集 ⇒ R1+R2 必然都出现过
+        self.assertEqual({f.command_id for f in applied}, {"R1", "R2"})
         ids = {f.payload["invocation_id"] for f in applied}
-        self.assertEqual(len(ids), 2)  # 恰两个 invocation（互异）
-        # 每 invocation 恰携带 {R1, R2}，零串线零丢失
+        self.assertLessEqual(len(ids), 2)
+        # 携带集只能全集或空集（结构性无部分携带；空集不产生事实）
         per_invocation = {}
         for fact in applied:
             per_invocation.setdefault(fact.payload["invocation_id"],
                                       set()).add(fact.command_id)
         for revision_set in per_invocation.values():
             self.assertEqual(revision_set, {"R1", "R2"})
+        # G1：pending 终空（一次性消费闭合）
+        self.assertEqual(group.boundary.snapshot(
+            ControlLifecycle.RUNNING).revision_queue, ())
+        log_ids = {spec_log(specs[0]).snapshot()[0].invocation_id,
+                   spec_log(specs[1]).snapshot()[0].invocation_id}
+        self.assertTrue(ids <= log_ids)  # 与各 slot record 对应
 
     def test_t12_same_revision_concurrent_two_slots(self):
+        # G1 + D2：单修订并发 ⇒ APPLIED ∈ {1,2}；每 invocation 携带集
+        # 只能 {R1} 或空集；pending 终空
         group, journal, specs = make_group()
         group.boundary.submit(next_rev("R1", "t"))
         errors = self._run_threads(
@@ -382,19 +403,23 @@ class ConcurrencyTests(unittest.TestCase):
                 make_request(task_id=f"task-{n}")))
         self.assertEqual(errors, [])
         facts = journal.snapshot()
-        self.assertEqual([f.fact_type for f in facts],
-                         [ControlFactType.REVISE_REQUESTED,
-                          ControlFactType.REVISION_APPLIED,
-                          ControlFactType.REVISION_APPLIED])
-        # journal 锁证明：seq 严格连续无重复
-        self.assertEqual([f.seq for f in facts], [0, 1, 2])
-        applied = facts[1:]
+        applied = [f for f in facts
+                   if f.fact_type is ControlFactType.REVISION_APPLIED]
+        self.assertIn(len(applied), (1, 2))
+        # journal 锁证明：seq 严格连续无重复（REVISE_REQUESTED 后缀 k 条）
+        self.assertEqual([f.seq for f in facts],
+                         list(range(len(facts))))
+        self.assertEqual(facts[0].fact_type,
+                         ControlFactType.REVISE_REQUESTED)
         self.assertEqual({f.command_id for f in applied}, {"R1"})
         ids = [f.payload["invocation_id"] for f in applied]
-        self.assertEqual(len(set(ids)), 2)  # 互异
+        self.assertEqual(len(set(ids)), len(ids))  # 互异
+        # G1：pending 终空
+        self.assertEqual(group.boundary.snapshot(
+            ControlLifecycle.RUNNING).revision_queue, ())
         log_ids = {spec_log(specs[0]).snapshot()[0].invocation_id,
                    spec_log(specs[1]).snapshot()[0].invocation_id}
-        self.assertEqual(set(ids), log_ids)  # 与各 slot record 对应
+        self.assertTrue(set(ids) <= log_ids)  # 与各 slot record 对应
 
 
 class PublicSurfaceTests(unittest.TestCase):

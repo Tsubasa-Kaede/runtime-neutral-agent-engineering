@@ -39,6 +39,7 @@ from control_boundary import (  # noqa: E402
     ControlBoundary,
     ControlCommand,
     ControlCommandType,
+    ControlLifecycle,
     ControlModelError,
     ControlStatus,
     RevisionPayload,
@@ -476,8 +477,9 @@ class ConcurrencyTests(unittest.TestCase):
                              f"rev-{fact.execution_id.split('-')[1]}")
 
     def test_concurrent_invoke_same_lane_revision_fan_out(self):
-        # 同一 lane 内 1 条 revision × N 并发 invoke（队列不排空）：
-        # 每次真实 handoff 恰一条 APPLIED ⇒ N 条、invocation_id 互异
+        # 同一 lane 内 1 条 revision × N 并发 invoke（G1 + D2 有界
+        # 重复）：每委托携带集只能全集 {rev-1} 或空集 ⇒ APPLIED ∈
+        # {1..8}（首个快照者恒携带 ⇒ ≥1）、invocation_id 互异、终空
         raw = _SpyRaw(result=_success())
         root = CompositionRoot()
         composition, _, _ = make_composition(root=root, raw=raw)
@@ -504,11 +506,14 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(raw.entries), count)
         applied = [f for f in root.facts()
                    if f.fact_type is ControlFactType.REVISION_APPLIED]
-        self.assertEqual(len(applied), count)  # 每 invoke 恰一事实
+        self.assertIn(len(applied), range(1, count + 1))  # D2 有界重复
         ids = [f.payload["invocation_id"] for f in applied]
-        self.assertEqual(len(set(ids)), count)  # invocation_id 互异
+        self.assertEqual(len(set(ids)), len(ids))  # invocation_id 互异
         for fact in applied:
             self.assertEqual(fact.command_id, "rev-1")  # 无 id 串线
+        # G1：pending 最终清空
+        self.assertEqual(composition.boundary.snapshot(
+            ControlLifecycle.RUNNING).revision_queue, ())
 
 
 class ArchitectureTests(unittest.TestCase):

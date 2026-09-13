@@ -925,22 +925,22 @@ class MidParkResumeTests(unittest.TestCase):
             command=ControlCommandType.RESUME))
         resumed = pipeline.run(parked.run_state)
         self.assertIs(resumed.status, RunStatus.COMPLETED)
-        # step 1 与 step 2 的 prompt 均经既有 overlay 携带（不排干）
-        for slot, base in (("b", "step-1"), ("c", "step-2")):
-            prompt = raw_map[slot].requests[0].prompt
-            self.assertIn("[USER REVISION rv1]", prompt)
-            self.assertIn("REV-TEXT", prompt)
-            self.assertIn("[Obey all format rules above. END OF REVISION]",
-                          prompt)
-            self.assertTrue(prompt.startswith(base))  # 原 prompt 逐字在前
-        # 既有 seam 落 REVISION_APPLIED（每携带委托每 revision 一条）；
+        # G1：恢复后恰首个后续委托携带（one-shot 消费）；此后步骤
+        # prompt 回归原文
+        prompt_b = raw_map["b"].requests[0].prompt
+        self.assertIn("[USER REVISION rv1]", prompt_b)
+        self.assertIn("REV-TEXT", prompt_b)
+        self.assertIn("[Obey all format rules above. END OF REVISION]",
+                      prompt_b)
+        self.assertTrue(prompt_b.startswith("step-1"))  # 原 prompt 逐字在前
+        self.assertEqual(raw_map["c"].requests[0].prompt, "step-2")
+        # 既有 seam 落 REVISION_APPLIED（恰一组：携带即消费）；
         # 事实序列恰控制域产出——编排零自写、零确认类事实
         fact_types = [fact.fact_type for fact in journal.snapshot()]
         self.assertEqual(fact_types, [
             ControlFactType.PAUSE_REQUESTED,
             ControlFactType.REVISE_REQUESTED,
             ControlFactType.RESUME_REQUESTED,
-            ControlFactType.REVISION_APPLIED,
             ControlFactType.REVISION_APPLIED,
         ])
 
@@ -1189,7 +1189,9 @@ class TwoRunStateTests(unittest.TestCase):
         self.assertEqual(raw_map["b"].entries, [])  # 双双零新调用
         self.assertEqual(seen, [])
 
-    def test_shared_revision_hits_both_next_invocations(self):
+    def test_shared_revision_hits_first_resumed_run_once(self):
+        # G1：双 run 共享 boundary——首个恢复 run 的下一次委托携带并
+        # 消费；第二个恢复 run 零携带、原始 prompt
         (pipeline, group, journal, raw_map, seen,
          parked_a, parked_b) = self._parked_two_runs_at_step1()
         group.boundary.submit(revise_cmd(command_id="rv-shared",
@@ -1198,14 +1200,18 @@ class TwoRunStateTests(unittest.TestCase):
         final_b = pipeline.run(parked_b.run_state)
         self.assertIs(final_a.status, RunStatus.COMPLETED)
         self.assertIs(final_b.status, RunStatus.COMPLETED)
-        prompts = [raw_map["b"].requests[0].prompt,
-                   raw_map["b"].requests[1].prompt]
-        for prompt in prompts:  # 双 run 的下一次 invocation 均命中
-            self.assertIn("[USER REVISION rv-shared]", prompt)
-            self.assertIn("SHARED-REV", prompt)
+        first_prompt = raw_map["b"].requests[0].prompt
+        second_prompt = raw_map["b"].requests[1].prompt
+        self.assertIn("[USER REVISION rv-shared]", first_prompt)
+        self.assertIn("SHARED-REV", first_prompt)
+        self.assertEqual(second_prompt, "step-1")  # 零携带回归原文
         fact_types = [fact.fact_type for fact in journal.snapshot()]
         self.assertEqual(fact_types.count(ControlFactType.REVISION_APPLIED),
-                         2)  # 每携带委托一条
+                         1)  # 恰一组（携带即消费）
+        # 事实序列：修订请求后紧跟恰一组 APPLIED（第二个 run 零事实）
+        self.assertEqual(fact_types[-2:],
+                         [ControlFactType.REVISE_REQUESTED,
+                          ControlFactType.REVISION_APPLIED])
 
 
 class FrozenSurfaceGuardTests(unittest.TestCase):

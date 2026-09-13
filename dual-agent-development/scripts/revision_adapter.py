@@ -9,8 +9,10 @@
 追加到原 prompt 之后，其余一切原样。具体地：
 
 - 队列只读快照（snapshot 的 lifecycle 实参是投影上下文，队列
-  本身与 lifecycle 无关——CTRL-6 已锁定该无关性）；本层不排干、
-  不移除、不重排——移除语义属下一单元（APPLIED @ raw handoff）。
+  本身与 lifecycle 无关——CTRL-6 已锁定该无关性）；本层在委托
+  真正发起之后按 revision_id 精确消费所携带条目（G1：one-shot
+  trailing FIFO——消费事实不因结果成败改变，队列读取仍是脱钩
+  快照、不重排不合并不改写）。
 - overlay 精确格式（逐字保真，零合并/去重/改写）：
 
       <原 prompt 逐字不动>
@@ -55,7 +57,8 @@ def _overlay(prompt: str, revisions) -> str:
 
 
 class RevisionAdapter:
-    """prompt overlay 包装：只读消费修订队列 → 构造新 request 下传。"""
+    """prompt overlay 包装：快照修订队列 → 构造新 request 下传，
+    委托发起后一次性精确消费（G1）。"""
 
     def __init__(self, boundary, next_layer):
         if not isinstance(boundary, ControlBoundary):
@@ -66,11 +69,21 @@ class RevisionAdapter:
         self._next = next_layer
 
     def invoke(self, request):
-        """应用 pending 修订后委托下层；raw 语义原样透传。"""
+        """应用 pending 修订后委托下层；raw 语义原样透传。
+
+        委托调用表达式发起后（finally 边界）一次性精确消费所携带
+        修订：结果成败、下层异常、观察侧落账失败均不改变消费事实；
+        构造失败（未发起）零消费。
+        """
         queue = self._boundary.snapshot(
             ControlLifecycle.RUNNING).revision_queue
         if not queue:
             return self._next.invoke(request)
         overlaid = replace(request, prompt=_overlay(request.prompt, queue))
         applied = tuple(entry.revision_id for entry in queue)
-        return self._next.invoke(overlaid, applied_revisions=applied)
+        try:
+            return self._next.invoke(overlaid, applied_revisions=applied)
+        finally:
+            # 委托已跨越真实 invocation 边界 ⇒ 一次性消费；与 submit
+            # 同锁精确按 id 删除，在途新提交的不同 id 不受影响
+            self._boundary.consume_revisions(applied)
