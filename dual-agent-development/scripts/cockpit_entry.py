@@ -58,7 +58,13 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
     from candidate_validation import CandidateValidationStatus
     from cockpit_session import CockpitSession
     from content_safety import REDACTED_ERROR, contains_unsafe_content
-    from control_boundary import RevisionPayload, RevisionTarget
+    from control_boundary import (
+        ControlCommand,
+        ControlCommandType,
+        ControlLifecycle,
+        RevisionPayload,
+        RevisionTarget,
+    )
     from control_journal import ControlJournal
     from execution_observation import (
         ExecutionEvent,
@@ -76,7 +82,13 @@ except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
     from .cockpit_session import CockpitSession
     from .content_safety import REDACTED_ERROR, contains_unsafe_content
-    from .control_boundary import RevisionPayload, RevisionTarget
+    from .control_boundary import (
+        ControlCommand,
+        ControlCommandType,
+        ControlLifecycle,
+        RevisionPayload,
+        RevisionTarget,
+    )
     from .control_journal import ControlJournal
     from .execution_observation import (
         ExecutionEvent,
@@ -695,14 +707,53 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
     if boundary_hook is not None:
         boundary_hook(slots.boundary, execution_id)
 
+    command_counter = [0]
+
+    def _dispatch_control(kind, text=None, target=None):
+        """CU-TUI-4 DISPATCH 边界：呈现层意图 → 冻结命令值 →
+        session 门面（G3 终态门 → boundary 裁决 → 同步回执）。
+
+        command_id 在此单调铸造（ui-N；进程内唯一即满足 replay
+        identity，零持久化承诺）。REVISE 附 expected_version（读取
+        时点真值，竞态由 STALE_VERSION 如实裁决）；载荷映射沿冻结
+        值对象的结构面：NEXT_INVOCATION 只收 text，SUBMISSION 只收
+        prompt/task。PAUSE/RESUME/ABORT 零载荷。"""
+        command_counter[0] += 1
+        payload = None
+        expected_version = None
+        if kind == "REVISE":
+            if target == "SUBMISSION":
+                payload = RevisionPayload(
+                    target=RevisionTarget.SUBMISSION, prompt=text)
+            else:
+                payload = RevisionPayload(
+                    target=RevisionTarget.NEXT_INVOCATION, text=text)
+            expected_version = slots.boundary.execution_version
+        return session.submit(ControlCommand(
+            command_id=f"ui-{command_counter[0]}",
+            execution_id=execution_id,
+            command=ControlCommandType(kind),
+            payload=payload,
+            expected_version=expected_version))
+
+    def _revision_pending():
+        """CU-TUI-4 READ 边界：pending 修订队列的只读长度。
+
+        零缓存、零变更、零 enqueue、零命令构造（与 DISPATCH 严格
+        分离）。lifecycle 实参沿 revision_adapter 的既有组合惯例
+        （revision_adapter.py 同款调用形状）——队列读数与 lifecycle
+        投影正交，绝不借读数伪造执行态。"""
+        return len(slots.boundary.snapshot(
+            ControlLifecycle.RUNNING).revision_queue)
+
     def _drive():
         """唯一段执行点（G4）：呈现层经此注入回调驱动，
         无呈现层时本层直接调用——两条路径零行为分叉。"""
         return session.run_segment()
 
     if tui is not None:
-        # 呈现层 = 只读投影 + 注入驱动；执行/控制/观察真相
-        # 仍在冻结栈（session / boundary / journal / stores）
+        # 呈现层 = 只读投影 + 注入驱动 + 注入意图外发；执行/控制/
+        # 观察真相仍在冻结栈（session / boundary / journal / stores）
         outcome = tui.run_cockpit_tui(
             driver=_drive,
             task=parsed.task,
@@ -715,7 +766,9 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
                             if event_index is not None else ()),
             facts=journal.snapshot,
             usage=usage_log.snapshot,
-            session=session)
+            session=session,
+            control=_dispatch_control,
+            revision_pending=_revision_pending)
     else:
         outcome = _drive()
     if emit is not None:

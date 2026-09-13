@@ -30,7 +30,12 @@ sys.path.insert(0, str(SCRIPTS))
 import cockpit_entry
 import host_entry
 from candidate_validation import CandidateValidationStatus
-from control_boundary import ControlCommand, ControlCommandType
+from control_boundary import (
+    ControlCommand,
+    ControlCommandType,
+    ControlLifecycle,
+    ControlStatus,
+)
 from external_runtime import (
     InvocationResult,
     InvocationStatus,
@@ -775,8 +780,11 @@ class ArchitectureGuardTests(unittest.TestCase):
         self.assertEqual(self.source.count(".invoke("), 1)
 
     def test_no_control_or_journal_writes(self):
-        for token in (".submit(", "on_handoff", "journal.append"):
+        # CU-TUI-4 精确放宽：控制提交唯一出口 = 组合根 dispatcher
+        # 恰一次 session 门面调用；journal 直写与其它提交面仍禁。
+        for token in ("on_handoff", "journal.append"):
             self.assertNotIn(token, self.source)
+        self.assertEqual(self.source.count(".submit("), 1)
 
     def test_no_identity_minting(self):
         for token in ("uuid4", "new_invocation_id"):
@@ -999,6 +1007,163 @@ class TuiRoutingTests(unittest.TestCase):
         self.assertNotIn("import textual", source)
         # the only UI touchpoint is the cockpit_tui module load helper
         self.assertIn("_cockpit_tui_module", source)
+
+
+# ------------------------------------ 10. CU-TUI-4 control surface (C1/C2)
+
+
+def _probing_tui_module(shared, script):
+    """Offline double: 握住注入面，在 driver 前按脚本派发真实控制
+    意图并采集读数（READ/DISPATCH 两径的行为见证）。"""
+    module = ModuleType("cockpit_tui")
+    module.calls = []
+    module.textual_available = lambda: True
+    from event_index import EventIndex
+    module.new_event_store = EventIndex
+
+    def run_ui(**kwargs):
+        module.calls.append(kwargs)
+        control = kwargs["control"]
+        pending = kwargs["revision_pending"]
+        boundary = shared.get("boundary")
+        module.readings = {}
+        for name, call in script:
+            module.readings[name] = call(control, pending, boundary,
+                                         kwargs)
+        return kwargs["driver"]()
+
+    module.run_cockpit_tui = run_ui
+    return module
+
+
+def _run_probed(script, *, adapters=None, boundary_capture=None):
+    """Route through the probing UI with a terminal present."""
+    adapters = adapters or _standard_adapters()
+    shared = {}
+    module = _probing_tui_module(shared, script)
+    if boundary_capture is not None:
+        def hook(boundary, execution_id):
+            shared["boundary"] = boundary
+            boundary_capture(boundary, execution_id)
+    else:
+        def hook(boundary, execution_id):
+            shared["boundary"] = boundary
+    with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+            mock.patch.object(cockpit_entry, "_terminal_present",
+                              return_value=True):
+        code, out, err = _run_cockpit(
+            _BASIC_COMMAND, adapters=adapters,
+            verified=("rt-a", "rt-b"), boundary_hook=hook)
+    return code, out, err, module
+
+
+class DispatcherSurfaceTests(unittest.TestCase):
+    """CU-TUI-4 §五：dispatcher = 意图 → ControlCommand(ui-N) →
+    session 门面；回执三态原样；REVISE 携 target/text/version。"""
+
+    def test_pause_replay_resume_revise_round_trip(self):
+        script = [
+            ("pause", lambda c, p, b, kw: c("PAUSE")),
+            ("pause_again", lambda c, p, b, kw: c("PAUSE")),
+            ("resume", lambda c, p, b, kw: c("RESUME")),
+            ("revise", lambda c, p, b, kw: c(
+                "REVISE", text="adjust", target="NEXT_INVOCATION")),
+        ]
+        code, _out, _err, module = _run_probed(script)
+        self.assertEqual(code, 0)
+        readings = module.readings
+        self.assertEqual(readings["pause"].status, ControlStatus.ACCEPTED)
+        self.assertEqual(readings["pause_again"].status,
+                         ControlStatus.NO_OP)
+        self.assertEqual(readings["pause_again"].reason.value,
+                         "ALREADY_REQUESTED")
+        self.assertEqual(readings["resume"].status,
+                         ControlStatus.ACCEPTED)
+        self.assertEqual(readings["revise"].status,
+                         ControlStatus.ACCEPTED)
+        # 回执 command_id 单调唯一（ui-N）
+        ids = [readings[name].command_id
+               for name, _call in script]
+        self.assertEqual(ids, ["ui-1", "ui-2", "ui-3", "ui-4"])
+        self.assertEqual(len(set(ids)), 4)
+
+    def test_pause_fact_journaling_and_replay_zero_facts(self):
+        script = [
+            ("pause", lambda c, p, b, kw: c("PAUSE")),
+            ("facts", lambda c, p, b, kw: kw["facts"]()),
+        ]
+        _code, _out, _err, module = _run_probed(script)
+        kinds = [entry.fact_type.value
+                 for entry in module.readings["facts"]]
+        self.assertEqual(kinds.count("PAUSE_REQUESTED"), 1)
+
+    def test_abort_pair_accepted_then_noop(self):
+        script = [
+            ("abort", lambda c, p, b, kw: c("ABORT")),
+            ("abort_again", lambda c, p, b, kw: c("ABORT")),
+        ]
+        code, _out, _err, module = _run_probed(script)
+        self.assertEqual(code, 3)   # 真实 ABORTED 交付
+        self.assertEqual(module.readings["abort"].status,
+                         ControlStatus.ACCEPTED)
+        self.assertEqual(module.readings["abort_again"].status,
+                         ControlStatus.NO_OP)
+        self.assertNotEqual(module.readings["abort"].command_id,
+                            module.readings["abort_again"].command_id)
+
+    def test_revise_submission_maps_to_prompt_field(self):
+        # NEXT_INVOCATION 结构性只收 text、SUBMISSION 只收 prompt/
+        # task——错误映射会被冻结值对象直接拒绝；ACCEPTED 即映射
+        # 正确的结构性证明。
+        script = [
+            ("revise_next", lambda c, p, b, kw: c(
+                "REVISE", text="adjust", target="NEXT_INVOCATION")),
+            ("revise_submission", lambda c, p, b, kw: c(
+                "REVISE", text="new prompt", target="SUBMISSION")),
+        ]
+        _code, _out, _err, module = _run_probed(script)
+        self.assertEqual(module.readings["revise_next"].status,
+                         ControlStatus.ACCEPTED)
+        self.assertEqual(module.readings["revise_submission"].status,
+                         ControlStatus.ACCEPTED)
+
+
+class RevisionPendingProviderTests(unittest.TestCase):
+    """CU-TUI-4 §三（C1 READ 边界）：provider = 队列长度只读读数。"""
+
+    def test_pending_counts_queue_across_revise(self):
+        script = [
+            ("before", lambda c, p, b, kw: p()),
+            ("revise", lambda c, p, b, kw: c(
+                "REVISE", text="adjust", target="NEXT_INVOCATION")),
+            ("after", lambda c, p, b, kw: p()),
+        ]
+        _code, _out, _err, module = _run_probed(script)
+        self.assertEqual(module.readings["before"], 0)
+        self.assertEqual(module.readings["after"], 1)
+
+    def test_provider_repeated_reads_are_pure(self):
+        def probe(c, p, b, kw):
+            facts_before = kw["facts"]()
+            readings = [p() for _ in range(50)]
+            facts_after = kw["facts"]()
+            return (len(set(map(str, readings))) == 1,
+                    facts_before == facts_after)
+        script = [("purity", probe)]
+        _code, _out, _err, module = _run_probed(script)
+        stable, facts_equal = module.readings["purity"]
+        self.assertTrue(stable)
+        self.assertTrue(facts_equal)
+
+    def test_queue_entry_text_carries_revision_text(self):
+        def probe(c, p, b, kw):
+            c("REVISE", text="adjust", target="NEXT_INVOCATION")
+            queue = b.snapshot(
+                ControlLifecycle.RUNNING).revision_queue
+            return queue[0].text if queue else None
+        script = [("queue_text", probe)]
+        _code, _out, _err, module = _run_probed(script)
+        self.assertEqual(module.readings["queue_text"], "adjust")
 
 
 if __name__ == "__main__":

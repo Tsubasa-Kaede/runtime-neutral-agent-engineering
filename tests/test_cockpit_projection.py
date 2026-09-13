@@ -16,11 +16,13 @@ projection source (guard tests), no threads, no time.
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "dual-agent-development" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from console_observation import format_event_line
+from control_boundary import ControlReason, ControlStatus
 from control_journal import ControlFactType, JournalFact
 from execution_observation import (
     ExecutionEvent,
@@ -632,10 +634,291 @@ class SimpleResult:
 
 
 class SimpleOutcome:
-    def __init__(self, status, final, error):
+    def __init__(self, status, final, error, transcript=()):
         self.status = status
         self.final_result = final
         self.error = error
+        self.transcript = transcript
+
+
+# ------------------------------- CU-TUI-4: receipt / revision / detail views
+
+
+def receipt(status, reason=None, version=3, command_id="ui-1"):
+    """ControlResult duck：与冻结值同字段的只读投影输入。"""
+    return SimpleNamespace(status=status, reason=reason,
+                           execution_version=version,
+                           command_id=command_id, execution_id="e")
+
+
+def transcript_record(slot_id, status="SUCCESS", step_index=0,
+                      invocation_id="inv-1"):
+    """RunOutcome.transcript 条目 duck（metadata-only 真相）。"""
+    return SimpleNamespace(step_index=step_index, slot_id=slot_id,
+                           invocation_id=invocation_id, status=status)
+
+
+class ControlReceiptLineTests(unittest.TestCase):
+    """CU-TUI-4 §9/§五：ControlResult 原样进回执——三态 + reason 逐字，
+    零新 ControlStatus 铸造。"""
+
+    def test_accepted_without_reason(self):
+        line = projection.control_receipt_line(
+            receipt(ControlStatus.ACCEPTED))
+        self.assertEqual(line, "receipt ui-1: ACCEPTED v3")
+
+    def test_rejected_reason_verbatim(self):
+        line = projection.control_receipt_line(
+            receipt(ControlStatus.REJECTED,
+                    reason=ControlReason.ALREADY_TERMINAL,
+                    version=2, command_id="ui-2"))
+        self.assertEqual(line, "receipt ui-2: REJECTED v2 · ALREADY_TERMINAL")
+
+    def test_no_op_reason_verbatim(self):
+        line = projection.control_receipt_line(
+            receipt(ControlStatus.NO_OP, reason=ControlReason.NOT_PAUSED,
+                    version=1, command_id="ui-3"))
+        self.assertEqual(line, "receipt ui-3: NO_OP v1 · NOT_PAUSED")
+
+    def test_plain_string_values_match_enum_shape(self):
+        line = projection.control_receipt_line(
+            receipt("ACCEPTED", reason="ALREADY_REQUESTED",
+                    version=4, command_id="ui-4"))
+        self.assertEqual(
+            line, "receipt ui-4: ACCEPTED v4 · ALREADY_REQUESTED")
+
+    def test_missing_reason_attribute_renders_status_only(self):
+        line = projection.control_receipt_line(
+            SimpleNamespace(status="ACCEPTED", execution_version=1,
+                            command_id="ui-5"))
+        self.assertEqual(line, "receipt ui-5: ACCEPTED v1")
+
+
+class RevisionStatusLineTests(unittest.TestCase):
+    """CU-TUI-4 §10：pending 只来自注入读数（None → —），accepted/applied
+    只来自账本事实，SUBMISSION 附引擎契约说明，honored 永不呈现。"""
+
+    def test_absent_provider_renders_dash(self):
+        self.assertEqual(projection.revision_status_lines((), None),
+                         ("pending —",))
+
+    def test_pending_count_rendered(self):
+        self.assertEqual(projection.revision_status_lines((), 2),
+                         ("pending 2",))
+
+    def test_zero_pending_without_facts(self):
+        self.assertEqual(projection.revision_status_lines((), 0),
+                         ("pending 0",))
+
+    def test_accepted_next_invocation_line(self):
+        facts = (fact(ControlFactType.REVISE_REQUESTED, seq=1,
+                      command_id="ui-1",
+                      payload={"revision_id": "ui-1",
+                               "target": "NEXT_INVOCATION"}),)
+        self.assertEqual(projection.revision_status_lines(facts, 1),
+                         ("pending 1",
+                          "[1] REVISE_REQUESTED target=NEXT_INVOCATION"))
+
+    def test_accepted_submission_carries_contract_note_only(self):
+        facts = (fact(ControlFactType.REVISE_REQUESTED, seq=3,
+                      command_id="ui-2",
+                      payload={"revision_id": "ui-2",
+                               "target": "SUBMISSION"}),)
+        lines = projection.revision_status_lines(facts, 0)
+        self.assertIn("[3] REVISE_REQUESTED target=SUBMISSION"
+                      " · applies at next fresh segment", lines)
+        joined = "\n".join(lines)
+        self.assertNotIn("applied", joined.replace("applies", ""))
+
+    def test_applied_line_from_journal_fact_only(self):
+        facts = (fact(ControlFactType.REVISE_REQUESTED, seq=1,
+                      command_id="ui-1",
+                      payload={"revision_id": "ui-1",
+                               "target": "NEXT_INVOCATION"}),
+                 fact(ControlFactType.REVISION_APPLIED, seq=2,
+                      command_id="ui-1"),
+                 fact(ControlFactType.PAUSE_REQUESTED, seq=4,
+                      command_id="ui-9"))
+        lines = projection.revision_status_lines(facts, 0)
+        self.assertIn("[2] REVISION_APPLIED", lines)
+        joined = "\n".join(lines)
+        self.assertNotIn("[4]", joined)   # 非修订事实零行
+        self.assertNotIn("PAUSE_REQUESTED", joined)
+
+    def test_honored_is_never_claimed(self):
+        for facts in ((), (fact(ControlFactType.REVISE_REQUESTED),)):
+            joined = "\n".join(
+                projection.revision_status_lines(facts, 1))
+            self.assertNotIn("honored", joined)
+
+    def test_deterministic_repeat(self):
+        facts = (fact(ControlFactType.REVISE_REQUESTED, seq=1,
+                      command_id="ui-1",
+                      payload={"revision_id": "ui-1",
+                               "target": "NEXT_INVOCATION"}),)
+        first = projection.revision_status_lines(facts, 1)
+        second = projection.revision_status_lines(facts, 1)
+        self.assertEqual(first, second)
+
+
+class EventDetailLineTests(unittest.TestCase):
+    """CU-TUI-4 §7：事件详情 = 既有字段子集逐字；缺席字段零行。"""
+
+    def test_full_fields_verbatim(self):
+        event = ev(ExecutionEventType.INVOCATION_FINISHED, seq=12,
+                   stage="architect", runtime="rt-0", status="SUCCESS",
+                   reason="SUCCESS", duration_ms=1420)
+        self.assertEqual(projection.event_detail_line(event),
+                         ("seq 12", "type INVOCATION_FINISHED",
+                          "stage architect", "runtime rt-0",
+                          "status SUCCESS", "reason SUCCESS",
+                          "duration 1420ms"))
+
+    def test_absent_duration_omits_line(self):
+        event = ev(ExecutionEventType.STAGE_STARTED, seq=0,
+                   stage="arch", runtime="rt-0", status="STARTED",
+                   reason="STARTED")
+        lines = projection.event_detail_line(event)
+        self.assertEqual(lines[0], "seq 0")
+        self.assertTrue(lines[1].startswith("type "))
+        self.assertNotIn("duration", "\n".join(lines))
+
+    def test_seq_line_always_present(self):
+        lines = projection.event_detail_line(
+            ev(ExecutionEventType.TERMINAL, seq=7, stage="SEQUENTIAL",
+               runtime="ORCHESTRATION", status="COMPLETED",
+               reason="COMPLETED"))
+        self.assertEqual(lines[0], "seq 7")
+
+
+class AgentDetailTests(unittest.TestCase):
+    """CU-TUI-4 §8：Role ≠ Runtime；Status/Duration/Handoff/Result 只来自
+    既有事实；缺席呈现 —；零 agent registry、零 itemization truth。"""
+
+    def detail(self, slots, events=(), usage_records=(), outcome=None,
+               **kwargs):
+        return projection.agent_detail(
+            slots, events, usage_records, outcome, **kwargs)
+
+    def test_role_header_and_runtime_line_are_separate(self):
+        lines = self.detail(
+            (slot("architect", "rt-0", provider="prov-a"),))
+        self.assertTrue(lines[0].startswith("ARCHITECT"))
+        joined = "\n".join(lines)
+        self.assertIn("rt-0", joined)
+        self.assertIn("provider prov-a", joined)
+        self.assertNotIn("ARCHITECTrt", joined.replace("\n", ""))
+
+    def test_absent_provider_omits_note(self):
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),)))
+        self.assertNotIn("provider", joined)
+
+    def test_status_success_verbatim_with_duration(self):
+        events = (ev(ExecutionEventType.INVOCATION_FINISHED, seq=1,
+                     stage="architect", runtime="rt-0", status="SUCCESS",
+                     reason="SUCCESS", duration_ms=1420),)
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),),
+                                       events=events))
+        self.assertIn("✓ SUCCESS", joined)
+        self.assertIn("duration  1420ms", joined)
+
+    def test_status_failed_verbatim(self):
+        events = (ev(ExecutionEventType.INVOCATION_FINISHED, seq=1,
+                     stage="architect", runtime="rt-0", status="FAILED",
+                     reason="FAILED"),)
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),),
+                                       events=events))
+        self.assertIn("✗ FAILED", joined)
+        self.assertIn("duration  —", joined)   # 无时长事实 → —
+
+    def test_in_flight_and_waiting_words(self):
+        started = (ev(ExecutionEventType.INVOCATION_STARTED, seq=0,
+                      stage="architect", runtime="rt-0", status="STARTED",
+                      reason="STARTED"),)
+        joined = "\n".join(self.detail(
+            (slot("architect", "rt-0"), slot("coder", "rt-1")),
+            events=started))
+        self.assertIn("● in-flight", joined)
+        self.assertIn("○ waiting", joined)
+
+    def test_events_of_other_slots_do_not_count(self):
+        events = (ev(ExecutionEventType.INVOCATION_FINISHED, seq=1,
+                     stage="coder", runtime="rt-1", status="SUCCESS",
+                     reason="SUCCESS"),)
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),),
+                                       events=events))
+        self.assertIn("○ waiting", joined)
+
+    def test_handoff_from_real_handoff_event_only(self):
+        events = (ev(ExecutionEventType.HANDOFF, seq=2,
+                     stage="architect", runtime="rt-1",
+                     status="EMBEDDED", reason="EMBEDDED"),)
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),),
+                                       events=events))
+        self.assertIn("→ rt-1 (EMBEDDED)", joined)
+
+    def test_no_handoff_is_dash(self):
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),)))
+        self.assertIn("handoff   —", joined)
+
+    def test_usage_known_rendered_unknown_dash(self):
+        records = (usage(runtime="rt-0", role="architect"),
+                   usage(runtime="rt-1", role="coder",
+                         status=UsageObservation.UNKNOWN))
+        joined = "\n".join(self.detail(
+            (slot("architect", "rt-0"), slot("coder", "rt-1")),
+            usage_records=records))
+        self.assertIn("in=1000 out=500", joined)
+        self.assertIn("usage     —", joined)
+
+    def test_result_from_transcript_metadata_only(self):
+        outcome = SimpleOutcome(
+            RunStatus.COMPLETED, SimpleResult("real agent output text"),
+            None, transcript=(transcript_record("step-0-architect"),))
+        joined = "\n".join(self.detail(
+            (slot("architect", "rt-0", stage="step-0-architect"),),
+            outcome=outcome))
+        self.assertIn("result    SUCCESS", joined)
+        self.assertNotIn("real agent output text", joined)  # 不伪装 output
+
+    def test_result_dash_without_outcome(self):
+        joined = "\n".join(self.detail((slot("architect", "rt-0"),)))
+        self.assertIn("result    —", joined)
+
+    def test_collapsed_truncates_to_width_expanded_keeps_full(self):
+        long_provider = "p" * 80
+        view = slot("architect", "rt-0", provider=long_provider)
+        collapsed = "\n".join(self.detail((view,), width=40))
+        self.assertTrue(all(projection.display_width(line) <= 40
+                            for line in collapsed.splitlines()))
+        self.assertIn("...", collapsed)
+        expanded = "\n".join(self.detail((view,), width=40, expanded=True))
+        self.assertIn(long_provider, expanded)
+
+    def test_ascii_mode_maps_symbols(self):
+        events = (ev(ExecutionEventType.INVOCATION_FINISHED, seq=1,
+                     stage="architect", runtime="rt-0", status="SUCCESS",
+                     reason="SUCCESS"),
+                  ev(ExecutionEventType.HANDOFF, seq=2,
+                     stage="architect", runtime="rt-1",
+                     status="EMBEDDED", reason="EMBEDDED"))
+        joined = "\n".join(self.detail(
+            (slot("architect", "rt-0"),), events=events, ascii_only=True))
+        for symbol in "✓●○✗→‖■":
+            self.assertNotIn(symbol, joined)
+        self.assertIn("[OK]", joined)
+        self.assertIn("->", joined)
+
+    def test_sections_follow_plan_order(self):
+        joined = "\n".join(self.detail(
+            (slot("architect", "rt-0"), slot("coder", "rt-1"))))
+        self.assertLess(joined.index("ARCHITECT"), joined.index("CODER"))
+
+    def test_deterministic_repeat(self):
+        events = running_events(("architect", "coder"))
+        first = self.detail(template_slots(2), events=events)
+        second = self.detail(template_slots(2), events=events)
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

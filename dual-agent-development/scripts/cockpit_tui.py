@@ -1,21 +1,27 @@
-"""CU-TUI-3 (V3.2): Textual 协作驾驶舱 — 只读呈现 App。
+"""CU-TUI-3/4 (V3.2): Textual 协作驾驶舱 — 呈现 + 用户控制面。
 
-G3/G4 hard rules（授权 §七/§九）：
+宪法（CU-TUI-3 G3/G4 + CU-TUI-4 C1/C2）：
 
 - UI 框架的 import 只存在于本模块内部，且为惰性——模块级导入零
   框架依赖（App/TraceScreen 类经 __getattr__ 在首次访问时构建），
   cockpit_entry 只尝试导入本模块，绝不直接触碰框架；
-- 本层只 READ → PROJECT → RENDER：执行驱动唯一来自入口注入的
-  driver 回调（worker 线程内调用，App 退出后同步收尾）；本层
-  绝不提交控制命令、绝不调用段执行、绝不直接驱动任何运行时
-  组件、不持有第二份执行真相——lifecycle/usage/observation 全部
-  经 cockpit_projection 从既有事实源纯投影；
+- 本层 READ → PROJECT → RENDER + 单向意图外发（DISPATCH）：执行
+  驱动唯一来自入口注入的 driver 回调；控制意图唯一经入口注入的
+  dispatcher 回调外发——本层不 import 控制域、不触碰引擎对象、
+  不构造命令值；revision pending 只经注入的只读读数（int 或缺席，
+  缺席呈现 —，绝不推断）；
+- 本层不持有第二份执行真相：lifecycle/usage/observation/修订状态
+  全部经 cockpit_projection 从既有事实源纯投影；选择/跟随/回执等
+  呈现态绝不写回任何事实源（READ 与 DISPATCH 两径严格分离）；
+- 交互模型恰三态（CU-TUI-4 C2）：COMMAND 单键面 /
+  REVISION_COMPOSER 修订编辑 / ABORT_CONFIRM 破坏性确认——此外
+  无第四输入模式；
 - G16：依赖缺席的回退发生在入口层（textual_available）；
   本层真实异常诚实上抛/如实呈现失败，绝不伪装成功。
 
-线程模型（单 Session）：UI 线程只做只读投影与渲染；worker 线程
-唯一执行注入的 driver；刷新为数据驱动重投影（零动画、零 spinner、
-零闪烁、零伪造活动）。
+线程模型（单 Session）：UI 线程只做只读投影、渲染与意图外发；
+worker 线程唯一执行注入的 driver；刷新为数据驱动重投影（零动画、
+零 spinner、零伪造活动）。
 """
 from __future__ import annotations
 
@@ -25,12 +31,28 @@ import threading
 from cockpit_projection import (
     AgentSlotView,
     ProjectionInputs,
+    agent_detail,
     build_projection,
+    control_receipt_line,
+    event_detail_line,
+    revision_status_lines,
 )
 from event_index import EventIndex
 
 __all__ = ("CockpitApp", "TraceScreen", "new_event_store",
            "run_cockpit_tui", "textual_available")
+
+
+# 交互三态（CU-TUI-4 C2 裁决：恰此三态，无第四模式）。
+MODE_COMMAND = "command"
+MODE_COMPOSER = "composer"
+MODE_CONFIRM = "confirm"
+
+# 修订 target 封闭二选一（引擎既有词值，呈现层零新词）。
+_TARGETS = ("NEXT_INVOCATION", "SUBMISSION")
+
+# 回执有界寿命：按刷新次数衰减（零时钟，确定性）。
+_RECEIPT_TICKS = 6
 
 
 def new_event_store():
@@ -57,6 +79,12 @@ def _ascii_preferred() -> bool:
     return "utf" not in encoding
 
 
+def _fact_kind(entry):
+    """账本条目词值（封闭词表只读读取面）。"""
+    kind = getattr(entry, "fact_type", None)
+    return getattr(kind, "value", kind)
+
+
 def _build_classes() -> None:
     """首次访问 CockpitApp / TraceScreen 时构建类（惰性框架 import）。
 
@@ -67,7 +95,8 @@ def _build_classes() -> None:
         return
 
     from textual.app import App
-    from textual.containers import Container
+    from textual.binding import Binding
+    from textual.containers import Container, VerticalScroll
     from textual.screen import Screen
     from textual.widgets import Static, TabbedContent, TabPane
 
@@ -83,14 +112,16 @@ def _build_classes() -> None:
         #result-zone { height: auto; }
         """
 
+        # 字母键全部经 on_key 按态分发（避免框架级绑定绕过状态机）。
+        # tab 是 Screen 默认焦点键会先期消费——priority 绑定改走
+        # composer 的 target 切换；ctrl+c 与 q 同径（冻结决策）。
         BINDINGS = [
-            ("t", "show_trace", "Trace"),
-            ("c", "toggle_context", "Context"),
-            ("q", "quit_ui", "Quit"),
+            Binding("tab", "cockpit_tab", "Target", priority=True),
+            Binding("ctrl+c", "cockpit_quit", "Quit", priority=True),
         ]
 
         def __init__(self, *, driver, task, plan, events, facts, usage,
-                     session):
+                     session, control=None, revision_pending=None):
             super().__init__()
             self._cockpit_drive = driver
             self._cockpit_task = task
@@ -99,6 +130,15 @@ def _build_classes() -> None:
             self._cockpit_facts = facts
             self._cockpit_usage = usage
             self._cockpit_session = session
+            # CU-TUI-4 注入面（DISPATCH / READ 两径，均零引擎知识）
+            self._cockpit_control = control
+            self._cockpit_revision_pending = revision_pending
+            # 呈现态（绝不入投影输入、绝不持久、绝不写回事实源）
+            self._cockpit_mode = MODE_COMMAND
+            self._cockpit_revise_text = ""
+            self._cockpit_revise_target = _TARGETS[0]
+            self._cockpit_receipt = None
+            self._cockpit_receipt_ttl = 0
             self.outcome = None
             self.failure = None
             self._cockpit_thread = None
@@ -162,10 +202,9 @@ def _build_classes() -> None:
                 f"{state.progress_line}\n{state.tokens_line}")
             self.query_one("#result-zone").update(
                 "\n".join(state.result_lines))
-            # G9：控制键在 CU-TUI-3 仅呈现提示（未接线，TUI-4 激活）
             self.query_one("#dock-controls").update(
-                "[P]ause [R]esume [E]dit [A]bort [T]race [Q]uit")
-            self.query_one("#dock-input").update(">")
+                self._dock_controls_line())
+            self.query_one("#dock-input").update(self._dock_input_line())
             panel = self.query_one("#context-panel")
             wide = self.size.width >= 140
             if state.context_lines and wide and self._cockpit_show_context:
@@ -173,6 +212,151 @@ def _build_classes() -> None:
                 panel.display = True
             else:
                 panel.display = False
+            # 回执有界衰减（按刷新次数，零时钟）
+            if self._cockpit_receipt_ttl > 0:
+                self._cockpit_receipt_ttl -= 1
+                if self._cockpit_receipt_ttl == 0:
+                    self._cockpit_receipt = None
+
+        # ------------------------------------------------ dock 呈现
+
+        def _dock_controls_line(self) -> str:
+            """Controls 行双职责：回执在场时回显，否则键位提示。"""
+            if self._cockpit_receipt:
+                return self._cockpit_receipt
+            return "[P]ause [R]esume [E]dit [A]bort [T]race [Q]uit"
+
+        def _dock_input_line(self) -> str:
+            """Input 行三态：命令提示 / 修订编辑 / 确认问题。"""
+            if self._cockpit_mode == MODE_COMPOSER:
+                return (f"revise [{self._cockpit_revise_target}] "
+                        f"{self._cockpit_revise_text}|")
+            if self._cockpit_mode == MODE_CONFIRM:
+                return "abort? (y/n)"
+            return ">"
+
+        # ------------------------------------------------ 意图外发（唯一通道）
+
+        def _dispatch(self, kind, text=None, target=None):
+            """DISPATCH 边界：注入回调外发意图 → 同步回执原样呈现。
+
+            dispatcher 缺席时诚实 no-op（零回执、零伪造状态）。"""
+            if self._cockpit_control is None:
+                return None
+            result = self._cockpit_control(kind, text=text, target=target)
+            self._cockpit_receipt = control_receipt_line(result)
+            self._cockpit_receipt_ttl = _RECEIPT_TICKS
+            return result
+
+        # ------------------------------------------------ 键位（状态机）
+
+        def on_key(self, event) -> None:
+            key = getattr(event, "key", "")
+            character = getattr(event, "character", None)
+            if self._cockpit_mode == MODE_COMPOSER:
+                self._composer_key(key, character)
+                return
+            if self._cockpit_mode == MODE_CONFIRM:
+                self._confirm_key(key)
+                return
+            self._command_key(key)
+
+        def _command_key(self, key: str) -> None:
+            if key == "p":
+                self._dispatch("PAUSE")
+                self._refresh()
+            elif key == "r":
+                self._dispatch("RESUME")
+                self._refresh()
+            elif key == "a":
+                self._cockpit_mode = MODE_CONFIRM
+                self._refresh()
+            elif key == "e":
+                self._open_composer()
+            elif key == "q":
+                self._quit_path()
+            elif key == "t":
+                self.push_screen(TraceScreen())
+            elif key == "c":
+                self._cockpit_show_context = not self._cockpit_show_context
+                self._refresh()
+            # 其余按键 no-op（零副作用）
+
+        def _open_composer(self) -> None:
+            self._cockpit_revise_text = ""
+            self._cockpit_revise_target = _TARGETS[0]
+            self._cockpit_mode = MODE_COMPOSER
+            self._refresh()
+
+        def _composer_key(self, key: str, character) -> None:
+            if key == "escape":
+                # 取消：丢弃缓冲、零意图外发、零事实变化
+                self._cockpit_revise_text = ""
+                self._cockpit_mode = MODE_COMMAND
+                self._refresh()
+                return
+            if key == "enter":
+                if (self._cockpit_control is not None
+                        and self._cockpit_revise_text.strip()):
+                    result = self._dispatch(
+                        "REVISE", text=self._cockpit_revise_text,
+                        target=self._cockpit_revise_target)
+                    if result is not None:
+                        self._cockpit_revise_text = ""
+                        self._cockpit_mode = MODE_COMMAND
+                self._refresh()
+                return
+            if key == "backspace":
+                self._cockpit_revise_text = self._cockpit_revise_text[:-1]
+                self._refresh()
+                return
+            if character is not None and len(character) == 1:
+                # 可打印字符本体（含标点/空格；修饰组合与非打印键为
+                # None，结构性排除——零猜测映射）
+                self._cockpit_revise_text += character
+                self._refresh()
+            # 其余（修饰组合/功能键）no-op
+
+        def _confirm_key(self, key: str) -> None:
+            if key == "y":
+                self._dispatch("ABORT")
+                self._cockpit_mode = MODE_COMMAND
+                self._refresh()
+            elif key in ("n", "escape"):
+                self._cockpit_mode = MODE_COMMAND
+                self._refresh()
+            # 其余按键 no-op（零外发、零状态变化）
+
+        def action_cockpit_tab(self) -> None:
+            """composer 内 target 封闭二选一切换；其余态 no-op。"""
+            if self._cockpit_mode == MODE_COMPOSER:
+                other = [item for item in _TARGETS
+                         if item != self._cockpit_revise_target]
+                self._cockpit_revise_target = other[0]
+                self._refresh()
+
+        def action_cockpit_quit(self) -> None:
+            """Ctrl-C 与 q 同径（冻结决策）。"""
+            self._quit_path()
+
+        def _quit_path(self) -> None:
+            """q 阶梯：终态直退；ABORT 已受理待兑现 → 硬弃界面；
+            其余非终态 → 破坏性确认。硬弃只放弃界面，进程收尾
+            仍诚实等待 driver 完成。"""
+            session = self._cockpit_session
+            terminal = None if session is None else session.terminal
+            if terminal is not None or self._abort_awaited():
+                self.exit()
+                return
+            self._cockpit_mode = MODE_CONFIRM
+            self._refresh()
+
+        def _abort_awaited(self) -> bool:
+            """账本事实面：ABORT_REQUESTED 在场即等待真实兑现。"""
+            for entry in self._cockpit_facts() or ():
+                if _fact_kind(entry) == "ABORT_REQUESTED":
+                    return True
+            return False
 
         # ------------------------------------------------ 驱动（唯一执行点）
 
@@ -193,40 +377,174 @@ def _build_classes() -> None:
             if self._cockpit_thread is not None:
                 self._cockpit_thread.join()
 
-        # ------------------------------------------------ 键位（呈现层导航）
-
-        def action_show_trace(self) -> None:
-            self.push_screen(TraceScreen())
-
-        def action_toggle_context(self) -> None:
-            self._cockpit_show_context = not self._cockpit_show_context
-            self._refresh()
-
-        def action_quit_ui(self) -> None:
-            self.exit()
-
     class TraceScreen(Screen):  # type: ignore[misc]
-        """全屏三 Tab：OBS / CTRL / USAGE（既有事实源原样投影）。"""
+        """全屏四 Tab：OBS / CTRL / USAGE / AGENTS（事实源原样投影）。
 
-        BINDINGS = [("escape", "back", "Back")]
+        选择/跟随/展开均为呈现态：selected 恒为事件自身 sequence
+        （稳定标识，绝非列表下标）；follow 断开后新事件既不抢滚动
+        也不抢选择；刷新只消费只读快照。"""
+
+        BINDINGS = [
+            ("escape", "back", "Back"),
+            ("up", "select_prev", "Prev"),
+            ("down", "select_next", "Next"),
+            ("g", "follow_tail", "Tail"),
+            ("x", "toggle_expanded", "Expand"),
+            ("pageup", "scroll_page_up", "PgUp"),
+            ("pagedown", "scroll_page_down", "PgDn"),
+            ("home", "scroll_top", "Top"),
+            ("end", "scroll_bottom", "End"),
+        ]
+
+        _TAB_SCROLL = {"tab-obs": "scroll-obs",
+                       "tab-ctrl": "scroll-ctrl",
+                       "tab-usage": "scroll-usage",
+                       "tab-agents": "scroll-agents"}
+
+        # 呈现态默认值（实例赋值后各自独立）
+        _trace_follow = True
+        _trace_selected_seq = None
+        _trace_expanded = False
 
         def compose(self):
-            with TabbedContent():
-                with TabPane("OBS"):
-                    yield Static("", id="trace-obs")
-                with TabPane("CTRL"):
-                    yield Static("", id="trace-ctrl")
-                with TabPane("USAGE"):
-                    yield Static("", id="trace-usage")
+            with TabbedContent(id="trace-tabs"):
+                with TabPane("OBS", id="tab-obs"):
+                    yield Static("", id="obs-detail")
+                    with VerticalScroll(id="scroll-obs", can_focus=False):
+                        yield Static("", id="trace-obs")
+                with TabPane("CTRL", id="tab-ctrl"):
+                    with VerticalScroll(id="scroll-ctrl", can_focus=False):
+                        yield Static("", id="trace-ctrl")
+                with TabPane("USAGE", id="tab-usage"):
+                    with VerticalScroll(id="scroll-usage", can_focus=False):
+                        yield Static("", id="trace-usage")
+                with TabPane("AGENTS", id="tab-agents"):
+                    with VerticalScroll(id="scroll-agents", can_focus=False):
+                        yield Static("", id="trace-agents")
 
         def on_mount(self) -> None:
-            state = build_projection(self.app._collect_inputs())
-            self.observation_text = "\n".join(state.trace_obs)
-            self.query_one("#trace-obs").update(self.observation_text)
-            self.query_one("#trace-ctrl").update(
-                "\n".join(state.trace_ctrl))
-            self.query_one("#trace-usage").update(
-                "\n".join(state.trace_usage))
+            self._trace_refresh()
+            # live 投影：与主界面同节拍的数据驱动刷新
+            self.set_interval(0.5, self._trace_refresh)
+
+        # ------------------------------------------------ 投影刷新
+
+        def _events_now(self):
+            return self.app._collect_inputs().events
+
+        def _trace_refresh(self) -> None:
+            app = self.app
+            # follow 检测在内容更新前：用户已离开底部（滚轮/翻页）
+            # 则停止钉底，绝不抢回滚动位置
+            container = self._active_scroll()
+            if container is not None and self._trace_follow:
+                maximum = container.max_scroll_y
+                if maximum and float(container.scroll_y) < (
+                        float(maximum) - 0.5):
+                    self._trace_follow = False
+            values = app._collect_inputs()
+            state = build_projection(values)
+            events = values.events
+            seqs = [getattr(event, "sequence", None) for event in events]
+            selected = self._trace_selected_seq
+            marker_index = (seqs.index(selected)
+                            if selected in seqs else None)
+            obs_lines = []
+            for index, line in enumerate(state.trace_obs):
+                obs_lines.append(
+                    ("▸ " if index == marker_index else "  ") + line)
+            self.observation_text = "\n".join(obs_lines)
+            self._update_static("#trace-obs", self.observation_text)
+            detail = ""
+            if marker_index is not None:
+                detail = "\n".join(event_detail_line(events[marker_index]))
+            self.detail_text = detail
+            self._update_static("#obs-detail", detail)
+            pending = None
+            if app._cockpit_revision_pending is not None:
+                pending = app._cockpit_revision_pending()
+            self.ctrl_text = "\n".join(
+                state.trace_ctrl + ("",)
+                + revision_status_lines(values.facts, pending))
+            self._update_static("#trace-ctrl", self.ctrl_text)
+            self.usage_text = "\n".join(state.trace_usage)
+            self._update_static("#trace-usage", self.usage_text)
+            self.agents_text = "\n".join(agent_detail(
+                values.slots, values.events, values.usage_records,
+                values.last_outcome, expanded=self._trace_expanded,
+                width=values.width, ascii_only=values.ascii_only))
+            self._update_static("#trace-agents", self.agents_text)
+            if self._trace_follow:
+                target = self._active_scroll()
+                if target is not None:
+                    target.scroll_end(animate=False)
+
+        def _update_static(self, selector: str, text: str) -> None:
+            """仅内容变化时更新 DOM（数据驱动，零闪烁）。"""
+            widget = self.query_one(selector)
+            if getattr(widget, "_cockpit_last", None) != text:
+                widget._cockpit_last = text
+                widget.update(text)
+
+        def _active_scroll(self):
+            tabs = self.query_one("#trace-tabs")
+            active = getattr(tabs, "active", None)
+            selector = self._TAB_SCROLL.get(active, "scroll-obs")
+            return self.query_one(f"#{selector}")
+
+        # ------------------------------------------------ 选择（稳定 seq）
+
+        def action_select_prev(self) -> None:
+            seqs = [getattr(event, "sequence", None)
+                    for event in self._events_now()]
+            if not seqs:
+                return
+            if self._trace_selected_seq not in seqs:
+                self._trace_selected_seq = seqs[-1]
+            else:
+                index = seqs.index(self._trace_selected_seq)
+                if index > 0:
+                    self._trace_selected_seq = seqs[index - 1]
+            self._trace_follow = False
+            self._trace_refresh()
+
+        def action_select_next(self) -> None:
+            seqs = [getattr(event, "sequence", None)
+                    for event in self._events_now()]
+            if not seqs:
+                return
+            if self._trace_selected_seq not in seqs:
+                self._trace_selected_seq = seqs[-1]
+            else:
+                index = seqs.index(self._trace_selected_seq)
+                if index < len(seqs) - 1:
+                    self._trace_selected_seq = seqs[index + 1]
+            self._trace_refresh()
+
+        # ------------------------------------------------ 跟随 / 展开 / 滚动
+
+        def action_follow_tail(self) -> None:
+            self._trace_follow = True
+            self._trace_refresh()
+
+        def action_toggle_expanded(self) -> None:
+            self._trace_expanded = not self._trace_expanded
+            self._trace_refresh()
+
+        def action_scroll_page_up(self) -> None:
+            self._trace_follow = False
+            self._active_scroll().scroll_page_up(animate=False)
+
+        def action_scroll_page_down(self) -> None:
+            self._active_scroll().scroll_page_down(animate=False)
+
+        def action_scroll_top(self) -> None:
+            self._trace_follow = False
+            self._active_scroll().scroll_home(animate=False)
+
+        def action_scroll_bottom(self) -> None:
+            self._trace_follow = True
+            self._active_scroll().scroll_end(animate=False)
 
         def action_back(self) -> None:
             self.app.pop_screen()
@@ -241,11 +559,12 @@ def __getattr__(name):
 
 
 def run_cockpit_tui(*, driver, task, plan, events, facts, usage,
-                    session):
+                    session, control=None, revision_pending=None):
     """同步外壳：驱动 App、收尾 worker、诚实返回/上抛（G16）。"""
     _build_classes()
     app = CockpitApp(driver=driver, task=task, plan=plan, events=events,
-                     facts=facts, usage=usage, session=session)
+                     facts=facts, usage=usage, session=session,
+                     control=control, revision_pending=revision_pending)
     app.run()
     app.wait_for_driver()
     if app.failure is not None:

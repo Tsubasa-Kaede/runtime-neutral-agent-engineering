@@ -32,6 +32,8 @@ __all__ = (
     "AgentSlotView", "ProjectionInputs", "ProjectedState",
     "build_projection", "derive_lifecycle", "display_width",
     "format_tokens", "truncate_to_width",
+    "agent_detail", "control_receipt_line", "event_detail_line",
+    "revision_status_lines",
 )
 
 # 呈现层 lifecycle 词表（P4 的 IDLE 仅为投影层视觉态，绝不进入
@@ -41,6 +43,8 @@ _START_EVENT_TYPES = ("STAGE_STARTED", "INVOCATION_STARTED")
 _PAUSE_ON_FACTS = ("PAUSE_REQUESTED", "PAUSE_CONFIRMED")
 _PAUSE_OFF_FACTS = ("RESUME_REQUESTED", "ABORT_REQUESTED",
                     "ABORT_CONFIRMED", "ABORT_SUPERSEDED")
+# CU-TUI-4：修订状态行只消费这两个既有账本词值（读取面，非铸造）。
+_REVISION_FACT_TYPES = ("REVISE_REQUESTED", "REVISION_APPLIED")
 
 _SYMBOLS = {
     "COMPLETED": "✓", "FAILED": "✗", "ABORTED": "■",
@@ -428,6 +432,171 @@ def _usage_line(record):
     else:
         amounts = "in=— out=—"
     return f"{record.runtime_id} {record.role} {modality} {amounts}"
+
+
+# ------------------------------------------- CU-TUI-4：detail/status 投影
+
+
+def control_receipt_line(result):
+    """一次控制提交的同步回执单行（ControlResult duck 只读投影）。
+
+    status / reason 逐字（封闭词值，零新 ControlStatus）；回执是
+    瞬态 UI 呈现，不是控制历史——历史只来自账本事实。"""
+    line = (f"receipt {getattr(result, 'command_id', '')}: "
+            f"{_value_of(getattr(result, 'status', ''))}")
+    version = getattr(result, "execution_version", None)
+    if version is not None:
+        line += f" v{version}"
+    reason = getattr(result, "reason", None)
+    if reason is not None:
+        line += f" · {_value_of(reason)}"
+    return line
+
+
+def revision_status_lines(facts, pending_count):
+    """修订状态行（四档呈现律，CU-TUI-4 §10）。
+
+    pending 只来自注入读数（None → —，绝不推断）；accepted/applied
+    只来自账本事实；SUBMISSION 附引擎契约说明（静态文字，非状态
+    声称）；honored 永不呈现——无可观测事实面。"""
+    pending = "—" if pending_count is None else str(pending_count)
+    lines = [f"pending {pending}"]
+    for entry in facts:
+        kind = _value_of(getattr(entry, "fact_type", ""))
+        if kind not in _REVISION_FACT_TYPES:
+            continue
+        seq = getattr(entry, "seq", "")
+        if kind == "REVISION_APPLIED":
+            lines.append(f"[{seq}] REVISION_APPLIED")
+            continue
+        payload = getattr(entry, "payload", None) or {}
+        target = payload.get("target", "—")
+        line = f"[{seq}] REVISE_REQUESTED target={target}"
+        if str(target) == "SUBMISSION":
+            line += " · applies at next fresh segment"
+        lines.append(line)
+    return tuple(lines)
+
+
+def event_detail_line(event):
+    """选中事件详情行（既有字段子集逐字；缺席字段零行）。"""
+    lines = [f"seq {getattr(event, 'sequence', '')}",
+             f"type {_event_type_of(event)}"]
+    for label, field in (("stage", "stage"), ("runtime", "runtime_id"),
+                         ("status", "status"), ("reason", "reason")):
+        value = getattr(event, field, None)
+        if value is None or value == "":
+            continue
+        lines.append(f"{label} {_value_of(value)}")
+    duration = getattr(event, "duration_ms", None)
+    if duration is not None:
+        lines.append(f"duration {duration}ms")
+    return tuple(lines)
+
+
+def _slot_status(slot_view, events):
+    """槽位状态字：完成态逐字（事件 status 值），在途/等待为呈现词。"""
+    started = False
+    finished = None
+    for event in events:
+        if (getattr(event, "stage", None) != slot_view.role
+                or getattr(event, "runtime_id", None)
+                != slot_view.runtime_id):
+            continue
+        kind = _event_type_of(event)
+        if kind == "INVOCATION_STARTED":
+            started = True
+        elif kind == "INVOCATION_FINISHED":
+            finished = _value_of(getattr(event, "status", ""))
+    if finished is not None:
+        symbol = "✓" if str(finished).upper() == "SUCCESS" else "✗"
+        return symbol, str(finished)
+    if started:
+        return "●", "in-flight"
+    return "○", "waiting"
+
+
+def _slot_duration_text(slot_view, events):
+    """时长只来自真实 INVOCATION_FINISHED.duration_ms（最后一次）。"""
+    duration = None
+    for event in events:
+        if (getattr(event, "stage", None) != slot_view.role
+                or getattr(event, "runtime_id", None)
+                != slot_view.runtime_id):
+            continue
+        if _event_type_of(event) == "INVOCATION_FINISHED":
+            value = getattr(event, "duration_ms", None)
+            if value is not None:
+                duration = value
+    return "—" if duration is None else f"{duration}ms"
+
+
+def _slot_handoff_text(slot_view, events):
+    """交接只来自真实 HANDOFF 事件（stage=产出角色，runtime=接收方）。"""
+    handoffs = []
+    for event in events:
+        if (_event_type_of(event) != "HANDOFF"
+                or getattr(event, "stage", None) != slot_view.role):
+            continue
+        handoffs.append(
+            f"→ {getattr(event, 'runtime_id', '')}"
+            f" ({_value_of(getattr(event, 'status', ''))})")
+    return "; ".join(handoffs) if handoffs else "—"
+
+
+def _slot_usage_text(slot_view, usage_records):
+    """用量行：最后一条匹配记录；非 KNOWN 一律 —（零折算）。"""
+    shown = None
+    for record in usage_records:
+        if (getattr(record, "role", None) != slot_view.role
+                or getattr(record, "runtime_id", None)
+                != slot_view.runtime_id):
+            continue
+        shown = record
+    if shown is None or _value_of(
+            getattr(shown, "usage_status", "")) != "KNOWN":
+        return "—"
+    return f"in={shown.input_tokens} out={shown.output_tokens}"
+
+
+def _slot_result_text(slot_view, last_outcome):
+    """结果行：只来自既有 transcript 的 step status metadata
+    （终态后才有；绝不伪装完整 agent output）。"""
+    if last_outcome is None:
+        return "—"
+    for record in getattr(last_outcome, "transcript", None) or ():
+        if getattr(record, "slot_id", None) == slot_view.stage:
+            return _value_of(getattr(record, "status", ""))
+    return "—"
+
+
+def agent_detail(slots, events, usage_records, last_outcome, *,
+                 expanded=False, width=100, ascii_only=False):
+    """Agent Detail 行集（CU-TUI-4 §8）。
+
+    Role ≠ Runtime（角色为节标题、runtime 单列一行）；Status/Duration/
+    Handoff/Usage/Result 只来自既有事实源，缺席诚实呈现 —；零 agent
+    registry、零身份铸造、零推断。expanded=True 时不按宽度截断
+    （长结果展开）。"""
+    lines = []
+    for slot_view in slots:
+        symbol, status_text = _slot_status(slot_view, events)
+        provider = (f" · provider {slot_view.provider}"
+                    if slot_view.provider else "")
+        lines.extend((
+            slot_view.role.upper(),
+            f"  {'status':<8}  {symbol} {status_text}",
+            f"  {'runtime':<8}  {slot_view.runtime_id}{provider}",
+            f"  {'duration':<8}  {_slot_duration_text(slot_view, events)}",
+            f"  {'handoff':<8}  {_slot_handoff_text(slot_view, events)}",
+            f"  {'usage':<8}  {_slot_usage_text(slot_view, usage_records)}",
+            f"  {'result':<8}  {_slot_result_text(slot_view, last_outcome)}",
+        ))
+    if not expanded:
+        lines = [truncate_to_width(line, width) for line in lines]
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
 
 
 def _ascii_state(state):
