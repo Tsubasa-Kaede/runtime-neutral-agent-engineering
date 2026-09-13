@@ -1,0 +1,642 @@
+"""CU-TUI-3 (V3.2): cockpit projection layer — offline pure-function tests.
+
+Mandate matrix (CU-TUI-3 implementation authorization, 2026-09-13):
+scenarios 1-36 of the 45-scenario plan — 2/3/4-agent layouts, four width
+breakpoints, runtime/provider absence, usage three-state honesty, six
+lifecycle outcomes under the frozen four-level priority (PAUSE accepted
+!= PAUSED; ABORT accepted != ABORTED; terminal overrides everything),
+CJK-aware truncation, result wrapping, context panel gating, NO_COLOR,
+ASCII fallback, OBS/CTRL/USAGE trace source fidelity, and source guards
+locking the projection layer to a pure read-only determinstic function.
+
+All fixtures are hand-rolled offline values: no network, no REAL
+providers, no filesystem access outside this file's own reads of the
+projection source (guard tests), no threads, no time.
+"""
+import sys
+import unittest
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "dual-agent-development" / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from console_observation import format_event_line
+from control_journal import ControlFactType, JournalFact
+from execution_observation import (
+    ExecutionEvent,
+    ExecutionEventType,
+)
+from sequential_pipeline import RunStatus
+from usage_log import UsageObservation, UsageRecord
+
+import cockpit_projection as projection
+
+
+# ---------------------------------------------------------------- helpers
+
+
+def slot(role, runtime, stage=None, provider=None):
+    return projection.AgentSlotView(
+        stage=stage if stage is not None else role,
+        role=role, runtime_id=runtime, provider=provider)
+
+
+def ev(event_type, *, seq, stage, runtime, status="SUCCESS",
+       reason="R", duration_ms=None):
+    return ExecutionEvent(
+        event_type=event_type, sequence=seq, task_id="t",
+        correlation_id="e", stage=stage, runtime_id=runtime,
+        status=status, reason=reason, duration_ms=duration_ms)
+
+
+def fact(fact_type, *, seq=0, command_id="c", version=1, payload=None):
+    return JournalFact(
+        seq=seq, fact_type=fact_type, execution_id="e",
+        command_id=command_id, execution_version=version,
+        payload=payload)
+
+
+def usage(*, runtime="rt-a", role="arch", status=UsageObservation.KNOWN,
+          input_tokens=None, output_tokens=None, invocation="i"):
+    if status is UsageObservation.KNOWN:
+        input_tokens = 1000 if input_tokens is None else input_tokens
+        output_tokens = 500 if output_tokens is None else output_tokens
+    return UsageRecord(
+        invocation_id=invocation, task_id="t", agent_id="a", role=role,
+        runtime_id=runtime, status="SUCCESS", usage_status=status,
+        input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+_TEMPLATES = {
+    2: ("architect", "coder"),
+    3: ("architect", "coder", "reviewer"),
+    4: ("architect", "coder", "tester", "reviewer"),
+}
+
+
+def template_slots(count):
+    return tuple(
+        slot(role, f"rt-{index}")
+        for index, role in enumerate(_TEMPLATES[count]))
+
+
+def running_events(stages, runtime_of=None):
+    """Minimal honest RUNNING stream: first stage fully finished, the
+    remaining stage(s) started but not yet invoked."""
+    runtime_of = runtime_of or (lambda index: f"rt-{index}")
+    events = []
+    seq = 0
+    for index, role in enumerate(stages):
+        events.append(ev(ExecutionEventType.STAGE_STARTED, seq=seq,
+                         stage=role, runtime=runtime_of(index)))
+        seq += 1
+        if index == 0:
+            events.append(ev(ExecutionEventType.INVOCATION_STARTED,
+                             seq=seq, stage=role,
+                             runtime=runtime_of(index), status="STARTED"))
+            seq += 1
+            events.append(ev(ExecutionEventType.INVOCATION_FINISHED,
+                             seq=seq, stage=role,
+                             runtime=runtime_of(index), status="SUCCESS"))
+            seq += 1
+    return events
+
+
+def inputs(**kwargs):
+    return projection.ProjectionInputs(**kwargs)
+
+
+def build(**kwargs):
+    return projection.build_projection(inputs(**kwargs))
+
+
+# --------------------------------------------- scenarios 1-3: layouts 2/3/4
+
+
+class AgentCountLayoutTests(unittest.TestCase):
+    """Scenarios 1-3: fixed 2/3/4 role pipelines, zero padding slots."""
+
+    def test_two_agent_layout(self):
+        state = build(task="t", slots=template_slots(2),
+                      events=running_events(("architect", "coder")),
+                      width=100)
+        self.assertEqual(len(state.collaboration_lines), 2)
+        self.assertIn("ARCHITECT", state.collaboration_lines[0])
+        self.assertIn("CODER", state.collaboration_lines[0])
+        # first slot finished ok, second waiting, none invented
+        self.assertIn("✓", state.collaboration_lines[1])
+        self.assertIn("○", state.collaboration_lines[1])
+        self.assertNotIn("REVIEWER", state.collaboration_lines[0])
+
+    def test_three_agent_layout(self):
+        state = build(task="t", slots=template_slots(3), events=(),
+                      width=100)
+        self.assertIn("REVIEWER", state.collaboration_lines[0])
+        self.assertEqual(state.collaboration_lines[1].count("○"), 3)
+
+    def test_four_agent_layout(self):
+        state = build(task="t", slots=template_slots(4), events=(),
+                      width=100)
+        for role in ("ARCHITECT", "CODER", "TESTER", "REVIEWER"):
+            self.assertIn(role, state.collaboration_lines[0])
+        self.assertEqual(state.collaboration_lines[1].count("○"), 4)
+
+    def test_symbol_by_invocation_state(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"),
+                  slot("reviewer", "rt-2"))
+        events = (
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=0,
+               stage="architect", runtime="rt-0", status="STARTED"),
+            ev(ExecutionEventType.INVOCATION_FINISHED, seq=1,
+               stage="architect", runtime="rt-0", status="SUCCESS"),
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=2,
+               stage="coder", runtime="rt-1", status="STARTED"),
+            ev(ExecutionEventType.INVOCATION_FINISHED, seq=3,
+               stage="coder", runtime="rt-1", status="FAILED"),
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=4,
+               stage="reviewer", runtime="rt-2", status="STARTED"),
+        )
+        state = build(task="t", slots=slots_, events=events, width=100)
+        symbols = state.collaboration_lines[1]
+        self.assertIn("✓", symbols)   # architect finished SUCCESS
+        self.assertIn("✗", symbols)   # coder finished FAILED
+        self.assertIn("●", symbols)   # reviewer in flight
+
+    def test_runtime_ids_rendered_on_status_line(self):
+        state = build(task="t", slots=template_slots(2),
+                      events=running_events(("architect", "coder")),
+                      width=100)
+        self.assertIn("rt-0", state.collaboration_lines[1])
+        self.assertIn("rt-1", state.collaboration_lines[1])
+
+    def test_same_runtime_reuse_renders_both_slots(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-0"))
+        state = build(task="t", slots=slots_, events=(), width=100)
+        self.assertEqual(state.collaboration_lines[1].count("rt-0"), 2)
+
+
+# -------------------------------------- scenarios 4-7: responsive breakpoints
+
+
+class ResponsiveBreakpointTests(unittest.TestCase):
+    """Scenarios 4-7: <80 degraded / 80-99 main / 100-139 capped / >=140
+    main+context."""
+
+    def test_degraded_below_80(self):
+        state = build(task="t", slots=template_slots(3), events=(),
+                      width=79)
+        self.assertEqual(state.tier, "DEGRADED")
+        self.assertEqual(state.context_lines, ())
+        # stacked: one line per slot instead of the two-line pipeline
+        self.assertEqual(len(state.collaboration_lines), 3)
+
+    def test_main_tier_80_to_99(self):
+        state = build(task="t", slots=template_slots(3), events=(),
+                      width=90)
+        self.assertEqual(state.tier, "MAIN")
+        self.assertEqual(len(state.collaboration_lines), 2)
+        self.assertEqual(state.context_lines, ())
+
+    def test_main_wide_tier_caps_content_at_100(self):
+        task = "x" * 400
+        state = build(task=task, slots=template_slots(2), events=(),
+                      width=139)
+        self.assertEqual(state.tier, "MAIN_WIDE")
+        self.assertEqual(state.context_lines, ())
+        self.assertLessEqual(projection.display_width(state.task_line),
+                             100)
+
+    def test_full_tier_adds_context(self):
+        state = build(task="t", slots=template_slots(2), events=(),
+                      width=140)
+        self.assertEqual(state.tier, "FULL")
+        self.assertNotEqual(state.context_lines, ())
+        for line in state.context_lines:
+            self.assertLessEqual(projection.display_width(line), 28)
+
+    def test_context_hidden_below_140_even_on_wide_main(self):
+        state = build(task="t", slots=template_slots(2), events=(),
+                      width=139)
+        self.assertEqual(state.context_lines, ())
+
+
+# ------------------------------------- scenarios 8-9: runtime/provider absence
+
+
+class AbsenceHonestyTests(unittest.TestCase):
+    """Scenarios 8-9: absent provider renders '-', never a guess."""
+
+    def test_absent_provider_renders_dash(self):
+        slots_ = (slot("architect", "rt-0", provider=None),)
+        state = build(task="t", slots=slots_, events=(), width=140)
+        joined = "\n".join(state.context_lines)
+        self.assertIn("provider", joined)
+        self.assertIn("—", joined)
+
+    def test_present_provider_renders_truth(self):
+        slots_ = (slot("architect", "rt-0", provider="prov-x"),)
+        state = build(task="t", slots=slots_, events=(), width=140)
+        self.assertIn("prov-x", "\n".join(state.context_lines))
+
+    def test_unknown_unified_dash_no_na_words(self):
+        slots_ = (slot("architect", "rt-0"),)
+        state = build(task="t", slots=slots_, events=(), width=140)
+        joined = "\n".join(state.context_lines)
+        for banned in ("unknown", "UNKNOWN", "N/A", "n/a"):
+            self.assertNotIn(banned, joined)
+        self.assertIn("—", joined)
+
+
+# ------------------------------------------ scenarios 10-13: usage three-state
+
+
+class UsageHonestyTests(unittest.TestCase):
+    """Scenarios 10-13: KNOWN sums; UNKNOWN/UNSUPPORTED show '-';
+    absent records fabricate nothing."""
+
+    def test_known_usage_sums_input_and_output(self):
+        records = (
+            usage(invocation="i1", input_tokens=1000, output_tokens=500),
+            usage(invocation="i2", input_tokens=2000, output_tokens=592),
+        )
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        self.assertIn("4.1k", state.tokens_line)  # 1500 + 2592 = 4092
+
+    def test_unknown_usage_is_dash_not_zero(self):
+        records = (usage(status=UsageObservation.UNKNOWN),)
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        self.assertIn("—", state.tokens_line)
+        self.assertNotIn("0", state.tokens_line)
+
+    def test_unsupported_usage_is_dash_and_excluded(self):
+        records = (
+            usage(status=UsageObservation.UNSUPPORTED),
+            usage(invocation="i2", input_tokens=900,
+                  output_tokens=100),
+        )
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        self.assertIn("1.0k", state.tokens_line)
+
+    def test_zero_known_records_is_dash(self):
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=(), width=100)
+        self.assertIn("—", state.tokens_line)
+
+    def test_absent_record_creates_no_trace_row_and_no_zero(self):
+        records = (usage(invocation="i1"),)
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        # only the real record's runtime renders in the usage trace
+        runtimes = [line for line in state.trace_usage if "rt-1" in line]
+        self.assertEqual(runtimes, [])
+        self.assertEqual(len(state.trace_usage), 1)
+        self.assertNotIn("in=0", "\n".join(state.trace_usage))
+
+    def test_known_trace_row_shows_counts(self):
+        records = (usage(invocation="i1", input_tokens=7,
+                         output_tokens=3),)
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        line = state.trace_usage[0]
+        self.assertIn("in=7", line)
+        self.assertIn("out=3", line)
+
+    def test_non_known_trace_row_shows_dash_counts(self):
+        records = (usage(status=UsageObservation.UNKNOWN),)
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        self.assertIn("in=—", state.trace_usage[0])
+        self.assertIn("out=—", state.trace_usage[0])
+
+    def test_tokens_format_boundaries(self):
+        self.assertEqual(projection.format_tokens(None), "—")
+        self.assertEqual(projection.format_tokens(0), "—")
+        self.assertEqual(projection.format_tokens(999), "999")
+        self.assertEqual(projection.format_tokens(4096), "4.1k")
+        self.assertEqual(projection.format_tokens(1_500_000), "1.5M")
+
+
+# ------------------------------------- scenarios 14-23: lifecycle priority
+
+
+class LifecyclePriorityTests(unittest.TestCase):
+    """Scenarios 14-23: frozen four-level priority (P1 terminal > P2
+    run_state+pause > P2' run_state > P3 active events > P4 idle)."""
+
+    def test_running_from_active_stage_events(self):        # scenario 14
+        state = build(task="t", slots=template_slots(2),
+                      events=running_events(("architect",)), width=100)
+        self.assertEqual(state.lifecycle, "RUNNING")
+
+    def test_paused_requires_run_state_and_pause_fact(self):  # 15
+        state = build(task="t", slots=template_slots(2),
+                      run_state=object(),
+                      facts=(fact(ControlFactType.PAUSE_REQUESTED, seq=0),),
+                      width=100)
+        self.assertEqual(state.lifecycle, "PAUSED")
+
+    def test_parked_when_run_state_without_pause(self):        # 16
+        state = build(task="t", slots=template_slots(2),
+                      run_state=object(), width=100)
+        self.assertEqual(state.lifecycle, "PARKED")
+
+    def test_completed_from_real_terminal_only(self):          # 17
+        state = build(task="t", slots=template_slots(2),
+                      terminal=RunStatus.COMPLETED, width=100)
+        self.assertEqual(state.lifecycle, "COMPLETED")
+
+    def test_failed_from_real_terminal_only(self):             # 18
+        state = build(task="t", slots=template_slots(2),
+                      terminal=RunStatus.FAILED, width=100)
+        self.assertEqual(state.lifecycle, "FAILED")
+
+    def test_aborted_from_real_terminal_only(self):            # 19
+        state = build(task="t", slots=template_slots(2),
+                      terminal=RunStatus.ABORTED, width=100)
+        self.assertEqual(state.lifecycle, "ABORTED")
+
+    def test_pause_accepted_without_run_state_is_not_paused(self):  # 20
+        events = running_events(("architect",))
+        state = build(task="t", slots=template_slots(2), events=events,
+                      facts=(fact(ControlFactType.PAUSE_REQUESTED, seq=0),),
+                      width=100)
+        self.assertEqual(state.lifecycle, "RUNNING")
+        # honest pending note on the progress line, badge untouched
+        self.assertIn("pause pending", state.progress_line)
+
+    def test_pause_accepted_with_run_state_is_paused(self):    # 21
+        state = build(task="t", slots=template_slots(2),
+                      run_state=object(),
+                      facts=(fact(ControlFactType.PAUSE_REQUESTED, seq=0),),
+                      width=100)
+        self.assertEqual(state.lifecycle, "PAUSED")
+
+    def test_abort_accepted_is_not_aborted_until_outcome(self):  # 22
+        events = running_events(("architect",))
+        state = build(task="t", slots=template_slots(2), events=events,
+                      facts=(fact(ControlFactType.ABORT_REQUESTED, seq=0),),
+                      width=100)
+        self.assertEqual(state.lifecycle, "RUNNING")
+
+    def test_terminal_overrides_active_events(self):           # 23
+        events = running_events(("architect",))  # still "active" shape
+        state = build(task="t", slots=template_slots(2), events=events,
+                      terminal=RunStatus.COMPLETED, width=100)
+        self.assertEqual(state.lifecycle, "COMPLETED")
+
+    def test_idle_when_no_facts_at_all(self):                  # P4
+        state = build(task="t", slots=template_slots(2), events=(),
+                      width=100)
+        self.assertEqual(state.lifecycle, "IDLE")
+
+    def test_resume_fact_clears_pause_validity(self):
+        state = build(task="t", slots=template_slots(2),
+                      run_state=object(),
+                      facts=(fact(ControlFactType.PAUSE_REQUESTED, seq=0),
+                             fact(ControlFactType.RESUME_REQUESTED,
+                                  seq=1, command_id="r")),
+                      width=100)
+        self.assertEqual(state.lifecycle, "PARKED")
+
+    def test_later_pause_fact_reestablishes_validity(self):
+        state = build(task="t", slots=template_slots(2),
+                      run_state=object(),
+                      facts=(fact(ControlFactType.PAUSE_REQUESTED, seq=0),
+                             fact(ControlFactType.RESUME_REQUESTED,
+                                  seq=1, command_id="r"),
+                             fact(ControlFactType.PAUSE_REQUESTED,
+                                  seq=2, command_id="p2")),
+                      width=100)
+        self.assertEqual(state.lifecycle, "PAUSED")
+
+
+# ------------------------------------------- scenarios 24-25: text projection
+
+
+class TextProjectionTests(unittest.TestCase):
+    """Scenarios 24-25: CJK-aware truncation and result wrapping."""
+
+    def test_cjk_task_truncation_respects_display_width(self):
+        task = "重构登录模块并补充测试" * 10
+        state = build(task=task, slots=template_slots(2), events=(),
+                      width=90)
+        self.assertLessEqual(projection.display_width(state.task_line),
+                             95)
+        self.assertIn("...", state.task_line)
+
+    def test_wide_char_counts_double(self):
+        self.assertEqual(projection.display_width("ab汉字"), 6)
+
+    def test_truncate_never_exceeds_limit(self):
+        text = "x" * 300
+        cut = projection.truncate_to_width(text, 20)
+        self.assertLessEqual(projection.display_width(cut), 20)
+
+    def test_result_wrapping_caps_lines(self):
+        outcome = SimpleOutcome(
+            status=RunStatus.COMPLETED,
+            final=SimpleResult("word " * 400), error=None)
+        state = build(task="t", slots=template_slots(2),
+                      last_outcome=outcome, width=100)
+        self.assertLessEqual(len(state.result_lines), 4)
+        joined = "\n".join(state.result_lines)
+        self.assertIn("more lines", joined)
+
+    def test_error_projection_in_result_lines(self):
+        outcome = SimpleOutcome(
+            status=RunStatus.FAILED, final=None, error=RuntimeError("boom"))
+        state = build(task="t", slots=template_slots(2),
+                      last_outcome=outcome, width=100)
+        joined = "\n".join(state.result_lines)
+        self.assertIn("ERROR", joined)
+        self.assertIn("boom", joined)
+
+    def test_parked_result_line_is_honest(self):
+        outcome = SimpleOutcome(status=RunStatus.PARKED, final=None,
+                                error=None)
+        state = build(task="t", slots=template_slots(2),
+                      last_outcome=outcome, width=100)
+        self.assertIn("PARKED", "\n".join(state.result_lines))
+
+    def test_no_outcome_renders_no_result(self):
+        state = build(task="t", slots=template_slots(2), events=(),
+                      width=100)
+        self.assertEqual(state.result_lines, ())
+
+
+# -------------------------------------- scenarios 26-29: context/no-color/ascii
+
+
+class ContextPanelTests(unittest.TestCase):
+    """Scenarios 26-27 (projection half): hidden <140, built >=140."""
+
+    def test_context_hidden_below_140(self):
+        state = build(task="t", slots=template_slots(2), events=(),
+                      width=139)
+        self.assertEqual(state.context_lines, ())
+
+    def test_context_blocks_present_at_140(self):
+        state = build(task="t", slots=template_slots(2), events=(),
+                      width=141)
+        joined = "\n".join(state.context_lines)
+        for block in ("CURRENT", "RUNTIME", "CAPABILITIES", "SESSION"):
+            self.assertIn(block, joined)
+
+    def test_context_session_block_shows_known_total(self):
+        records = (usage(invocation="i1", input_tokens=1500,
+                         output_tokens=500),)
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=141)
+        self.assertIn("2.0k", "\n".join(state.context_lines))
+
+
+class AccessibilityTests(unittest.TestCase):
+    """Scenarios 28-29: zero ANSI always; ASCII symbol fallback."""
+
+    def _all_strings(self, state):
+        fields = [state.header_line, state.task_line, state.badge,
+                  state.progress_line, state.tokens_line]
+        fields.extend(state.collaboration_lines)
+        fields.extend(state.result_lines)
+        fields.extend(state.context_lines)
+        fields.extend(state.trace_obs)
+        fields.extend(state.trace_ctrl)
+        fields.extend(state.trace_usage)
+        return fields
+
+    def test_no_ansi_sequences_in_any_projection(self):
+        state = build(task="t", slots=template_slots(3),
+                      events=running_events(("architect",)),
+                      terminal=RunStatus.COMPLETED, width=141)
+        for text in self._all_strings(state):
+            self.assertNotIn("\x1b[", text)
+
+    def test_ascii_mode_replaces_every_unicode_symbol(self):
+        events = (
+            ev(ExecutionEventType.STAGE_STARTED, seq=0,
+               stage="architect", runtime="rt-0"),
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+               stage="architect", runtime="rt-0", status="STARTED"),
+        )
+        state = build(task="t", slots=template_slots(3), events=events,
+                      terminal=RunStatus.ABORTED, width=100,
+                      ascii_only=True)
+        for text in self._all_strings(state):
+            for symbol in "✓●○✗→‖■":
+                self.assertNotIn(symbol, text)
+                self.assertIn("[RUN]", state.collaboration_lines[1])
+        self.assertIn("[STOP]", state.badge)  # ABORTED badge wins
+
+    def test_ascii_arrow_map(self):
+        state = build(task="t", slots=template_slots(2), events=(),
+                      ascii_only=True, width=100)
+        self.assertIn("->", state.collaboration_lines[0])
+
+
+# ---------------------------------------- scenarios 30-32: trace source truth
+
+
+class TraceFidelityTests(unittest.TestCase):
+    """Scenarios 30-32: OBS = format_event_line verbatim; CTRL = journal
+    facts only; USAGE = usage records only."""
+
+    def test_obs_lines_are_format_event_line_verbatim(self):
+        events = running_events(("architect", "coder"))
+        state = build(task="t", slots=template_slots(2), events=events,
+                      width=100)
+        expected = [format_event_line(e).rstrip("\n") for e in events]
+        self.assertEqual(list(state.trace_obs), expected)
+        # sequence numbers are the event's own, never renumbered
+        self.assertIn("[0]", state.trace_obs[0])
+
+    def test_ctrl_lines_come_from_journal_facts_only(self):
+        facts = (
+            fact(ControlFactType.PAUSE_REQUESTED, seq=0,
+                 command_id="p1"),
+            fact(ControlFactType.REVISE_REQUESTED, seq=1,
+                 command_id="r1", payload={"revision_id": "r1",
+                                           "target": "NEXT_INVOCATION"}),
+        )
+        state = build(task="t", slots=template_slots(2), facts=facts,
+                      width=100)
+        self.assertEqual(len(state.trace_ctrl), 2)
+        joined = "\n".join(state.trace_ctrl)
+        self.assertIn("PAUSE_REQUESTED", joined)
+        self.assertIn("p1", joined)
+        self.assertIn("REVISE_REQUESTED", joined)
+        self.assertIn("revision_id=r1", joined)
+
+    def test_usage_lines_come_from_records_only(self):
+        records = (
+            usage(invocation="i1", runtime="rt-0", role="architect"),
+            usage(invocation="i2", runtime="rt-1", role="coder",
+                  status=UsageObservation.UNKNOWN),
+        )
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records, width=100)
+        self.assertEqual(len(state.trace_usage), 2)
+        self.assertIn("rt-0", state.trace_usage[0])
+        self.assertIn("KNOWN", state.trace_usage[0])
+        self.assertIn("UNKNOWN", state.trace_usage[1])
+
+
+# ------------------------------------- scenarios 33-36: projection source locks
+
+
+class ProjectionSourceGuardTests(unittest.TestCase):
+    """Scenarios 33-36: the projection layer stays a pure deterministic
+    read-only function — no textual, no time, no randomness, no
+    identity minting, no truth construction, no execution surface."""
+
+    def setUp(self):
+        with open(projection.__file__, "r", encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_no_textual_dependency(self):
+        self.assertNotIn("textual", self.source)
+
+    def test_no_time_or_datetime_or_random_or_uuid(self):
+        for token in ("import time", "time.time", "datetime", "random",
+                      "uuid"):
+            self.assertNotIn(token, self.source)
+
+    def test_no_truth_construction(self):
+        for token in ("ExecutionEvent(", "UsageRecord(",
+                      "ControlCommand(", "JournalFact("):
+            self.assertNotIn(token, self.source)
+
+    def test_no_execution_or_io_surface(self):
+        for token in (".run_segment(", ".invoke(", ".submit(",
+                      "run_segment", "subprocess", "socket", "open(",
+                      "print(", "Thread", "sleep"):
+            self.assertNotIn(token, self.source)
+
+    def test_deterministic_same_inputs_same_output(self):
+        kwargs = dict(task="t", slots=template_slots(3),
+                      events=running_events(("architect",)),
+                      facts=(fact(ControlFactType.PAUSE_REQUESTED),),
+                      usage_records=(usage(),),
+                      terminal=RunStatus.COMPLETED, width=141)
+        first = build(**kwargs)
+        second = build(**kwargs)
+        self.assertEqual(first, second)
+
+
+class SimpleResult:
+    def __init__(self, output):
+        self.output = output
+        self.status = "SUCCESS"
+
+
+class SimpleOutcome:
+    def __init__(self, status, final, error):
+        self.status = status
+        self.final_result = final
+        self.error = error
+
+
+if __name__ == "__main__":
+    unittest.main()

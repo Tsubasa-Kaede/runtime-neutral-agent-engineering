@@ -21,7 +21,8 @@ import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "dual-agent-development" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -720,8 +721,8 @@ class ExitCodeTests(unittest.TestCase):
 
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
-    "candidate_validation", "cockpit_session", "content_safety",
-    "control_boundary", "control_journal",
+    "candidate_validation", "cockpit_session", "cockpit_tui",
+    "content_safety", "control_boundary", "control_journal",
     "execution_observation", "execution_slots", "external_runtime",
     "host_entry", "sequential_pipeline", "usage_log",
 }
@@ -850,6 +851,154 @@ class HostEntryDispatchTests(unittest.TestCase):
                 factories=factories, evidence=evidence)
         self.assertEqual(code, 2)
         self.assertIn("RUNTIME_NOT_FOUND", err.getvalue())
+
+
+# --------------------------------------------- 9. CU-TUI-3 TUI routing
+
+
+def _fake_tui_module(available):
+    """Offline double of cockpit_tui: records the hand-off, runs the
+    injected driver exactly once, never touches a real framework."""
+    module = ModuleType("cockpit_tui")
+    module.calls = []
+    module.textual_available = lambda: available
+    from event_index import EventIndex
+    module.new_event_store = EventIndex
+
+    def run_ui(**kwargs):
+        module.calls.append(kwargs)
+        return kwargs["driver"]()
+
+    module.run_cockpit_tui = run_ui
+    return module
+
+
+class TuiRoutingTests(unittest.TestCase):
+    """Scenarios 39-45: three-way routing + the human-path byte
+    contract (stdout/exit unchanged when the UI layer is unavailable;
+    any diagnostic lands on stderr only)."""
+
+    def test_human_with_ui_routes_to_tui(self):            # 39
+        module = _fake_tui_module(True)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            code, out, err = _run_cockpit(
+                _BASIC_COMMAND, adapters=_standard_adapters(),
+                verified=("rt-a", "rt-b"))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(module.calls), 1)
+        handed = module.calls[0]
+        self.assertEqual(handed["task"], "task text")
+        self.assertEqual(handed["plan"][0], ("step-0-arch", "arch",
+                                             "rt-a", "prov-a"))
+        self.assertIn("driver", handed)
+        # delivery after the UI closes is the unchanged human surface
+        self.assertIn("Status: COMPLETED", out)
+        self.assertEqual(err, "")  # UI present -> no diagnostic
+
+    def test_human_without_ui_falls_back_with_stderr_hint(self):  # 40
+        module = _fake_tui_module(False)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            code, out, err = _run_cockpit(
+                _BASIC_COMMAND, adapters=_standard_adapters(),
+                verified=("rt-a", "rt-b"))
+        self.assertEqual(code, 0)
+        self.assertEqual(module.calls, [])
+        self.assertIn("Status: COMPLETED", out)
+        self.assertIn("textual", err)
+
+    def test_human_with_missing_ui_module_falls_back(self):  # 40b
+        with mock.patch.dict(sys.modules, {"cockpit_tui": None}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            code, out, err = _run_cockpit(
+                _BASIC_COMMAND, adapters=_standard_adapters(),
+                verified=("rt-a", "rt-b"))
+        self.assertEqual(code, 0)
+        self.assertIn("Status: COMPLETED", out)
+        self.assertIn("textual", err)
+
+    def test_json_with_ui_stays_json(self):                # 41
+        module = _fake_tui_module(True)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            code, out, err = _run_cockpit(
+                _BASIC_COMMAND + ["--json"],
+                adapters=_standard_adapters(), verified=("rt-a", "rt-b"))
+        self.assertEqual(code, 0)
+        self.assertEqual(module.calls, [])
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertEqual(err, "")
+
+    def test_json_without_ui_is_byte_equal(self):          # 42
+        module = _fake_tui_module(True)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            _code_a, out_a, _err_a = _run_cockpit(
+                _BASIC_COMMAND + ["--json"],
+                adapters=_standard_adapters(), verified=("rt-a", "rt-b"))
+        with mock.patch.dict(sys.modules, {"cockpit_tui": None}):
+            _code_b, out_b, _err_b = _run_cockpit(
+                _BASIC_COMMAND + ["--json"],
+                adapters=_standard_adapters(), verified=("rt-a", "rt-b"))
+        self.assertEqual(out_a, out_b)
+        self.assertEqual(json.loads(out_a)["status"], "COMPLETED")
+
+    def test_fallback_stdout_and_exit_are_byte_identical(self):  # 43/44
+        # baseline: piped/redirected stream (no terminal) -> pure
+        # original human path, zero diagnostic
+        code_a, out_a, err_a = _run_cockpit(
+            _BASIC_COMMAND, adapters=_standard_adapters(),
+            verified=("rt-a", "rt-b"))
+        # UI layer unavailable on an interactive terminal -> same bytes
+        module = _fake_tui_module(False)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            code_b, out_b, err_b = _run_cockpit(
+                _BASIC_COMMAND, adapters=_standard_adapters(),
+                verified=("rt-a", "rt-b"))
+        self.assertEqual(code_a, code_b)
+        self.assertEqual(out_a, out_b)
+        self.assertEqual(err_a, "")
+        self.assertNotEqual(err_b, "")
+
+    def test_diagnostic_never_reaches_stdout(self):        # 45
+        module = _fake_tui_module(False)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}), \
+                mock.patch.object(cockpit_entry, "_terminal_present",
+                                  return_value=True):
+            _code, out, err = _run_cockpit(
+                _BASIC_COMMAND, adapters=_standard_adapters(),
+                verified=("rt-a", "rt-b"))
+        self.assertIn("textual", err)
+        self.assertNotIn("textual", out)
+        self.assertNotIn("未安装", out)
+
+    def test_piped_stream_without_terminal_never_routes_to_ui(self):
+        # stdout redirected (the offline default) keeps the original
+        # path even when the UI layer is fully installed
+        module = _fake_tui_module(True)
+        with mock.patch.dict(sys.modules, {"cockpit_tui": module}):
+            code, out, err = _run_cockpit(
+                _BASIC_COMMAND, adapters=_standard_adapters(),
+                verified=("rt-a", "rt-b"))
+        self.assertEqual(code, 0)
+        self.assertEqual(module.calls, [])
+        self.assertIn("Status: COMPLETED", out)
+        self.assertEqual(err, "")
+
+    def test_entry_never_imports_ui_framework_directly(self):  # G17
+        with open(cockpit_entry.__file__, "r", encoding="utf-8") as h:
+            source = h.read()
+        self.assertNotIn("import textual", source)
+        # the only UI touchpoint is the cockpit_tui module load helper
+        self.assertIn("_cockpit_tui_module", source)
 
 
 if __name__ == "__main__":

@@ -510,6 +510,34 @@ class _ObservingAdapter:
 # ---------------------------------------------------------------- main
 
 
+def _terminal_present() -> bool:
+    """交互终端在场（呈现层拥有终端的前提）。
+
+    重定向/管道流恒走原人类路径——UI 依赖的在场与否绝不改变
+    stdout/exit 字节契约（CU-TUI-3 授权 CASE C）。"""
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _cockpit_tui_module():
+    """CU-TUI-3 装载面（G3/T1）：UI 框架 import 只存在于
+    cockpit_tui 模块内部；本层仅尝试导入该模块并询问其可用性。
+    ImportError 之外的异常照常传播（真实故障绝不误判为依赖
+    缺席，G16）。"""
+    try:
+        import cockpit_tui
+    except ImportError:
+        try:
+            from . import cockpit_tui  # embedded package context
+        except ImportError:
+            return None
+    if not cockpit_tui.textual_available():
+        return None
+    return cockpit_tui
+
+
 def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
                  timeout_seconds=None, boundary_hook=None,
                  observation_sink=None, event_index=None) -> int:
@@ -535,7 +563,14 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
     either parameter: the default path emits no event and constructs
     no event store, and stdout/exit codes are byte-identical whether
     or not observation is injected. Consumer failures stay isolated from
-    the execution path (see _observation_channel)."""
+    the execution path (see _observation_channel).
+
+    CU-TUI-3 routing (G5): ``--json`` never touches the UI layer; a
+    human run on an interactive terminal hands the same single segment
+    execution to the read-only Textual cockpit (cockpit_tui) when that
+    module and its framework are importable, and otherwise keeps this
+    module's original human path byte-for-byte (any hint goes to
+    stderr only; a redirected/piped stream never routes to the UI)."""
     argv = list(argv)
     parsed, error = _parse_cockpit_arguments(argv)
     json_mode = (parsed.json_mode if parsed is not None
@@ -596,6 +631,19 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
 
     journal = ControlJournal()
     usage_log = UsageLog()
+    tui = None
+    if not parsed.json_mode and _terminal_present():
+        tui = _cockpit_tui_module()
+        if tui is None:
+            # 交互终端在场而呈现层缺席：仅 stderr 诚实提示；
+            # stdout/exit 契约不动，管道/机器面零噪声（G5/G16）
+            print("dual-agent cockpit: textual 未安装，交互界面不可用，"
+                  "按标准人类模式输出", file=sys.stderr)
+    if tui is not None and event_index is None:
+        # CU-TUI-3：呈现层在场而调用方未注入观察面时，向呈现层
+        # 要它自己的只读事件索引（消费面组合先例 = CU-TUI-1
+        # 注入口；构造下沉 UI 层，默认路径零事件面零漂移）
+        event_index = tui.new_event_store()
     emit = (_observation_channel(task_id, execution_id,
                                  observation_sink, event_index)
             if (observation_sink is not None
@@ -646,7 +694,30 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
         steps_factory=_steps)
     if boundary_hook is not None:
         boundary_hook(slots.boundary, execution_id)
-    outcome = session.run_segment()
+
+    def _drive():
+        """唯一段执行点（G4）：呈现层经此注入回调驱动，
+        无呈现层时本层直接调用——两条路径零行为分叉。"""
+        return session.run_segment()
+
+    if tui is not None:
+        # 呈现层 = 只读投影 + 注入驱动；执行/控制/观察真相
+        # 仍在冻结栈（session / boundary / journal / stores）
+        outcome = tui.run_cockpit_tui(
+            driver=_drive,
+            task=parsed.task,
+            plan=tuple(
+                (f"step-{index}-{role}", role, runtime_id,
+                 resolved[runtime_id].provider_id)
+                for index, (role, runtime_id)
+                in enumerate(parsed.steps)),
+            events=lambda: (event_index.snapshot(task_id)
+                            if event_index is not None else ()),
+            facts=journal.snapshot,
+            usage=usage_log.snapshot,
+            session=session)
+    else:
+        outcome = _drive()
     if emit is not None:
         emit(ExecutionEventType.TERMINAL,
              stage="SEQUENTIAL", runtime_id=None,

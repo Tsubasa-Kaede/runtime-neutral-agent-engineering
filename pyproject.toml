@@ -34,6 +34,13 @@ test = [
   "build>=1",
   "setuptools>=68",
 ]
+# CU-TUI-3 (G14): the collaboration cockpit's optional read-only
+# terminal UI. Major-bound: a new textual major needs an explicit
+# review pass; patch versions float freely. The base install stays
+# free of any UI dependency.
+tui = [
+  "textual>=8.2,<9",
+]
 
 [project.scripts]
 # host_entry.main is the default host composition root (P1-U1): it wires
