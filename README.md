@@ -127,6 +127,18 @@ evidence. Exit contract: `0` COMPLETED / `2` FAILED or user error / `3`
 ABORTED / `4` PARKED; exactly one machine JSON line on stdout, human
 diagnostics on stderr.
 
+**First-run funnel (2.6.0)** — `dual-agent cockpit` with no arguments, run
+on an interactive terminal with the `[tui]` extra installed
+(`pip install dual-agent-development[tui]`), opens the composition funnel
+instead of erroring: type the task, review the default collaboration plan
+(verified runtimes bound in sorted runtime-id order; 2 runtimes map to
+architect + coder, 3 add a tester, 4 add a reviewer), press Enter to start.
+With fewer than two verified runtimes the screen states the blocked reason
+and the `qualify` command to run. The explicit `--step` developer path
+keeps its exact semantics and never merges with the funnel: piped or
+redirected output, `--json`, or a missing Textual install all keep the
+pre-2.6.0 behavior and byte-identical errors.
+
 ## Why not CrewAI / AutoGen / LangGraph?
 
 They are strong tools for building LLM-chaining applications. This project

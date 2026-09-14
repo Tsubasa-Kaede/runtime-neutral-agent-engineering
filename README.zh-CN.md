@@ -100,6 +100,15 @@ ROLE=RUNTIME_ID [--step ...]` 按序编排多 Agent 协作，所有引用的 run
 必须持有已持久化的 `VERIFIED` 证据。退出码：`0` COMPLETED / `2` FAILED /
 `3` ABORTED / `4` PARKED。
 
+**首跑漏斗（2.6.0）**：安装 `[tui]` 扩展
+（`pip install dual-agent-development[tui]`）后，交互终端上不带参数的
+`dual-agent cockpit` 不再报错，而是进入组合漏斗：输入任务，确认默认
+协作方案（已验证 runtime 按 runtime-id 字典序绑定；2 个对应
+architect + coder，3 个加 tester，4 个加 reviewer），回车启动。已验证
+runtime 不足两个时，屏幕显示 blocked 原因与 `qualify` 引导。显式
+`--step` 开发者路径语义不变，也绝不与漏斗混合：管道/重定向输出、
+`--json`、未安装 Textual 均保持 2.6.0 之前的行为与逐字节一致的错误。
+
 ## 为什么不用 CrewAI / AutoGen / LangGraph？
 
 它们是优秀的 LLM 应用编排框架；本项目解决的是另一个问题 —— 对**已存在于
