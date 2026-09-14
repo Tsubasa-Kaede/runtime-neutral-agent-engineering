@@ -33,7 +33,9 @@ __all__ = (
     "build_projection", "derive_lifecycle", "display_width",
     "format_tokens", "truncate_to_width",
     "agent_detail", "control_receipt_line", "event_detail_line",
-    "revision_status_lines",
+    "revision_status_lines", "DEFAULT_ROLE_TEMPLATES",
+    "funnel_preview_lines", "funnel_blocked_line", "funnel_enter_lines",
+    "funnel_changed_lines", "funnel_error_lines", "funnel_first_screen",
 )
 
 # 呈现层 lifecycle 词表（P4 的 IDLE 仅为投影层视觉态，绝不进入
@@ -46,6 +48,17 @@ _PAUSE_OFF_FACTS = ("RESUME_REQUESTED", "ABORT_REQUESTED",
 # CU-TUI-4：修订状态行只消费这两个既有账本词值（读取面，非铸造）。
 _REVISION_FACT_TYPES = ("REVISE_REQUESTED", "REVISION_APPLIED")
 
+# CU-TUI-5：默认协作角色模板（呈现层纯数据冻结映射）。组合绑定
+# 真相唯一源在 cockpit_entry 的默认组合函数——本层只提供
+# "N 个 VERIFIED runtime → 默认角色序列"的查表值，零绑定逻辑、
+# 零 identity 计算、零 IO。
+_TEMPLATES = {
+    2: ("architect", "coder"),
+    3: ("architect", "coder", "reviewer"),
+    4: ("architect", "coder", "tester", "reviewer"),
+}
+DEFAULT_ROLE_TEMPLATES = _TEMPLATES
+
 _SYMBOLS = {
     "COMPLETED": "✓", "FAILED": "✗", "ABORTED": "■",
     "PAUSED": "‖", "PARKED": "‖", "RUNNING": "●", "IDLE": "○",
@@ -53,7 +66,7 @@ _SYMBOLS = {
 }
 _ASCII_SYMBOLS = {
     "✓": "[OK]", "●": "[RUN]", "○": "[PENDING]", "✗": "[FAIL]",
-    "→": "->", "‖": "[:]", "■": "[STOP]",
+    "→": "->", "←": "<-", "‖": "[:]", "■": "[STOP]",
 }
 
 # 呈现宽度：宽字符按 2 列计（CJK/全角区段的实用子集）。
@@ -491,6 +504,111 @@ def event_detail_line(event):
     duration = getattr(event, "duration_ms", None)
     if duration is not None:
         lines.append(f"duration {duration}ms")
+    return tuple(lines)
+
+
+# ------------------- CU-TUI-5 (V3.2): first-run funnel pure renderers
+#
+# 漏斗呈现词（COMPOSITION_CHANGED 横幅/首屏六要素）全部是 TUI 私有
+# 呈现层词汇，绝不进入 engine observation/event vocabulary。组合值
+# 对象（roles/bindings/blocked_reason/blocked_hint）以 duck 类型只读
+# 进入；binding 对本层只有 role/runtime_id/provider 三字段呈现面——
+# canonical 身份四元组是不透明比较载荷，本层零计算零消费。
+
+_FUNNEL_PREVIEW_HEADER = "Collaboration plan (default)"
+_FUNNEL_INSTRUCTION = "Describe the collaboration task"
+_FUNNEL_KEYS_HINT = "Enter start · q quit"
+_FUNNEL_CHANGED_BANNER = "collaboration plan changed:"
+_FUNNEL_BLANK_TASK_HINT = "describe the task first"
+_FUNNEL_REDACTED = "[redacted: unsafe content]"
+
+
+def funnel_preview_lines(composition, *, ascii_only=False):
+    """默认组合披露行（§十三预览块）：标题 + 逐槽位一行
+    "role ← runtime · provider"（角色列对齐至最长角色名）。
+
+    blocked 组合零绑定 → 预览块整块缺席（诚实原因行独立渲染，
+    见 funnel_blocked_line）。确定性纯函数。"""
+    if getattr(composition, "blocked_reason", None) is not None:
+        return ()
+    bindings = tuple(getattr(composition, "bindings", ()) or ())
+    if not bindings:
+        return ()
+    width = max(len(bound.role) for bound in bindings)
+    lines = [_FUNNEL_PREVIEW_HEADER]
+    lines.extend(
+        f"  {bound.role:<{width}}  ← {bound.runtime_id} · "
+        f"{bound.provider_id}"
+        for bound in bindings)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
+
+
+def funnel_blocked_line(composition):
+    """BLOCKED 时恰一行诚实原因（原文）；hint 属 Enter 反馈行
+    （funnel_enter_lines），不混入首屏原因行。"""
+    return getattr(composition, "blocked_reason", None)
+
+
+def funnel_enter_lines(composition, task_text):
+    """Enter 键的状态行反馈（§十二顺序）：空白 → no-op 提示；
+    预览 BLOCKED → 原因 + hint；就绪 → 零行（Start 判定与执行
+    不在本层）。"""
+    if not str(task_text).strip():
+        return (_FUNNEL_BLANK_TASK_HINT,)
+    blocked_reason = getattr(composition, "blocked_reason", None)
+    if blocked_reason is None:
+        return ()
+    lines = [blocked_reason]
+    hint = getattr(composition, "blocked_hint", None)
+    if hint is not None:
+        lines.append(hint)
+    return tuple(lines)
+
+
+def funnel_changed_lines(reasons, *, ascii_only=False):
+    """COMPOSITION_CHANGED 横幅（TUI 私有组合结果词，非 engine
+    event）+ 逐条诚实原因（entry 组合面已按类生成，本层零推断）。"""
+    lines = [_FUNNEL_CHANGED_BANNER]
+    lines.extend(f"  {reason}" for reason in reasons)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
+
+
+def funnel_error_lines(error):
+    """CompositionError → 漏斗红行：reason/detail 原词汇一行 +
+    hint 原文次行（缺席诚实省略）。不 exit——交互面内消化。"""
+    lines = [f"{getattr(error, 'reason', '')}: "
+             f"{getattr(error, 'detail', '')}"]
+    hint = getattr(error, "hint", None)
+    if hint is not None:
+        lines.append(hint)
+    return tuple(lines)
+
+
+def funnel_first_screen(version_text, composition, task_buffer, *,
+                        width=100, ascii_only=False):
+    """首屏六要素组装（NOT_STARTED/COMPOSING 共用，§十三）：
+    header（版本真源由调用方注入，本层零版本读取）/ 唯一指令行 /
+    输入行（内容安全门 + 宽度截断）/ 预览块 / 恰两键提示 / BLOCKED
+    原因行。零 task_id/execution_id/UUID/内部对象/debug metadata。"""
+    buffer_text = str(task_buffer)
+    if contains_unsafe_content(buffer_text):
+        buffer_text = _FUNNEL_REDACTED
+    header = (f"dual-agent cockpit · {version_text}" if version_text
+              else "dual-agent cockpit")
+    lines = [header,
+             _FUNNEL_INSTRUCTION,
+             truncate_to_width(f"> {buffer_text}", width)]
+    lines.extend(funnel_preview_lines(composition))
+    blocked_reason = getattr(composition, "blocked_reason", None)
+    if blocked_reason is not None:
+        lines.append(blocked_reason)
+    lines.append(_FUNNEL_KEYS_HINT)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
     return tuple(lines)
 
 

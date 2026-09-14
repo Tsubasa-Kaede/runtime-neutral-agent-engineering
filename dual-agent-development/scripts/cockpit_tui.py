@@ -1,4 +1,4 @@
-"""CU-TUI-3/4 (V3.2): Textual 协作驾驶舱 — 呈现 + 用户控制面。
+"""CU-TUI-3/4/5 (V3.2): Textual 协作驾驶舱 — 呈现 + 用户控制面。
 
 宪法（CU-TUI-3 G3/G4 + CU-TUI-4 C1/C2）：
 
@@ -17,11 +17,16 @@
   REVISION_COMPOSER 修订编辑 / ABORT_CONFIRM 破坏性确认——此外
   无第四输入模式；
 - G16：依赖缺席的回退发生在入口层（textual_available）；
-  本层真实异常诚实上抛/如实呈现失败，绝不伪装成功。
+  本层真实异常诚实上抛/如实呈现失败，绝不伪装成功；
+- CU-TUI-5 首跑漏斗：单一 CockpitApp、单次 run()——漏斗是 App 的
+  初始呈现阶段（组合句柄 late-bound，Start 前零引擎对象、零 driver
+  线程）；组合真相只经注入的 preview/start 两闭包进出（零引擎
+  import、零 identity 计算）；漏斗外层呈现态（STAGE_*）为 TUI
+  私有，绝不进入事件/生命周期词表。
 
 线程模型（单 Session）：UI 线程只做只读投影、渲染与意图外发；
 worker 线程唯一执行注入的 driver；刷新为数据驱动重投影（零动画、
-零 spinner、零伪造活动）。
+零 spinner、零伪造活动）。漏斗态无 interval——刷新为纯键事件驱动。
 """
 from __future__ import annotations
 
@@ -35,12 +40,18 @@ from cockpit_projection import (
     build_projection,
     control_receipt_line,
     event_detail_line,
+    funnel_changed_lines,
+    funnel_enter_lines,
+    funnel_error_lines,
+    funnel_first_screen,
     revision_status_lines,
 )
 from event_index import EventIndex
 
 __all__ = ("CockpitApp", "TraceScreen", "new_event_store",
-           "run_cockpit_tui", "textual_available")
+           "run_cockpit_tui", "run_cockpit_funnel", "textual_available",
+           "STAGE_NOT_STARTED", "STAGE_COMPOSING", "STAGE_RUNNING",
+           "STAGE_TERMINAL")
 
 
 # 交互三态（CU-TUI-4 C2 裁决：恰此三态，无第四模式）。
@@ -48,8 +59,21 @@ MODE_COMMAND = "command"
 MODE_COMPOSER = "composer"
 MODE_CONFIRM = "confirm"
 
+# 漏斗外层呈现态（CU-TUI-5 §十一：TUI presentation-private，绝不进入
+# engine event/lifecycle/observation 词表、绝不持久化；READY 为派生态
+# ——缓冲非空白 ∧ 预览非 BLOCKED，非独立模态，故无独立常量）。
+STAGE_NOT_STARTED = "funnel_not_started"
+STAGE_COMPOSING = "funnel_composing"
+STAGE_RUNNING = "funnel_running"
+STAGE_TERMINAL = "funnel_terminal"
+
 # 修订 target 封闭二选一（引擎既有词值，呈现层零新词）。
 _TARGETS = ("NEXT_INVOCATION", "SUBMISSION")
+
+# RUNNING 主界面区选择器（漏斗态整组隐藏，Start 后整组复现）。
+_MAIN_ZONE_SELECTORS = (
+    "#header-zone", "#task-zone", "#collab-zone", "#progress-zone",
+    "#result-zone", "#input-dock", "#context-panel")
 
 # 回执有界寿命：按刷新次数衰减（零时钟，确定性）。
 _RECEIPT_TICKS = 6
@@ -79,6 +103,21 @@ def _ascii_preferred() -> bool:
     return "utf" not in encoding
 
 
+def _version_text() -> str:
+    """版本真源读取（cli.py 双模式 import 先例同型：安装态包相对 /
+    源码树 flat `__init__`；两图皆缺席时诚实空串 → header 无版本段）。"""
+    try:
+        from . import __version__
+        return __version__
+    except ImportError:
+        pass
+    try:
+        from __init__ import __version__
+        return __version__
+    except ImportError:
+        return ""
+
+
 def _fact_kind(entry):
     """账本条目词值（封闭词表只读读取面）。"""
     kind = getattr(entry, "fact_type", None)
@@ -104,6 +143,7 @@ def _build_classes() -> None:
         """主界面：六区 + 固定底 dock + （≥140 列）Context 面板。"""
 
         CSS = """
+        #funnel-screen { display: none; }
         #input-dock { dock: bottom; height: 2; }
         #dock-controls { height: 1; }
         #dock-input { height: 1; }
@@ -120,8 +160,11 @@ def _build_classes() -> None:
             Binding("ctrl+c", "cockpit_quit", "Quit", priority=True),
         ]
 
-        def __init__(self, *, driver, task, plan, events, facts, usage,
-                     session, control=None, revision_pending=None):
+        def __init__(self, *, driver=None, task="", plan=(), events=None,
+                     facts=None, usage=None, session=None, control=None,
+                     revision_pending=None, composition_preview=None,
+                     start_composition=None, task_token=None,
+                     timeout_seconds=None):
             super().__init__()
             self._cockpit_drive = driver
             self._cockpit_task = task
@@ -144,10 +187,28 @@ def _build_classes() -> None:
             self._cockpit_thread = None
             self._cockpit_ascii = _ascii_preferred()
             self._cockpit_show_context = True
+            # CU-TUI-5 漏斗面：注入闭包 = 组合真相唯一通道；Start 前
+            # _cockpit_composed 恒 None（late-bound，零引擎对象）。
+            # timeout 已由入口闭包捕获（真值不在本层），参数仅为
+            # 路由对齐；漏斗态无 interval（键事件驱动刷新）。
+            self._cockpit_composition_preview = composition_preview
+            self._cockpit_start_composition = start_composition
+            self._cockpit_composed = None
+            self._cockpit_funnel_timeout = timeout_seconds
+            self._cockpit_funnel_buffer = task_token if task_token else ""
+            self._cockpit_funnel_message = ()
+            self._cockpit_stage = (
+                STAGE_COMPOSING if self._cockpit_funnel_buffer.strip()
+                else STAGE_NOT_STARTED)
+            self._cockpit_disclosure = None
+            self._cockpit_version_text = _version_text()
+            if composition_preview is not None:
+                self._cockpit_disclosure = composition_preview()
 
         # ------------------------------------------------ 布局
 
         def compose(self):
+            yield Static("", id="funnel-screen")
             yield Static("", id="header-zone")
             yield Static("", id="task-zone")
             yield Static("", id="collab-zone")
@@ -159,6 +220,23 @@ def _build_classes() -> None:
             yield Static("", id="context-panel")
 
         def on_mount(self) -> None:
+            if self._cockpit_composition_preview is not None:
+                self._funnel_mount()
+                return
+            self._running_mount()
+
+        def _funnel_mount(self) -> None:
+            """漏斗初始呈现：主界面六区隐藏，单一漏斗屏在场。"""
+            for selector in _MAIN_ZONE_SELECTORS:
+                self.query_one(selector).display = False
+            self.query_one("#funnel-screen").display = True
+            self._funnel_refresh()
+
+        def _running_mount(self) -> None:
+            """RUNNING 呈现（legacy 直达与漏斗 Start 后共用同一面）。"""
+            self.query_one("#funnel-screen").display = False
+            for selector in _MAIN_ZONE_SELECTORS:
+                self.query_one(selector).display = True
             self._refresh()
             # 数据驱动重投影：仅当事实源变化时内容才变化（零动画）
             self.set_interval(0.5, self._refresh)
@@ -248,11 +326,113 @@ def _build_classes() -> None:
             self._cockpit_receipt_ttl = _RECEIPT_TICKS
             return result
 
+        # ------------------------------------------------ 首跑漏斗（CU-TUI-5）
+
+        def _funnel_pre_start(self) -> bool:
+            """漏斗前置态谓词：Start 前的键语义专用（RUNNING 后
+            内层三态接管，本谓词恒 False）。"""
+            return (self._cockpit_composition_preview is not None
+                    and self._cockpit_composed is None)
+
+        def _funnel_refresh(self) -> None:
+            """漏斗屏渲染：投影层首屏组装 + 瞬态状态行（no-op 提示/
+            BLOCKED 原因/红行/变更横幅）。输入行尾 | 为光标呈现
+            （TUI-4 composer 同款惯例）。"""
+            lines = funnel_first_screen(
+                self._cockpit_version_text, self._cockpit_disclosure,
+                self._cockpit_funnel_buffer + "|",
+                width=self.size.width or 100,
+                ascii_only=self._cockpit_ascii)
+            if self._cockpit_funnel_message:
+                lines = lines + tuple(self._cockpit_funnel_message)
+            self.funnel_text = "\n".join(lines)
+            self.query_one("#funnel-screen").update(self.funnel_text)
+
+        def _funnel_key(self, key: str, character) -> None:
+            """漏斗键语义（§十二）：Enter/Esc/Backspace 专属处理；
+            q 仅空缓冲时退出（COMPOSING 中 q 为可打印字符本体）；
+            可打印字符经 event.character 入缓冲（修饰组合结构性排除）。"""
+            if key == "enter":
+                self._funnel_enter()
+                return
+            if key == "escape":
+                # 清空缓冲（不退出）：draft 归零、回到 NOT_STARTED
+                self._cockpit_funnel_buffer = ""
+                self._cockpit_stage = STAGE_NOT_STARTED
+                self._cockpit_funnel_message = ()
+                self._funnel_refresh()
+                return
+            if key == "backspace":
+                self._cockpit_funnel_buffer = \
+                    self._cockpit_funnel_buffer[:-1]
+                if not self._cockpit_funnel_buffer:
+                    self._cockpit_stage = STAGE_NOT_STARTED
+                self._funnel_refresh()
+                return
+            if key == "q" and not self._cockpit_funnel_buffer:
+                # 前置态直接退出 exit 0（零执行、零事件、零确认）
+                self.exit()
+                return
+            if character is not None and len(character) == 1:
+                self._cockpit_funnel_buffer += character
+                self._cockpit_stage = STAGE_COMPOSING
+                self._cockpit_funnel_message = ()
+                self._funnel_refresh()
+                return
+            # 其余（修饰组合/功能键）no-op
+
+        def _funnel_enter(self) -> None:
+            """Enter 判定（§十二顺序）：空白 no-op 提示 → 预览 BLOCKED
+            原因+hint → 就绪才经注入闭包 Start（真相零进本层）。"""
+            buffer = self._cockpit_funnel_buffer
+            feedback = funnel_enter_lines(self._cockpit_disclosure, buffer)
+            if feedback:
+                self._cockpit_funnel_message = feedback
+                self._funnel_refresh()
+                return
+            result = self._cockpit_start_composition(
+                buffer, self._cockpit_disclosure)
+            if hasattr(result, "drive"):
+                # ComposedRun（duck 判别：注入闭包的三种结果值对象
+                # 字段互斥，本层零 entry import）
+                self._funnel_start_success(result)
+                return
+            if hasattr(result, "reasons"):
+                # CompositionChanged：刷新披露为活组合、横幅呈现原因、
+                # 停留漏斗——再 Enter 在新披露上重估（live == 披露才启动）
+                self._cockpit_disclosure = result.composition
+                self._cockpit_funnel_message = funnel_changed_lines(
+                    result.reasons)
+                self._funnel_refresh()
+                return
+            # CompositionError：红行（原词汇），停留漏斗不退出
+            self._cockpit_funnel_message = funnel_error_lines(result)
+            self._funnel_refresh()
+
+        def _funnel_start_success(self, composed) -> None:
+            """Start 成功：late-bind 组合句柄 → 换屏 RUNNING（同一
+            App、同一次 run；内层三态/P/R/E/A/X/Trace 原样接管）。"""
+            self._cockpit_composed = composed
+            self._cockpit_stage = STAGE_RUNNING
+            self._cockpit_drive = composed.drive
+            self._cockpit_task = composed.task
+            self._cockpit_plan = tuple(composed.plan)
+            self._cockpit_events = composed.events
+            self._cockpit_facts = composed.facts
+            self._cockpit_usage = composed.usage
+            self._cockpit_session = composed.session
+            self._cockpit_control = composed.dispatch_control
+            self._cockpit_revision_pending = composed.revision_pending
+            self._running_mount()
+
         # ------------------------------------------------ 键位（状态机）
 
         def on_key(self, event) -> None:
             key = getattr(event, "key", "")
             character = getattr(event, "character", None)
+            if self._funnel_pre_start():
+                self._funnel_key(key, character)
+                return
             if self._cockpit_mode == MODE_COMPOSER:
                 self._composer_key(key, character)
                 return
@@ -342,7 +522,11 @@ def _build_classes() -> None:
         def _quit_path(self) -> None:
             """q 阶梯：终态直退；ABORT 已受理待兑现 → 硬弃界面；
             其余非终态 → 破坏性确认。硬弃只放弃界面，进程收尾
-            仍诚实等待 driver 完成。"""
+            仍诚实等待 driver 完成。漏斗前置态（§十二）：直接退出
+            exit 0——零执行在场，任务文本损失可接受，无确认。"""
+            if self._funnel_pre_start():
+                self.exit()
+                return
             session = self._cockpit_session
             terminal = None if session is None else session.terminal
             if terminal is not None or self._abort_awaited():
@@ -369,6 +553,9 @@ def _build_classes() -> None:
                 self.call_from_thread(self.exit)
                 return
             self.outcome = outcome
+            if self._cockpit_composition_preview is not None:
+                # 漏斗外层呈现态收尾（TUI 私有，零引擎写入）
+                self._cockpit_stage = STAGE_TERMINAL
             self.call_from_thread(self._refresh)
             self.call_from_thread(self.exit)
 
@@ -565,6 +752,26 @@ def run_cockpit_tui(*, driver, task, plan, events, facts, usage,
     app = CockpitApp(driver=driver, task=task, plan=plan, events=events,
                      facts=facts, usage=usage, session=session,
                      control=control, revision_pending=revision_pending)
+    app.run()
+    app.wait_for_driver()
+    if app.failure is not None:
+        raise app.failure
+    return app.outcome
+
+
+def run_cockpit_funnel(*, composition_preview, start_composition,
+                       task_token=None, timeout_seconds=None):
+    """漏斗同步外壳（CU-TUI-5 §十六）：单一 App、单次 run()——
+    漏斗为初始呈现阶段，Start 后同一 App 换屏 RUNNING。
+
+    前置退出（q/Ctrl-C，未 Start）→ outcome None（零执行零交付）；
+    timeout 真值已由入口闭包捕获，本参数仅路由对齐。组合真相只经
+    注入的 preview/start 两闭包进出。"""
+    _build_classes()
+    app = CockpitApp(composition_preview=composition_preview,
+                     start_composition=start_composition,
+                     task_token=task_token,
+                     timeout_seconds=timeout_seconds)
     app.run()
     app.wait_for_driver()
     if app.failure is not None:

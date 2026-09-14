@@ -56,6 +56,7 @@ from typing import NamedTuple
 try:  # flat-import mode (source tree/tests/examples; also installed: the
       # dual_agent shim keeps flat names resolvable and the graph single)
     from candidate_validation import CandidateValidationStatus
+    from cockpit_projection import DEFAULT_ROLE_TEMPLATES
     from cockpit_session import CockpitSession
     from content_safety import REDACTED_ERROR, contains_unsafe_content
     from control_boundary import (
@@ -80,6 +81,7 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
     from usage_log import UsageLog
 except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
+    from .cockpit_projection import DEFAULT_ROLE_TEMPLATES
     from .cockpit_session import CockpitSession
     from .content_safety import REDACTED_ERROR, contains_unsafe_content
     from .control_boundary import (
@@ -236,6 +238,225 @@ def _parse_cockpit_arguments(argv):
                           f"not a positive number: {timeout_text}")
     return _ParsedArguments(task, tuple(parsed_steps), json_mode,
                             timeout_seconds), None
+
+
+# ------------------------------------------------- first-run funnel (TUI-5)
+
+# CU-TUI-5（FIX-1/P1-2/P1-1，v2.1 勘误后实现）：零知识用户入口的
+# entry 侧组合面。漏斗只经交互 TTY + 可导入 cockpit_tui 到达；一切
+# 非 Funnel 形态由原 parser 按既有字节语义解释。本节不新增 engine
+# event、不新增 Truth Source：runtime/qualification 真相仍在注册与
+# evidence 路径（只读复用），identity 只作原值携带。
+
+
+class FunnelIntent(NamedTuple):
+    """预检意图：进入漏斗所需的最小 argv 事实。
+
+    task_token 为唯一非 flag token 的原样携带（零内容验证——空白/
+    超长/不安全内容交给漏斗 composer 语义与非交互原 parser 兜底）；
+    timeout_seconds 为经既有 coercion 委托判定的合法 timeout。"""
+
+    task_token: str | None
+    timeout_seconds: float | None
+
+
+def _funnel_preflight(argv):
+    """最小意图分类（parser 之前，非第二套 CLI parser）。
+
+    只识别进入漏斗所必需的最小语法：--json、任何 --step 形态（含
+    malformed --step=，专属早退检查位于 task token 识别之前）、
+    未知 flag、第二个 task token、悬空或非法 timeout 一律
+    return None——交还原 _parse_cockpit_arguments 拥有完整 grammar
+    与既有错误语义。本函数零 role/runtime 解析、零 step 校验、
+    零自研数字 coercion（timeout 合法性只经 _coerce_qualify_timeout
+    委托，非法即自我降级回原 parser）、零错误产出、零 task 内容
+    验证。多次 timeout 与原 parser 同为 last-wins。"""
+    task_token = None
+    pending = None
+    timeout_text = None
+    for token in argv:
+        if pending is not None:          # --timeout-seconds 的值槽
+            timeout_text = token
+            pending = None
+            continue
+        if token == "--json":
+            return None
+        if token == "--step":
+            return None
+        if token.startswith("--step="):
+            return None
+        if token == _TIMEOUT_FLAG:
+            pending = token
+        elif token.startswith(_TIMEOUT_FLAG + "="):
+            timeout_text = token[len(_TIMEOUT_FLAG) + 1:]
+        elif token.startswith("--"):
+            return None                  # 未知 flag → 原 parser
+        elif task_token is None:
+            task_token = token           # 唯一 task token，原样携带
+        else:
+            return None                  # 第二个 task token → 原 parser
+    if pending is not None:
+        return None                      # 悬空值 → 原 parser
+    timeout_seconds = None
+    if timeout_text is not None:
+        timeout_seconds, problem = (
+            _host_entry()._coerce_qualify_timeout(timeout_text))
+        if problem is not None:
+            return None                  # 非法值 → 原 parser（字节同款）
+    return FunnelIntent(task_token, timeout_seconds)
+
+
+class CompositionBinding(NamedTuple):
+    """默认组合的一个绑定（四字段全等，P1-1）。
+
+    canonical_runtime_identity 是既有注册/evidence 身份的原值携带
+    （descriptor.identity，注册路径构造的 evidence 四元组键）——本
+    模块不计算、不派生、不重造 identity；呈现层（cockpit_tui /
+    cockpit_projection）不接触此字段，它只是组合比较的透明载荷。
+    runtime_id 与 provider_id 相同绝不掩盖 identity 变化。"""
+
+    role: str
+    runtime_id: str
+    provider_id: str
+    canonical_runtime_identity: tuple
+
+
+class DefaultComposition(NamedTuple):
+    """resolve_default_composition 的纯输出：绑定，或诚实 BLOCKED。"""
+
+    roles: tuple
+    bindings: tuple
+    blocked_reason: str | None
+    blocked_hint: str | None
+
+
+class CompositionError(NamedTuple):
+    """漏斗启动的诚实拒绝（与 _fail 同词表原因；呈现层红行消化，
+    不 exit、零回退路径）。"""
+
+    reason: str
+    detail: str
+    hint: str | None
+
+
+class CompositionChanged(NamedTuple):
+    """披露组合与活组合不一致（TUI/漏斗私有组合结果词，绝非
+    engine event——零 observation/event_index/lifecycle 写入）。
+
+    composition = 应当重新披露的活组合；reasons = 逐类诚实原因；
+    调用方刷新披露、停留漏斗，用户再次 Enter 才重新判断。"""
+
+    reasons: tuple
+    composition: DefaultComposition
+
+
+def resolve_default_composition(verified_pool_snapshot):
+    """唯一默认组合源（FIX-3）：纯函数，零 IO/时钟/随机/UUID。
+
+    canonical ordering = sorted(runtime_id)（输入顺序被规范化——
+    注册顺序漂移不构成组合变化）；角色模板 = 投影层冻结表；池
+    不足 2 诚实 BLOCKED 并附既有 qualify hint 原文——零 silent
+    shrink、零替补 runtime、零 auto-reroute。identity 原值
+    携带进 binding（见 CompositionBinding）。"""
+    entries = tuple(sorted(verified_pool_snapshot,
+                           key=lambda entry: entry.runtime_id))
+    if len(entries) < 2:
+        return DefaultComposition(
+            roles=(), bindings=(),
+            blocked_reason=(
+                "default collaboration needs at least 2 VERIFIED "
+                f"runtimes (found {len(entries)})"),
+            blocked_hint=_host_entry()._HINT_QUALIFY)
+    roles = DEFAULT_ROLE_TEMPLATES[min(4, len(entries))]
+    bindings = tuple(
+        CompositionBinding(
+            role=role,
+            runtime_id=entry.runtime_id,
+            provider_id=entry.provider_id,
+            canonical_runtime_identity=entry.identity)
+        for role, entry in zip(roles, entries))
+    return DefaultComposition(roles=tuple(roles), bindings=bindings,
+                              blocked_reason=None, blocked_hint=None)
+
+
+def _is_verified(evidence, descriptor):
+    """既有验证门比较的唯一实现（显式解析循环与漏斗池同源）。"""
+    validation = evidence.get(descriptor.identity)
+    return (validation is not None
+            and validation.status is CandidateValidationStatus.VERIFIED)
+
+
+def _verified_pool(registry, evidence):
+    """VERIFIED-only 池（READ）：registry.list() 自带 canonical
+    sorted(runtime_id) 序，只读快照、零注册、零写入。"""
+    return tuple(entry for entry in registry.list()
+                 if _is_verified(evidence, entry))
+
+
+def _composition_change_reasons(expected, live, registry):
+    """披露组合 vs 活组合的逐类诚实差异（sorted 输出，确定性）。
+
+    消失归因 no longer VERIFIED（registry 仍在场）或 unavailable
+    （registry 缺席）；新增归因 new VERIFIED runtime changes the
+    default plan；同 runtime_id 的绑定四字段不等（含 canonical
+    identity 变化——三字段相等绝不掩盖）归因 identity changed。
+    独立 ordering-diff 不可能：canonical 序由 identity 集合派生。"""
+    reasons = []
+    expected_by_runtime = {binding.runtime_id: binding
+                           for binding in expected.bindings}
+    live_by_runtime = {binding.runtime_id: binding
+                       for binding in live.bindings}
+    for runtime_id in sorted(set(expected_by_runtime)
+                             - set(live_by_runtime)):
+        try:
+            registry.get(runtime_id)
+            reasons.append(f"runtime {runtime_id} no longer VERIFIED")
+        except KeyError:
+            reasons.append(f"runtime {runtime_id} unavailable")
+    for runtime_id in sorted(set(live_by_runtime)
+                             - set(expected_by_runtime)):
+        reasons.append(f"new VERIFIED runtime {runtime_id} "
+                       f"changes the default plan")
+    for runtime_id in sorted(set(expected_by_runtime)
+                             & set(live_by_runtime)):
+        if (expected_by_runtime[runtime_id]
+                != live_by_runtime[runtime_id]):
+            reasons.append(f"runtime {runtime_id} identity changed")
+    return tuple(reasons)
+
+
+def _resolve_runtimes(registry, skipped, evidence, steps):
+    """显式步骤的运行时解析（legacy 解析循环的提取，语义逐字保持：
+    detail 文本、首错即停、首用序 resolved、hint 仅 NOT_QUALIFIED）。
+
+    返回 {runtime_id: descriptor}，或 (reason, detail, hint) 三元组
+    ——legacy 调用方转 _fail，漏斗调用方转 CompositionError，同一
+    解析真相、两种诚实呈现。"""
+    resolved = {}
+    for _role, runtime_id in steps:
+        if runtime_id in resolved:
+            continue
+        try:
+            descriptor = registry.get(runtime_id)
+        except KeyError:
+            if runtime_id in skipped:
+                return ("RUNTIME_UNAVAILABLE",
+                        "runtime family present but unusable "
+                        "(no provider identity)", False)
+            shown = (runtime_id
+                     if not contains_unsafe_content(runtime_id)
+                     else "(unsafe value suppressed)")
+            available = ", ".join(sorted(
+                entry.runtime_id for entry in registry.list())) or "(none)"
+            return ("RUNTIME_NOT_FOUND",
+                    f"unknown runtime_id {shown}; "
+                    f"available: {available}", False)
+        if not _is_verified(evidence, descriptor):
+            return ("RUNTIME_NOT_QUALIFIED",
+                    f"no persisted VERIFIED evidence for "
+                    f"{descriptor.runtime_id}", True)
+        resolved[runtime_id] = descriptor
+    return resolved
 
 
 # ------------------------------------------------------------ delivery
@@ -550,119 +771,48 @@ def _cockpit_tui_module():
     return cockpit_tui
 
 
-def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
-                 timeout_seconds=None, boundary_hook=None,
-                 observation_sink=None, event_index=None) -> int:
-    """`dual-agent cockpit` entry (called by the host_entry dispatch).
+class ComposedRun(NamedTuple):
+    """装配产物：legacy --step 路径与漏斗 Start 的共同唯一装配真相
+    （_assemble_execution 的输出）。drive 是唯一段执行点；emit/
+    events/facts/usage 为只读投影面；dispatch_control/revision_
+    pending 为 TUI-4 注入闭包原样。"""
 
-    Composition + delivery only. Injection surface mirrors the
-    host_entry precedent: ``factories`` (environment discovery
-    doubles), ``evidence`` (persisted qualification facts; loaded from
-    ``base_dir`` / the default directory when not injected), and
-    ``timeout_seconds`` (default per-request timeout, overridable via
-    --timeout-seconds). There is deliberately no qualifier parameter:
-    this entry never qualifies implicitly (D-P0-4).
+    task: str
+    steps: tuple                 # ((role, runtime_id), ...) 交付序
+    plan: tuple                  # (slot_id, role, runtime, provider)
+    task_id: str
+    execution_id: str
+    emit: object | None
+    drive: object
+    session: object
+    dispatch_control: object
+    revision_pending: object
+    events: object
+    facts: object
+    usage: object
 
-    ``boundary_hook`` is an embedding/test seam called with (boundary,
-    execution_id) after assembly and before the single execution call;
-    it is not reachable from argv and backs no product control surface
-    (v1 has none). It exists so the ABORTED/PARKED delivery contracts
-    stay testable offline.
 
-    ``observation_sink`` / ``event_index`` (CU-TUI-1) are in-process
-    execution-event consumers for this composition root — the only
-    observation surface. Both default to None and argv cannot reach
-    either parameter: the default path emits no event and constructs
-    no event store, and stdout/exit codes are byte-identical whether
-    or not observation is injected. Consumer failures stay isolated from
-    the execution path (see _observation_channel).
+def _assemble_execution(resolved, task, steps, timeout_seconds, *,
+                        observation_sink=None, event_index=None,
+                        boundary_hook=None):
+    """组合段装配（legacy 与漏斗的共同唯一装配真相）。
 
-    CU-TUI-3 routing (G5): ``--json`` never touches the UI layer; a
-    human run on an interactive terminal hands the same single segment
-    execution to the read-only Textual cockpit (cockpit_tui) when that
-    module and its framework are importable, and otherwise keeps this
-    module's original human path byte-for-byte (any hint goes to
-    stderr only; a redirected/piped stream never routes to the UI)."""
-    argv = list(argv)
-    parsed, error = _parse_cockpit_arguments(argv)
-    json_mode = (parsed.json_mode if parsed is not None
-                 else _JSON_FLAG in argv)
-    if error is not None:
-        reason, detail = error
-        return _fail(reason, detail, json_mode)
-
+    输入为已 VERIFIED 解析的 runtimes + 任务文本 + 角色计划；产出
+    冻结栈执行句柄（slots/session/控制闭包/唯一 drive）。本函数不
+    读 argv、不产生 CLI 输出——错误呈现归调用方（_fail 或
+    CompositionError）。"""
     host = _host_entry()
-    registry, skipped = host.environment_registry(factories)
-    if evidence is None:
-        directory = (host.DEFAULT_EVIDENCE_DIR if base_dir is None
-                     else base_dir)
-        try:
-            evidence, rejected = host.load_evidence(directory)
-        except OSError as failure:  # system IO: stderr-only, exit 2
-            print(json.dumps({"error": "evidence store unreadable",
-                              "detail": str(failure)}), file=sys.stderr)
-            return 2
-        host._print_rejections(rejected)
-
-    resolved = {}  # runtime_id -> descriptor, in first-use order
-    for _role, runtime_id in parsed.steps:
-        if runtime_id in resolved:
-            continue
-        try:
-            descriptor = registry.get(runtime_id)
-        except KeyError:
-            if runtime_id in skipped:
-                return _fail("RUNTIME_UNAVAILABLE",
-                             "runtime family present but unusable "
-                             "(no provider identity)", parsed.json_mode)
-            shown = (runtime_id
-                     if not contains_unsafe_content(runtime_id)
-                     else "(unsafe value suppressed)")
-            available = ", ".join(sorted(
-                entry.runtime_id for entry in registry.list())) or "(none)"
-            return _fail("RUNTIME_NOT_FOUND",
-                         f"unknown runtime_id {shown}; "
-                         f"available: {available}", parsed.json_mode)
-        validation = evidence.get(descriptor.identity)
-        if (validation is None
-                or validation.status
-                is not CandidateValidationStatus.VERIFIED):
-            return _fail("RUNTIME_NOT_QUALIFIED",
-                         f"no persisted VERIFIED evidence for "
-                         f"{descriptor.runtime_id}",
-                         parsed.json_mode, hint=True)
-        resolved[runtime_id] = descriptor
-
-    task_id = host._opaque_task_id(parsed.task)
+    task_id = host._opaque_task_id(task)
     execution_id = f"cockpit-{task_id}"
-    effective_timeout = parsed.timeout_seconds
-    if effective_timeout is None:
-        effective_timeout = (
-            timeout_seconds if timeout_seconds is not None
-            else host.DEFAULT_TIMEOUT_SECONDS)
-
     journal = ControlJournal()
     usage_log = UsageLog()
-    tui = None
-    if not parsed.json_mode and _terminal_present():
-        tui = _cockpit_tui_module()
-        if tui is None:
-            # 交互终端在场而呈现层缺席：仅 stderr 诚实提示；
-            # stdout/exit 契约不动，管道/机器面零噪声（G5/G16）
-            print("dual-agent cockpit: textual 未安装，交互界面不可用，"
-                  "按标准人类模式输出", file=sys.stderr)
-    if tui is not None and event_index is None:
-        # CU-TUI-3：呈现层在场而调用方未注入观察面时，向呈现层
-        # 要它自己的只读事件索引（消费面组合先例 = CU-TUI-1
-        # 注入口；构造下沉 UI 层，默认路径零事件面零漂移）
-        event_index = tui.new_event_store()
     emit = (_observation_channel(task_id, execution_id,
                                  observation_sink, event_index)
             if (observation_sink is not None
                 or event_index is not None)
             else None)
     slot_specs = []
-    for index, (role, runtime_id) in enumerate(parsed.steps):
+    for index, (role, runtime_id) in enumerate(steps):
         slot_id = f"step-{index}-{role}"
         raw_adapter = resolved[runtime_id].adapter_factory()
         if emit is not None:
@@ -687,22 +837,22 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
         起点消费后经本工厂重建（旧 builders 不再被引用）。"""
         text = (submission.task if submission.task is not None
                 else (submission.prompt if submission.prompt is not None
-                      else parsed.task))
+                      else task))
         return tuple(
             StepSpec(
                 slot_id=f"step-{index}-{role}",
                 request_builder=_make_request_builder(
                     text, task_id, role,
-                    resolved[runtime_id].provider_id, effective_timeout,
+                    resolved[runtime_id].provider_id, timeout_seconds,
                     emit=emit, runtime_id=runtime_id,
-                    previous_role=(parsed.steps[index - 1][0]
+                    previous_role=(steps[index - 1][0]
                                    if index > 0 else None)))
-            for index, (role, runtime_id) in enumerate(parsed.steps))
+            for index, (role, runtime_id) in enumerate(steps))
 
     session = CockpitSession(
         boundary=slots.boundary, slots=slots,
         submission=RevisionPayload(target=RevisionTarget.SUBMISSION,
-                                   task=parsed.task),
+                                   task=task),
         steps_factory=_steps)
     if boundary_hook is not None:
         boundary_hook(slots.boundary, execution_id)
@@ -751,33 +901,254 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
         无呈现层时本层直接调用——两条路径零行为分叉。"""
         return session.run_segment()
 
+    plan = tuple(
+        (f"step-{index}-{role}", role, runtime_id,
+         resolved[runtime_id].provider_id)
+        for index, (role, runtime_id) in enumerate(steps))
+    return ComposedRun(
+        task=task, steps=tuple(steps), plan=plan,
+        task_id=task_id, execution_id=execution_id, emit=emit,
+        drive=_drive, session=session,
+        dispatch_control=_dispatch_control,
+        revision_pending=_revision_pending,
+        events=lambda: (event_index.snapshot(task_id)
+                        if event_index is not None else ()),
+        facts=journal.snapshot, usage=usage_log.snapshot)
+
+
+class _FunnelSurfaces(NamedTuple):
+    """漏斗组合面（注入呈现层的两闭包 + 成功启动记录）。"""
+
+    preview: object
+    start: object
+    composed_runs: list
+
+
+def _funnel_composition_closures(registry, skipped, evidence, *,
+                                 timeout_seconds, boundary_hook=None,
+                                 observation_sink=None,
+                                 event_index=None):
+    """CU-TUI-5 组合面（READ/DISPATCH 注入范式，C1 先例同构）。
+
+    preview = 只读默认组合预览（零引擎对象、零副作用、零事件）；
+    start = 唯一启动出口：活读 VERIFIED 池 → 与调用方当前披露的
+    组合四字段全等比较 → 相等才经 _assemble_execution 装配；任何
+    变化如实返回 CompositionChanged（零装配、零回退、零
+    reroute、零二次尝试），调用方刷新披露后再次 Enter 才可启动。
+    composed_runs 记录成功启动（至多一次：RUNNING 后不再调用）。"""
+
+    def composition_preview():
+        return resolve_default_composition(
+            _verified_pool(registry, evidence))
+
+    composed_runs = []
+
+    def start_composition(task_text, expected_composition):
+        if not isinstance(task_text, str) or not task_text.strip():
+            return CompositionError("INVALID_TASK",
+                                    "task must be a non-empty string",
+                                    None)
+        live = resolve_default_composition(
+            _verified_pool(registry, evidence))
+        if live.blocked_reason is not None:
+            return CompositionError("RUNTIME_NOT_QUALIFIED",
+                                    live.blocked_reason,
+                                    live.blocked_hint)
+        if live != expected_composition:
+            return CompositionChanged(
+                _composition_change_reasons(expected_composition, live,
+                                            registry), live)
+        steps = tuple((binding.role, binding.runtime_id)
+                      for binding in live.bindings)
+        resolved_or_error = _resolve_runtimes(registry, skipped, evidence,
+                                              steps)
+        if not isinstance(resolved_or_error, dict):
+            reason, detail, hint = resolved_or_error
+            return CompositionError(
+                reason, detail,
+                _host_entry()._HINT_QUALIFY if hint else None)
+        composed = _assemble_execution(
+            resolved_or_error, task_text, steps, timeout_seconds,
+            observation_sink=observation_sink, event_index=event_index,
+            boundary_hook=boundary_hook)
+        composed_runs.append(composed)
+        return composed
+
+    return _FunnelSurfaces(preview=composition_preview,
+                           start=start_composition,
+                           composed_runs=composed_runs)
+
+
+def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
+                          timeout_seconds, boundary_hook,
+                          observation_sink, event_index):
+    """首跑漏斗分支（交互 TTY + textual 专有；路由谓词已排除一切
+    非交互/机器面/开发者形态）。
+
+    前置退出 = exit 0（零执行、零事件、零交付）；启动后的终态
+    交付与 legacy human 路径同一函数同一 exit 映射。"""
+    host = _host_entry()
+    registry, skipped = host.environment_registry(factories)
+    if evidence is None:
+        directory = (host.DEFAULT_EVIDENCE_DIR if base_dir is None
+                     else base_dir)
+        try:
+            evidence, rejected = host.load_evidence(directory)
+        except OSError as failure:  # system IO: stderr-only, exit 2
+            print(json.dumps({"error": "evidence store unreadable",
+                              "detail": str(failure)}), file=sys.stderr)
+            return 2
+        host._print_rejections(rejected)
+    if event_index is None:
+        event_index = tui.new_event_store()
+    effective_timeout = (
+        intent.timeout_seconds if intent.timeout_seconds is not None
+        else (timeout_seconds if timeout_seconds is not None
+              else host.DEFAULT_TIMEOUT_SECONDS))
+    surfaces = _funnel_composition_closures(
+        registry, skipped, evidence, timeout_seconds=effective_timeout,
+        boundary_hook=boundary_hook, observation_sink=observation_sink,
+        event_index=event_index)
+    outcome = tui.run_cockpit_funnel(
+        composition_preview=surfaces.preview,
+        start_composition=surfaces.start,
+        task_token=intent.task_token,
+        timeout_seconds=intent.timeout_seconds)
+    if outcome is None:
+        return 0
+    composed = surfaces.composed_runs[-1]
+    if composed.emit is not None:
+        composed.emit(ExecutionEventType.TERMINAL,
+                      stage="SEQUENTIAL", runtime_id=None,
+                      status=outcome.status.value,
+                      reason=outcome.status.value)
+    for line in _human_lines(composed.task, composed.steps, outcome):
+        print(line)
+    return _EXIT_CODE_BY_STATUS[outcome.status]
+
+
+def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
+                 timeout_seconds=None, boundary_hook=None,
+                 observation_sink=None, event_index=None) -> int:
+    """`dual-agent cockpit` entry (called by the host_entry dispatch).
+
+    Composition + delivery only. Injection surface mirrors the
+    host_entry precedent: ``factories`` (environment discovery
+    doubles), ``evidence`` (persisted qualification facts; loaded from
+    ``base_dir`` / the default directory when not injected), and
+    ``timeout_seconds`` (default per-request timeout, overridable via
+    --timeout-seconds). There is deliberately no qualifier parameter:
+    this entry never qualifies implicitly (D-P0-4).
+
+    ``boundary_hook`` is an embedding/test seam called with (boundary,
+    execution_id) after assembly and before the single execution call;
+    it is not reachable from argv and backs no product control surface
+    (v1 has none). It exists so the ABORTED/PARKED delivery contracts
+    stay testable offline.
+
+    ``observation_sink`` / ``event_index`` (CU-TUI-1) are in-process
+    execution-event consumers for this composition root — the only
+    observation surface. Both default to None and argv cannot reach
+    either parameter: the default path emits no event and constructs
+    no event store, and stdout/exit codes are byte-identical whether
+    or not observation is injected. Consumer failures stay isolated from
+    the execution path (see _observation_channel).
+
+    CU-TUI-3 routing (G5): ``--json`` never touches the UI layer; a
+    human run on an interactive terminal hands the same single segment
+    execution to the read-only Textual cockpit (cockpit_tui) when that
+    module and its framework are importable, and otherwise keeps this
+    module's original human path byte-for-byte (any hint goes to
+    stderr only; a redirected/piped stream never routes to the UI)."""
+    argv = list(argv)
+    # CU-TUI-5 路由（FIX-1）：预检意图分类位于原 parser 之前——
+    # 仅「交互 TTY ∧ 可导入呈现层 ∧ 无 --json/无 --step 形态/无
+    # 未知 flag/单 task token/timeout 合法」进入漏斗；其余一切
+    # 形态（含全部开发者/机器面/错误形态）逐字节走原 parser。
+    intent = _funnel_preflight(argv)
+    if intent is not None and _terminal_present():
+        tui = _cockpit_tui_module()
+        if tui is not None:
+            return _run_first_run_funnel(
+                intent, tui, factories=factories, evidence=evidence,
+                base_dir=base_dir, timeout_seconds=timeout_seconds,
+                boundary_hook=boundary_hook,
+                observation_sink=observation_sink,
+                event_index=event_index)
+    parsed, error = _parse_cockpit_arguments(argv)
+    json_mode = (parsed.json_mode if parsed is not None
+                 else _JSON_FLAG in argv)
+    if error is not None:
+        reason, detail = error
+        return _fail(reason, detail, json_mode)
+
+    host = _host_entry()
+    registry, skipped = host.environment_registry(factories)
+    if evidence is None:
+        directory = (host.DEFAULT_EVIDENCE_DIR if base_dir is None
+                     else base_dir)
+        try:
+            evidence, rejected = host.load_evidence(directory)
+        except OSError as failure:  # system IO: stderr-only, exit 2
+            print(json.dumps({"error": "evidence store unreadable",
+                              "detail": str(failure)}), file=sys.stderr)
+            return 2
+        host._print_rejections(rejected)
+
+    resolved_or_error = _resolve_runtimes(registry, skipped, evidence,
+                                          parsed.steps)
+    if not isinstance(resolved_or_error, dict):
+        reason, detail, hint = resolved_or_error
+        return _fail(reason, detail, json_mode, hint=hint)
+    resolved = resolved_or_error
+
+    effective_timeout = (parsed.timeout_seconds
+                         if parsed.timeout_seconds is not None
+                         else (timeout_seconds if timeout_seconds is not None
+                               else host.DEFAULT_TIMEOUT_SECONDS))
+
+    tui = None
+    if not parsed.json_mode and _terminal_present():
+        tui = _cockpit_tui_module()
+        if tui is None:
+            # 交互终端在场而呈现层缺席：仅 stderr 诚实提示；
+            # stdout/exit 契约不动，管道/机器面零噪声（G5/G16）
+            print("dual-agent cockpit: textual 未安装，交互界面不可用，"
+                  "按标准人类模式输出", file=sys.stderr)
+    if tui is not None and event_index is None:
+        # CU-TUI-3：呈现层在场而调用方未注入观察面时，向呈现层
+        # 要它自己的只读事件索引（消费面组合先例 = CU-TUI-1
+        # 注入口；构造下沉 UI 层，默认路径零事件面零漂移）
+        event_index = tui.new_event_store()
+
+    composed = _assemble_execution(
+        resolved, parsed.task, parsed.steps, effective_timeout,
+        observation_sink=observation_sink, event_index=event_index,
+        boundary_hook=boundary_hook)
+
     if tui is not None:
         # 呈现层 = 只读投影 + 注入驱动 + 注入意图外发；执行/控制/
         # 观察真相仍在冻结栈（session / boundary / journal / stores）
         outcome = tui.run_cockpit_tui(
-            driver=_drive,
-            task=parsed.task,
-            plan=tuple(
-                (f"step-{index}-{role}", role, runtime_id,
-                 resolved[runtime_id].provider_id)
-                for index, (role, runtime_id)
-                in enumerate(parsed.steps)),
-            events=lambda: (event_index.snapshot(task_id)
-                            if event_index is not None else ()),
-            facts=journal.snapshot,
-            usage=usage_log.snapshot,
-            session=session,
-            control=_dispatch_control,
-            revision_pending=_revision_pending)
+            driver=composed.drive,
+            task=composed.task,
+            plan=composed.plan,
+            events=composed.events,
+            facts=composed.facts,
+            usage=composed.usage,
+            session=composed.session,
+            control=composed.dispatch_control,
+            revision_pending=composed.revision_pending)
     else:
-        outcome = _drive()
-    if emit is not None:
-        emit(ExecutionEventType.TERMINAL,
-             stage="SEQUENTIAL", runtime_id=None,
-             status=outcome.status.value, reason=outcome.status.value)
+        outcome = composed.drive()
+    if composed.emit is not None:
+        composed.emit(ExecutionEventType.TERMINAL,
+                      stage="SEQUENTIAL", runtime_id=None,
+                      status=outcome.status.value,
+                      reason=outcome.status.value)
 
     if parsed.json_mode:
-        payload = _outcome_payload(task_id, outcome, parsed.steps)
+        payload = _outcome_payload(composed.task_id, outcome, parsed.steps)
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     else:
         for line in _human_lines(parsed.task, parsed.steps, outcome):

@@ -726,10 +726,11 @@ class ExitCodeTests(unittest.TestCase):
 
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
-    "candidate_validation", "cockpit_session", "cockpit_tui",
-    "content_safety", "control_boundary", "control_journal",
-    "execution_observation", "execution_slots", "external_runtime",
-    "host_entry", "sequential_pipeline", "usage_log",
+    "candidate_validation", "cockpit_projection", "cockpit_session",
+    "cockpit_tui", "content_safety", "control_boundary",
+    "control_journal", "execution_observation", "execution_slots",
+    "external_runtime", "host_entry", "sequential_pipeline",
+    "usage_log",
 }
 
 _BANNED_RUNTIME_NAMES = (
@@ -808,6 +809,45 @@ class ArchitectureGuardTests(unittest.TestCase):
     def test_no_second_attempt_or_alternate_path_machinery(self):
         for token in ("retry", "fallback", "sleep("):
             self.assertNotIn(token, self.source)
+
+
+class FunnelEntryGuardTests(unittest.TestCase):
+    """CU-TUI-5 §二十 source guards: the preflight stays a pure
+    intent classifier, and default-binding composition exists only in
+    resolve_default_composition."""
+
+    def setUp(self):
+        with open(cockpit_entry.__file__, "r", encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_preflight_is_pure_classifier(self):
+        # §二十-2：零自研数字 coercion、零 role/runtime/step 解析
+        import inspect
+        body = inspect.getsource(cockpit_entry._funnel_preflight)
+        for token in ("int(", "float(", ".split(", "runtime_id"):
+            self.assertNotIn(token, body)
+
+    def test_preflight_step_exits_precede_task_token(self):
+        # §二十-1：--step 专属早退存在于 task-token 识别之前
+        import inspect
+        body = inspect.getsource(cockpit_entry._funnel_preflight)
+        self.assertIn('== "--step"', body)
+        self.assertIn('startswith("--step=")', body)
+        first_task = body.find("task_token = token")
+        self.assertGreater(first_task, 0)
+        self.assertLess(body.find('== "--step"'), first_task)
+        self.assertLess(body.find('startswith("--step=")'), first_task)
+
+    def test_binding_composition_single_source(self):
+        # §二十-5/H-2：sorted+模板 zip 默认指派恰一处，且位于
+        # resolve_default_composition 函数体内（TUI/projection 零出现）
+        import inspect
+        resolve = inspect.getsource(
+            cockpit_entry.resolve_default_composition)
+        self.assertEqual(self.source.count("zip("), 1)
+        self.assertIn("zip(", resolve)
+        self.assertEqual(self.source.count("DEFAULT_ROLE_TEMPLATES["), 1)
+        self.assertIn("DEFAULT_ROLE_TEMPLATES[", resolve)
 
     def test_boundary_hook_is_injection_only(self):
         # The hook exists as an injected seam and is applied exactly

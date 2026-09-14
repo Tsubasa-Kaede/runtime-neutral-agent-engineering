@@ -842,5 +842,408 @@ class ModeMachineGuardTests(unittest.TestCase):
             self.assertIn(token, self.source)
 
 
+# ------------------------------- CU-TUI-5: first-run funnel (single App)
+
+
+def funnel_composition(bindings=(("architect", "rt-a", "prov-a"),
+                                 ("coder", "rt-b", "prov-b")),
+                       blocked_reason=None, blocked_hint=None):
+    """DefaultComposition duck（呈现面形状；canonical 载荷不透明）。"""
+    return SimpleNamespace(
+        roles=tuple(role for role, _, _ in bindings),
+        bindings=tuple(
+            SimpleNamespace(role=role, runtime_id=runtime,
+                            provider_id=provider,
+                            canonical_runtime_identity=(
+                                runtime, provider, None, "f"))
+            for role, runtime, provider in bindings),
+        blocked_reason=blocked_reason, blocked_hint=blocked_hint)
+
+
+def composition_changed_double(reasons, composition):
+    return SimpleNamespace(reasons=tuple(reasons), composition=composition)
+
+
+def composition_error_double(reason="RUNTIME_NOT_QUALIFIED",
+                             detail="default collaboration needs at least 2 "
+                                    "VERIFIED runtimes (found 1)",
+                             hint="no persisted qualification evidence: "
+                                  "run `dual-agent qualify` first"):
+    return SimpleNamespace(reason=reason, detail=detail, hint=hint)
+
+
+def composed_run_double(task="funnel task", gate=None):
+    """ComposedRun duck：离线脚本组合句柄（Start 后的 late-bound 真相）。"""
+    def drive():
+        if gate is not None:
+            gate.release.wait(10)
+        return "funnel-outcome"
+
+    return SimpleNamespace(
+        task=task,
+        steps=(("architect", "rt-a"), ("coder", "rt-b")),
+        plan=(("step-0-architect", "architect", "rt-a", "prov-a"),
+              ("step-1-coder", "coder", "rt-b", "prov-b")),
+        task_id="t", execution_id="e", emit=None,
+        drive=drive,
+        session=_SessionProjection(),
+        dispatch_control=lambda *args, **kwargs: None,
+        revision_pending=lambda: 0,
+        events=static_events, facts=lambda: (), usage=lambda: ())
+
+
+def make_funnel_app(composition, start, task_token=None):
+    return cockpit_tui.CockpitApp(
+        composition_preview=lambda: composition,
+        start_composition=start,
+        task_token=task_token)
+
+
+class _StartRecorder:
+    """注入 start 闭包双件：记录 (task, expected) 调用、按脚本回放结果。"""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, task_text, expected_composition):
+        self.calls.append((task_text, expected_composition))
+        return self.results.pop(0)
+
+
+def _funnel_text(app):
+    return app.funnel_text
+
+
+class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
+    """CU-TUI-5 §十三/§十六：漏斗 = 同一 App 的初始呈现阶段；Start 前
+    零引擎对象、零 driver 线程、首屏恰六要素。"""
+
+    async def test_initial_screen_six_elements_with_zones_hidden(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            self.assertTrue(app.query_one("#funnel-screen").display)
+            self.assertFalse(app.query_one("#header-zone").display)
+            self.assertFalse(app.query_one("#input-dock").display)
+            text = _funnel_text(app)
+            for expected in ("dual-agent cockpit",
+                             "Describe the collaboration task",
+                             "Collaboration plan (default)",
+                             "architect  ← rt-a · prov-a",
+                             "coder      ← rt-b · prov-b",
+                             "Enter start · q quit"):
+                self.assertIn(expected, text)
+            self.assertIsNone(app._cockpit_composed)
+            self.assertIsNone(app._cockpit_thread)
+            self.assertEqual(start.calls, [])
+
+    async def test_task_token_prefills_buffer_as_composing(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start,
+                              task_token="fix the bug")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            self.assertEqual(app._cockpit_funnel_buffer, "fix the bug")
+            self.assertEqual(app._cockpit_stage,
+                             cockpit_tui.STAGE_COMPOSING)
+            self.assertIn("fix the bug", _funnel_text(app))
+
+    async def test_typing_appends_and_backspace_empties(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("a")
+            await pilot.press("b")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_funnel_buffer, "ab")
+            self.assertEqual(app._cockpit_stage,
+                             cockpit_tui.STAGE_COMPOSING)
+            await pilot.press("backspace")
+            await pilot.press("backspace")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_funnel_buffer, "")
+            self.assertEqual(app._cockpit_stage,
+                             cockpit_tui.STAGE_NOT_STARTED)
+
+    async def test_enter_blank_shows_no_op_hint_without_start(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIn("describe the task first", _funnel_text(app))
+            self.assertEqual(start.calls, [])
+            self.assertTrue(app.is_running)
+
+    async def test_enter_on_blocked_shows_reason_and_hint(self):
+        start = _StartRecorder([])
+        blocked = funnel_composition(
+            blocked_reason="default collaboration needs at least 2 "
+                           "VERIFIED runtimes (found 1)",
+            blocked_hint="no persisted qualification evidence: run "
+                         "`dual-agent qualify` first")
+        app = make_funnel_app(blocked, start, task_token="my task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("enter")
+            await pilot.pause()
+            text = _funnel_text(app)
+            self.assertIn(
+                "default collaboration needs at least 2 VERIFIED runtimes",
+                text)
+            self.assertIn("dual-agent qualify", text)
+            self.assertEqual(start.calls, [])
+            self.assertTrue(app.is_running)
+
+    async def test_enter_ready_starts_and_swaps_to_running(self):
+        gate = _Gate()
+        start = _StartRecorder([composed_run_double(gate=gate)])
+        composition = funnel_composition()
+        app = make_funnel_app(composition, start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            for key in ("m", "y", "space", "t", "a", "s", "k"):
+                await pilot.press(key)
+            await pilot.press("enter")
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(start.calls, [("my task", composition)])
+            self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
+            self.assertFalse(app.query_one("#funnel-screen").display)
+            self.assertTrue(app.query_one("#header-zone").display)
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
+        self.assertEqual(app.outcome, "funnel-outcome")
+        self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_TERMINAL)
+
+    async def test_composition_error_keeps_funnel_with_red_lines(self):
+        start = _StartRecorder([composition_error_double(),
+                                composed_run_double()])
+        app = make_funnel_app(funnel_composition(), start,
+                              task_token="my task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("enter")
+            for _ in range(100):
+                if start.calls:
+                    break
+                await pilot.pause()
+            text = _funnel_text(app)
+            self.assertIn("RUNTIME_NOT_QUALIFIED: ", text)
+            self.assertIn("dual-agent qualify", text)
+            self.assertTrue(app.query_one("#funnel-screen").display)
+            self.assertIsNone(app._cockpit_composed)
+            self.assertTrue(app.is_running)
+
+    async def test_changed_refreshes_disclosure_then_reenter_starts(self):
+        gate = _Gate()
+        updated = funnel_composition(
+            bindings=(("architect", "rt-a", "prov-a"),
+                      ("coder", "rt-c", "prov-c")))
+        start = _StartRecorder([
+            composition_changed_double(
+                ("runtime rt-b no longer VERIFIED",), updated),
+            composed_run_double(gate=gate)])
+        initial = funnel_composition()
+        app = make_funnel_app(initial, start, task_token="my task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("enter")          # first Enter: changed
+            for _ in range(100):
+                if start.calls:
+                    break
+                await pilot.pause()
+            text = _funnel_text(app)
+            self.assertIn("collaboration plan changed:", text)
+            self.assertIn("runtime rt-b no longer VERIFIED", text)
+            self.assertIn("rt-c", text)          # 预览已刷新为新披露
+            self.assertIs(app._cockpit_disclosure, updated)
+            self.assertTrue(app.query_one("#funnel-screen").display)
+            await pilot.press("enter")          # re-Enter: matches → start
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(start.calls,
+                             [("my task", initial), ("my task", updated)])
+            self.assertFalse(app.query_one("#funnel-screen").display)
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
+        self.assertEqual(app.outcome, "funnel-outcome")
+
+    async def test_escape_clears_buffer_to_not_started(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start,
+                              task_token="draft")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_funnel_buffer, "")
+            self.assertEqual(app._cockpit_stage,
+                             cockpit_tui.STAGE_NOT_STARTED)
+            self.assertTrue(app.is_running)
+
+    async def test_q_on_empty_buffer_exits_with_zero_start(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertFalse(app.is_running)
+        app.wait_for_driver()
+        self.assertIsNone(app.outcome)
+        self.assertEqual(start.calls, [])
+
+    async def test_ctrl_c_mid_composing_exits_text_loss_accepted(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start,
+                              task_token="partial task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            self.assertFalse(app.is_running)
+        self.assertEqual(start.calls, [])
+
+    async def test_q_while_composing_is_text_not_quit(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start,
+                              task_token="star")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_funnel_buffer, "starq")
+            self.assertTrue(app.is_running)
+
+
+class FunnelSourceGuardTests(unittest.TestCase):
+    """CU-TUI-5 守卫：TUI 零引擎 import、零 identity 计算、漏斗词
+    不进 engine observation 词表。"""
+
+    def setUp(self):
+        with open(cockpit_tui.__file__, "r", encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_no_engine_composition_imports(self):
+        for token in ("host_entry", "environment_registry",
+                      "candidate_validation", "AdapterRegistry",
+                      "load_evidence"):
+            self.assertNotIn(token, self.source)
+
+    def test_no_identity_computation(self):
+        for token in ("canonical_runtime_identity", "config_fingerprint",
+                      "fingerprint"):
+            self.assertNotIn(token, self.source)
+
+    def test_no_binding_composition_logic(self):
+        # §二十-5/H-2：默认指派 sorted+zip 组合逻辑零出现（真相唯一
+        # 源在 entry 的 resolve 函数；本层只消费注入闭包的结果值）
+        for token in ("resolve_default_composition", "DEFAULT_ROLE_TEMPLATES",
+                      "verified_pool", "zip("):
+            self.assertNotIn(token, self.source)
+
+    def test_funnel_words_absent_from_engine_vocab(self):
+        import console_observation
+        import execution_observation
+        for module in (console_observation, execution_observation):
+            with open(module.__file__, "r", encoding="utf-8") as handle:
+                engine_source = handle.read()
+            for token in ("COMPOSITION_CHANGED", "NOT_STARTED", "COMPOSING",
+                          "STAGE_NOT_STARTED"):
+                self.assertNotIn(token, engine_source)
+
+    def test_funnel_stage_constants_exported(self):
+        for name in ("STAGE_NOT_STARTED", "STAGE_COMPOSING",
+                     "STAGE_RUNNING", "STAGE_TERMINAL"):
+            self.assertTrue(hasattr(cockpit_tui, name))
+        self.assertNotIn(cockpit_tui.STAGE_NOT_STARTED,
+                         (cockpit_tui.MODE_COMMAND,
+                          cockpit_tui.MODE_COMPOSER,
+                          cockpit_tui.MODE_CONFIRM))
+
+
+class RunCockpitFunnelWrapperTests(unittest.TestCase):
+    """G16 同款外壳契约：单一 App 单次 run()；前置退出 outcome None；
+    真实失败诚实上抛。"""
+
+    def _fake_app_class(self, *, outcome="sentinel", failure=None):
+        class _FakeApp:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.outcome = None
+                self.failure = None
+                self._outcome = outcome
+                self._failure = failure
+
+            def run(self):
+                self.outcome = self._outcome
+                if self._failure is not None:
+                    self.failure = self._failure
+
+            def wait_for_driver(self):
+                return None
+
+        return _FakeApp
+
+    def test_wrapper_passes_funnel_kwargs_and_returns_outcome(self):
+        preview = lambda: funnel_composition()  # noqa: E731
+        start = _StartRecorder([])
+        fake = self._fake_app_class()
+        with mock.patch.object(cockpit_tui, "CockpitApp", fake):
+            result = cockpit_tui.run_cockpit_funnel(
+                composition_preview=preview, start_composition=start,
+                task_token="some task", timeout_seconds=45)
+        self.assertEqual(result, "sentinel")
+
+    def test_wrapper_kwargs_shape(self):
+        preview = lambda: funnel_composition()  # noqa: E731
+        holder = {}
+
+        class _Capture:
+            def __init__(self, **kwargs):
+                holder.update(kwargs)
+                self.outcome = "ok"
+                self.failure = None
+
+            def run(self):
+                return None
+
+            def wait_for_driver(self):
+                return None
+
+        with mock.patch.object(cockpit_tui, "CockpitApp", _Capture):
+            cockpit_tui.run_cockpit_funnel(
+                composition_preview=preview, start_composition=lambda t, e: None,
+                task_token="t", timeout_seconds=45)
+        self.assertEqual(
+            sorted(holder),
+            ["composition_preview", "start_composition", "task_token",
+             "timeout_seconds"])
+        self.assertEqual(holder["task_token"], "t")
+        self.assertEqual(holder["timeout_seconds"], 45)
+
+    def test_wrapper_returns_none_on_pre_start_quit(self):
+        fake = self._fake_app_class(outcome=None)
+        with mock.patch.object(cockpit_tui, "CockpitApp", fake):
+            result = cockpit_tui.run_cockpit_funnel(
+                composition_preview=lambda: funnel_composition(),
+                start_composition=lambda task, expected: None)
+        self.assertIsNone(result)
+
+    def test_wrapper_propagates_failure(self):
+        boom = RuntimeError("funnel-honest-failure")
+        fake = self._fake_app_class(failure=boom)
+        with mock.patch.object(cockpit_tui, "CockpitApp", fake):
+            with self.assertRaises(RuntimeError):
+                cockpit_tui.run_cockpit_funnel(
+                    composition_preview=lambda: funnel_composition(),
+                    start_composition=lambda task, expected: None)
+
+
 if __name__ == "__main__":
     unittest.main()

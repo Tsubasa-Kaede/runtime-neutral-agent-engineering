@@ -921,5 +921,294 @@ class AgentDetailTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+# ------------------------------- CU-TUI-5: first-run funnel pure renderers
+
+
+def binding(role, runtime, provider, identity=None):
+    """CompositionBinding duck：projection 只读三字段呈现面；
+    canonical_runtime_identity 是不透明载荷（本层零计算零消费）。"""
+    return SimpleNamespace(role=role, runtime_id=runtime,
+                           provider_id=provider,
+                           canonical_runtime_identity=identity)
+
+
+def composition(bindings=(), blocked_reason=None, blocked_hint=None):
+    """DefaultComposition duck（cockpit_entry 值对象的呈现面形状）。"""
+    return SimpleNamespace(roles=tuple(b.role for b in bindings),
+                           bindings=tuple(bindings),
+                           blocked_reason=blocked_reason,
+                           blocked_hint=blocked_hint)
+
+
+class FunnelPreviewLinesTests(unittest.TestCase):
+    """CU-TUI-5 §十三/G：preview 披露行——分配结果可预期、角色对齐、
+    blocked 时零预览块。"""
+
+    def test_two_runtime_preview(self):
+        lines = projection.funnel_preview_lines(composition((
+            binding("architect", "codex-cli", "openai"),
+            binding("coder", "claude-cli", "anthropic"))))
+        self.assertEqual(lines, (
+            "Collaboration plan (default)",
+            "  architect  ← codex-cli · openai",
+            "  coder      ← claude-cli · anthropic"))
+
+    def test_four_runtime_preview_sorted_roles(self):
+        lines = projection.funnel_preview_lines(composition((
+            binding("architect", "rt-a", "p-a"),
+            binding("coder", "rt-b", "p-b"),
+            binding("tester", "rt-c", "p-c"),
+            binding("reviewer", "rt-d", "p-d"))))
+        self.assertEqual(lines, (
+            "Collaboration plan (default)",
+            "  architect  ← rt-a · p-a",
+            "  coder      ← rt-b · p-b",
+            "  tester     ← rt-c · p-c",
+            "  reviewer   ← rt-d · p-d"))
+
+    def test_blocked_composition_renders_no_preview(self):
+        blocked = composition(blocked_reason="needs 2 VERIFIED (found 1)",
+                              blocked_hint="run qualify")
+        self.assertEqual(projection.funnel_preview_lines(blocked), ())
+
+    def test_ascii_mode_maps_arrow(self):
+        lines = projection.funnel_preview_lines(composition((
+            binding("architect", "rt-a", "p"),
+            binding("coder", "rt-b", "p"))), ascii_only=True)
+        self.assertEqual(lines, (
+            "Collaboration plan (default)",
+            "  architect  <- rt-a · p",
+            "  coder      <- rt-b · p"))
+
+    def test_deterministic_repeat(self):
+        pool = composition((binding("architect", "rt-a", "p"),
+                            binding("coder", "rt-b", "p")))
+        self.assertEqual(projection.funnel_preview_lines(pool),
+                         projection.funnel_preview_lines(pool))
+
+
+class FunnelBlockedLineTests(unittest.TestCase):
+    """CU-TUI-5 §十三：BLOCKED 时恰一行诚实原因（hint 独立于
+    Enter 反馈，不混入首屏原因行）。"""
+
+    def test_blocked_reason_verbatim_single_line(self):
+        blocked = composition(blocked_reason="default collaboration needs "
+                                             "at least 2 VERIFIED runtimes "
+                                             "(found 1)")
+        self.assertEqual(
+            projection.funnel_blocked_line(blocked),
+            "default collaboration needs at least 2 VERIFIED runtimes "
+            "(found 1)")
+
+    def test_unblocked_renders_none(self):
+        ok = composition((binding("architect", "rt-a", "p"),
+                          binding("coder", "rt-b", "p")))
+        self.assertIsNone(projection.funnel_blocked_line(ok))
+
+
+class FunnelEnterFeedbackTests(unittest.TestCase):
+    """CU-TUI-5 §十二 Enter 语义的状态行（纯渲染面）：空白 no-op 提示、
+    BLOCKED 原因+hint、就绪零行（Start 交回 TUI/entry）。"""
+
+    def test_blank_task_is_no_op_hint(self):
+        for text in ("", "   "):
+            self.assertEqual(
+                projection.funnel_enter_lines(
+                    composition((binding("architect", "rt-a", "p"),
+                                 binding("coder", "rt-b", "p"))), text),
+                ("describe the task first",))
+
+    def test_blocked_preview_shows_reason_and_hint(self):
+        blocked = composition(
+            blocked_reason="default collaboration needs at least 2 "
+                           "VERIFIED runtimes (found 1)",
+            blocked_hint="no persisted qualification evidence: run "
+                         "`dual-agent qualify` first")
+        self.assertEqual(
+            projection.funnel_enter_lines(blocked, "my task"),
+            ("default collaboration needs at least 2 VERIFIED runtimes "
+             "(found 1)",
+             "no persisted qualification evidence: run "
+             "`dual-agent qualify` first"))
+
+    def test_blocked_without_hint_renders_reason_only(self):
+        blocked = composition(blocked_reason="pool gone")
+        self.assertEqual(projection.funnel_enter_lines(blocked, "t"),
+                         ("pool gone",))
+
+    def test_ready_renders_no_lines(self):
+        ok = composition((binding("architect", "rt-a", "p"),
+                          binding("coder", "rt-b", "p")))
+        self.assertEqual(projection.funnel_enter_lines(ok, "my task"), ())
+
+
+class FunnelChangedLinesTests(unittest.TestCase):
+    """CU-TUI-5 §十：COMPOSITION_CHANGED 横幅 = TUI 私有呈现词 +
+    逐条诚实原因（不进 engine observation 词表——守卫另测）。"""
+
+    def test_banner_and_indented_reasons(self):
+        lines = projection.funnel_changed_lines((
+            "runtime rt-b no longer VERIFIED",
+            "runtime rt-a identity changed"))
+        self.assertEqual(lines, (
+            "collaboration plan changed:",
+            "  runtime rt-b no longer VERIFIED",
+            "  runtime rt-a identity changed"))
+
+    def test_ascii_mode(self):
+        lines = projection.funnel_changed_lines(
+            ("new VERIFIED runtime rt-c changes the default plan",),
+            ascii_only=True)
+        self.assertEqual(lines, (
+            "collaboration plan changed:",
+            "  new VERIFIED runtime rt-c changes the default plan"))
+
+
+class FunnelErrorLinesTests(unittest.TestCase):
+    """CU-TUI-5 §J：CompositionError → 漏斗红行（reason+detail 原词汇、
+    hint 原文第二行；缺席诚实省略）。"""
+
+    def test_reason_detail_and_hint(self):
+        error = SimpleNamespace(
+            reason="RUNTIME_NOT_QUALIFIED",
+            detail="default collaboration needs at least 2 VERIFIED "
+                   "runtimes (found 0)",
+            hint="no persisted qualification evidence: run "
+                 "`dual-agent qualify` first")
+        self.assertEqual(projection.funnel_error_lines(error), (
+            "RUNTIME_NOT_QUALIFIED: default collaboration needs at "
+            "least 2 VERIFIED runtimes (found 0)",
+            "no persisted qualification evidence: run "
+            "`dual-agent qualify` first"))
+
+    def test_without_hint_single_line(self):
+        error = SimpleNamespace(reason="INVALID_TASK",
+                                detail="task must be a non-empty string",
+                                hint=None)
+        self.assertEqual(
+            projection.funnel_error_lines(error),
+            ("INVALID_TASK: task must be a non-empty string",))
+
+
+class FunnelFirstScreenTests(unittest.TestCase):
+    """CU-TUI-5 §十三：首屏恰六要素（header / 指令 / 输入行 / 预览块 /
+    两键提示 / blocked 原因行）——零 id 类调试元数据。"""
+
+    OK = composition((binding("architect", "codex-cli", "openai"),
+                      binding("coder", "claude-cli", "anthropic")))
+
+    def test_six_elements_exact_order(self):
+        lines = projection.funnel_first_screen("2.5.0", self.OK, "")
+        self.assertEqual(lines, (
+            "dual-agent cockpit · 2.5.0",
+            "Describe the collaboration task",
+            "> ",
+            "Collaboration plan (default)",
+            "  architect  ← codex-cli · openai",
+            "  coder      ← claude-cli · anthropic",
+            "Enter start · q quit"))
+
+    def test_prefilled_buffer_in_input_line(self):
+        lines = projection.funnel_first_screen("2.5.0", self.OK,
+                                               "fix the login bug")
+        self.assertIn("> fix the login bug", lines)
+
+    def test_empty_version_omits_separator(self):
+        lines = projection.funnel_first_screen("", self.OK, "")
+        self.assertEqual(lines[0], "dual-agent cockpit")
+
+    def test_blocked_screen_replaces_preview_with_reason_line(self):
+        blocked = composition(
+            blocked_reason="default collaboration needs at least 2 "
+                           "VERIFIED runtimes (found 1)",
+            blocked_hint="run qualify first")
+        lines = projection.funnel_first_screen("2.5.0", blocked, "")
+        self.assertEqual(lines, (
+            "dual-agent cockpit · 2.5.0",
+            "Describe the collaboration task",
+            "> ",
+            "default collaboration needs at least 2 VERIFIED runtimes "
+            "(found 1)",
+            "Enter start · q quit"))
+
+    def test_no_id_class_debug_metadata(self):
+        for lines in (projection.funnel_first_screen("2.5.0", self.OK, "t"),
+                      projection.funnel_first_screen(
+                          "2.5.0", composition(blocked_reason="b"), "t")):
+            joined = "\n".join(lines)
+            for token in ("task_id", "execution_id", "task-",
+                          "cockpit-task", "UUID", "uuid", "packet",
+                          "adapter"):
+                self.assertNotIn(token, joined)
+
+    def test_unsafe_buffer_redacted(self):
+        secret = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+        lines = projection.funnel_first_screen("2.5.0", self.OK, secret)
+        self.assertIn("> [redacted: unsafe content]", lines)
+        self.assertNotIn(secret, "\n".join(lines))
+
+    def test_long_buffer_truncated_to_width(self):
+        lines = projection.funnel_first_screen(
+            "2.5.0", self.OK, "x" * 200, width=40)
+        input_line = lines[2]
+        self.assertLessEqual(projection.display_width(input_line), 40)
+        self.assertTrue(input_line.endswith("..."))
+
+    def test_ascii_mode(self):
+        lines = projection.funnel_first_screen("2.5.0", self.OK, "t",
+                                               ascii_only=True)
+        joined = "\n".join(lines)
+        self.assertNotIn("←", joined)
+        self.assertIn("<-", joined)
+
+    def test_deterministic_repeat(self):
+        first = projection.funnel_first_screen("2.5.0", self.OK, "task")
+        second = projection.funnel_first_screen("2.5.0", self.OK, "task")
+        self.assertEqual(first, second)
+
+
+class FunnelRendererGuardTests(unittest.TestCase):
+    """CU-TUI-5 v2.1 P1-1 #6 / 守卫 H-2：projection 渲染面零 identity
+    计算、零 binding 组合逻辑、零 engine 词表污染。"""
+
+    def setUp(self):
+        with open(projection.__file__, "r", encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_no_identity_computation_tokens(self):
+        for token in ("canonical_runtime_identity", "config_fingerprint",
+                      "fingerprint"):
+            self.assertNotIn(token, self.source)
+
+    def test_no_binding_composition_logic(self):
+        # sorted+zip 默认指派只许存在于 entry 的
+        # resolve_default_composition（单源绑定守卫 H-2）
+        for token in ("resolve_default_composition", "DEFAULT_ROLE_TEMPLATES[",
+                      "verified_pool", "zip("):
+            self.assertNotIn(token, self.source)
+
+    def test_funnel_words_absent_from_engine_observation_vocab(self):
+        # COMPOSITION_CHANGED 等漏斗词绝不能写进引擎观察词表模块
+        import console_observation as observation
+        with open(observation.__file__, "r", encoding="utf-8") as handle:
+            obs_source = handle.read()
+        for token in ("COMPOSITION_CHANGED", "NOT_STARTED", "COMPOSING"):
+            self.assertNotIn(token, obs_source)
+
+    def test_real_entry_composition_renders(self):
+        # duck 兼容：真实 cockpit_entry.DefaultComposition 直接渲染
+        import cockpit_entry
+        pool = (SimpleNamespace(runtime_id="rt-a", provider_id="p-a",
+                                identity=("rt-a", "p-a", None, "f")),
+                SimpleNamespace(runtime_id="rt-b", provider_id="p-b",
+                                identity=("rt-b", "p-b", None, "f")))
+        real = cockpit_entry.resolve_default_composition(pool)
+        lines = projection.funnel_preview_lines(real)
+        self.assertEqual(lines, (
+            "Collaboration plan (default)",
+            "  architect  ← rt-a · p-a",
+            "  coder      ← rt-b · p-b"))
+
+
 if __name__ == "__main__":
     unittest.main()
