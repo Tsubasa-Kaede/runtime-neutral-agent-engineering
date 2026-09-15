@@ -31,11 +31,15 @@ from content_safety import contains_unsafe_content
 __all__ = (
     "AgentSlotView", "ProjectionInputs", "ProjectedState",
     "build_projection", "derive_lifecycle", "display_width",
-    "format_tokens", "truncate_to_width",
-    "agent_detail", "control_receipt_line", "event_detail_line",
-    "revision_status_lines", "DEFAULT_ROLE_TEMPLATES",
+    "format_tokens", "truncate_to_width", "ui_label",
+    "agent_detail", "pipeline_lines", "activity_tail_lines",
+    "agent_detail_window", "connection_observed",
+    "control_receipt_line", "event_detail_line", "trace_status_line",
+    "revision_status_lines", "worker_failure_lines",
+    "DEFAULT_ROLE_TEMPLATES",
     "funnel_preview_lines", "funnel_blocked_line", "funnel_enter_lines",
     "funnel_changed_lines", "funnel_error_lines", "funnel_first_screen",
+    "funnel_input_line", "funnel_keys_hint",
 )
 
 # 呈现层 lifecycle 词表（P4 的 IDLE 仅为投影层视觉态，绝不进入
@@ -60,14 +64,121 @@ _TEMPLATES = {
 DEFAULT_ROLE_TEMPLATES = _TEMPLATES
 
 _SYMBOLS = {
-    "COMPLETED": "✓", "FAILED": "✗", "ABORTED": "■",
-    "PAUSED": "‖", "PARKED": "‖", "RUNNING": "●", "IDLE": "○",
-    "DONE": "✓", "FAILED_STEP": "✗", "ACTIVE": "●", "WAITING": "○",
+    "COMPLETED": "✓", "FAILED": "✗", "ABORTED": "⊘",
+    "PAUSED": "❚❚", "PARKED": "▫", "RUNNING": "●", "IDLE": "○",
 }
 _ASCII_SYMBOLS = {
     "✓": "[OK]", "●": "[RUN]", "○": "[PENDING]", "✗": "[FAIL]",
-    "→": "->", "←": "<-", "‖": "[:]", "■": "[STOP]",
+    "→": "->", "←": "<-", "‖": "[:]", "■": "[STOP]", "⊘": "[SKIP]",
+    "❚❚": "||", "▫": "-", "◐": "~", "◉": "*", "»": ">", "▸": ">",
+    # R1 管线符号（新增字符，零现存输出碰撞；· 的既有行为保持不变）
+    "─": "-", "┄": ".", "↓": "|", "┆": ":", "↳": "\\",
+    "▲": "^", "▶": ">", "▼": "v",
 }
+
+# Phase V §九：header 状态符号表（ASCII 降级不失可读）。
+_LIFECYCLE_GLYPHS = dict(_SYMBOLS)
+_LIFECYCLE_GLYPHS_ASCII = {
+    "COMPLETED": "+", "FAILED": "x", "ABORTED": "!",
+    "PAUSED": "||", "PARKED": "-", "RUNNING": "*", "IDLE": ".",
+}
+
+# Phase V §十一/十二：agent 面板状态词 → 符号（词来自真实事件流 +
+# 既有 lifecycle 投影叠加；pulse 是纯呈现参数，只翻转 RUNNING 符号）。
+_AGENT_GLYPHS = {
+    "RUNNING": "●", "WAITING": "◐", "DONE": "✓", "FAILED": "✗",
+    "PAUSED": "❚❚", "PARKED": "▫", "ABORTED": "⊘", "NOT_STARTED": "○",
+}
+_AGENT_GLYPHS_ASCII = {
+    "RUNNING": "*", "WAITING": "~", "DONE": "+", "FAILED": "x",
+    "PAUSED": "||", "PARKED": "-", "ABORTED": "!", "NOT_STARTED": ".",
+}
+
+# 回执状态前缀（封闭三态的视觉标记；词值仍逐字呈现）。
+_RECEIPT_GLYPHS = {"ACCEPTED": "✓", "REJECTED": "✗", "NO_OP": "⊘"}
+
+# R2 双语呈现词表（闭集纯数据；零 i18n 框架/零外部文件/零动态加载/
+# 零注册表）。键 = 规范 EN 呈现词（en 列恒等于键本身）；两列恰
+# en/zh。翻译只发生在渲染点——canonical EN 词恒为词表键与符号表键
+# （_AGENT_GLYPHS["RUNNING"] 永不变）；事实面（task 原文/身份/
+# runtime/provider/事件词与 status/reason/sequence/duration/usage
+# 数值/回执与账本词/trace_obs 逐字节）永不经过本表。带 {n} 的条目
+# 为模板，调用点 format。
+_LOCALES = ("en", "zh")
+
+_LABELS = {
+    # lifecycle / agent 状态呈现词
+    "RUNNING": ("RUNNING", "运行中"),
+    "WAITING": ("WAITING", "等待中"),
+    "DONE": ("DONE", "已完成"),
+    "FAILED": ("FAILED", "失败"),
+    "PAUSED": ("PAUSED", "已暂停"),
+    "PARKED": ("PARKED", "已停驻"),
+    "ABORTED": ("ABORTED", "已中止"),
+    "NOT_STARTED": ("NOT_STARTED", "未开始"),
+    "IDLE": ("IDLE", "空闲"),
+    "COMPLETED": ("COMPLETED", "已完成"),
+    # 分区 / 标签词
+    "TASK": ("TASK", "任务"),
+    "STAGE": ("STAGE", "阶段"),
+    "prompt": ("prompt", "提示词"),
+    "handoff": ("handoff", "交接"),
+    "in": ("in", "入"),
+    "out": ("out", "出"),
+    "activity": ("activity", "活动"),
+    "result": ("result", "结果"),
+    "state": ("state", "状态"),
+    # 活动动词短语（stage/status/duration 原文拼装）
+    "stage started": ("stage started", "阶段已开始"),
+    "started": ("started", "已开始"),
+    "finished": ("finished", "已完成"),
+    "stage finished": ("stage finished", "阶段已完成"),
+    # 短句
+    "No activity yet": ("No activity yet", "暂无活动"),
+    "awaiting resume": ("awaiting resume", "等待继续"),
+    "(no text output)": ("(no text output)", "(无文本输出)"),
+    "(+{n} more lines)": ("(+{n} more lines)", "(+{n} 行未显示)"),
+    "(+{n} more · T)": ("(+{n} more · T)", "(+{n} 条 · T)"),
+    "pause pending": ("pause pending", "暂停待生效"),
+    "pinned · {n} new events · g/end resumes tail": (
+        "pinned · {n} new events · g/end resumes tail",
+        "已钉住 · {n} 条新事件 · g/end 恢复跟随"),
+    "[Q] quit re-raises the original error": (
+        "[Q] quit re-raises the original error",
+        "[Q] 退出将重新抛出原始错误"),
+    "pending {n}": ("pending {n}", "待处理 {n}"),
+    " · applies at next fresh segment": (
+        " · applies at next fresh segment", " · 于下个全新执行段生效"),
+    # dock 动词（TUI 消费；键字母恒 EN）
+    "Pause": ("Pause", "暂停"),
+    "Resume": ("Resume", "继续"),
+    "Edit": ("Edit", "编辑"),
+    "Abort": ("Abort", "终止"),
+    "Trace": ("Trace", "追踪"),
+    "Quit": ("Quit", "退出"),
+    "Context": ("Context", "上下文"),
+    "revise · enter submit · tab target · esc cancel": (
+        "revise · enter submit · tab target · esc cancel",
+        "修订 · enter 提交 · tab 目标 · esc 取消"),
+    "abort? · y confirm · n/esc cancel": (
+        "abort? · y confirm · n/esc cancel",
+        "中止？· y 确认 · n/esc 取消"),
+    # CU-TUI-INPUT A3：COMMAND 模式标签（TUI 消费；单键命令面的
+    # 呈现标记，替代误导性的 shell 风格 ">" 提示符）
+    "command": ("command", "命令"),
+}
+
+
+def ui_label(key, locale="en"):
+    """闭集词表唯一解析函数：en 列 = 键本身；非 zh 一律回退 en 列
+    （未知 locale 安全回退、既有行为逐字节保持）；缺键原样返回
+    （绝不 KeyError、绝不铸造新词）。"""
+    columns = _LABELS.get(key)
+    if columns is None:
+        return key
+    if locale == "zh":
+        return columns[1]
+    return columns[0]
 
 # 呈现宽度：宽字符按 2 列计（CJK/全角区段的实用子集）。
 _WIDE_RANGES = (
@@ -95,12 +206,18 @@ class ProjectionInputs:
 
     __slots__ = ("task", "slots", "events", "facts", "usage_records",
                  "terminal", "run_state", "last_outcome", "capabilities",
-                 "version", "width", "ascii_only")
+                 "version", "width", "ascii_only",
+                 "pulse", "reveal_seqs", "result_reveal",
+                 "selected_index", "expanded_stage", "locale",
+                 "detail_max_lines", "result_max_lines")
 
     def __init__(self, *, task="", slots=(), events=(), facts=(),
                  usage_records=(), terminal=None, run_state=None,
                  last_outcome=None, capabilities=None, version="",
-                 width=100, ascii_only=False):
+                 width=100, ascii_only=False, pulse=False, reveal_seqs=(),
+                 result_reveal=False, selected_index=0,
+                 expanded_stage=None, locale="en",
+                 detail_max_lines=None, result_max_lines=None):
         self.task = task
         self.slots = tuple(slots)
         self.events = tuple(events)
@@ -113,24 +230,48 @@ class ProjectionInputs:
         self.version = version
         self.width = width
         self.ascii_only = ascii_only
+        # Phase V 动画呈现参数：只改变渲染输出，绝不参与 lifecycle
+        # 推导、绝不写回事实源（Animation ≠ Execution State）。
+        self.pulse = pulse
+        self.reveal_seqs = tuple(reveal_seqs)
+        self.result_reveal = result_reveal
+        # R1 纯呈现参数：选中 cell / 展开 agent（marker、▲ 指针、
+        # Detail 窗）；expanded 绑定稳定 slot 身份（stage），二者互不
+        # 联动、绝不写回事实源。
+        self.selected_index = selected_index
+        self.expanded_stage = expanded_stage
+        # R2 纯呈现参数：界面语言（闭集 en/zh，默认 en；additive 字段
+        # ——既有构造点零迁移）。只改渲染词，绝不参与任何推导、绝不
+        # 写回事实源；缺省 en 下全部输出与 R1 逐字节一致。
+        self.locale = locale
+        # CU-TUI-INPUT A4 纯呈现参数：高度预算收窄上限（None=既有
+        # 行为；int=TUI 按终端剩余高度供应）。只影响有界窗行数，
+        # 绝不参与任何推导、绝不写回事实源；缺省 None 下全部输出
+        # 与既有投影逐字节一致。
+        self.detail_max_lines = detail_max_lines
+        self.result_max_lines = result_max_lines
 
 
 class ProjectedState:
     """渲染就绪的只读视图模型（全部为纯字符串/字符串元组）。"""
 
     __slots__ = ("header_line", "task_line", "badge",
-                 "collaboration_lines", "progress_line", "tokens_line",
+                 "collaboration_lines", "activity_lines", "detail_lines",
+                 "progress_line", "tokens_line",
                  "result_lines", "context_lines", "trace_obs",
                  "trace_ctrl", "trace_usage", "lifecycle", "tier")
 
     def __init__(self, *, header_line, task_line, badge,
-                 collaboration_lines, progress_line, tokens_line,
-                 result_lines, context_lines, trace_obs, trace_ctrl,
-                 trace_usage, lifecycle, tier):
+                 collaboration_lines, activity_lines, progress_line,
+                 tokens_line, result_lines, context_lines, trace_obs,
+                 trace_ctrl, trace_usage, lifecycle, tier,
+                 detail_lines=()):
         self.header_line = header_line
         self.task_line = task_line
         self.badge = badge
         self.collaboration_lines = tuple(collaboration_lines)
+        self.activity_lines = tuple(activity_lines)
+        self.detail_lines = tuple(detail_lines)
         self.progress_line = progress_line
         self.tokens_line = tokens_line
         self.result_lines = tuple(result_lines)
@@ -246,27 +387,6 @@ def _known_token_total(records):
     return total
 
 
-def _slot_symbol(slot_view, events):
-    """槽位四态符号：事件流推导，零时钟零猜测。
-
-    ✓ 完成（SUCCESS）· ✗ 完成（失败）· ● 进行中 · ○ 未开始。"""
-    started = False
-    finished = None
-    for event in events:
-        if (getattr(event, "stage", None) != slot_view.role
-                or getattr(event, "runtime_id", None)
-                != slot_view.runtime_id):
-            continue
-        kind = _event_type_of(event)
-        if kind == "INVOCATION_STARTED":
-            started = True
-        elif kind == "INVOCATION_FINISHED":
-            finished = _value_of(getattr(event, "status", ""))
-    if finished is not None:
-        return "✓" if str(finished).upper() == "SUCCESS" else "✗"
-    return "●" if started else "○"
-
-
 def _tier_for(width):
     if width < 80:
         return "DEGRADED"
@@ -283,13 +403,26 @@ def _to_ascii(text):
     return text
 
 
-def _result_lines(outcome, content_width):
+def _result_lines(outcome, content_width, *, reveal=False,
+                  ascii_only=False, locale="en", max_lines=None):
+    """结果区行集（Phase V §十五/十六）：终态带状态头行（✓/✗ + 原
+    词——RunOutcome.status 是事实直显，永不翻译）；PARKED 不伪造结果
+    （单行停驻说明——lifecycle 呈现词可译）；reveal 为瞬态揭示前缀
+    （纯呈现参数，绝不参与状态推导）。CU-TUI-INPUT A4：max_lines 为
+    高度预算收窄上限（None=既有行为；int 时超限行数诚实折入
+    (+N more lines) 溢出标记——头行（status 事实）永不收窄）。"""
     if outcome is None:
         return ()
     status = _value_of(getattr(outcome, "status", ""))
-    lines = []
     if status == "PARKED":
-        return ("PARKED · awaiting resume",)
+        return (f"{ui_label('PARKED', locale)} · "
+                f"{ui_label('awaiting resume', locale)}",)
+    glyphs = (_LIFECYCLE_GLYPHS_ASCII if ascii_only
+              else _LIFECYCLE_GLYPHS)
+    header = f"{glyphs.get(status, '·')} {status}"
+    if reveal:
+        header = f"{'> ' if ascii_only else '» '}{header}"
+    lines = [header]
     final_result = getattr(outcome, "final_result", None)
     if final_result is not None:
         output = getattr(final_result, "output", None)
@@ -303,13 +436,21 @@ def _result_lines(outcome, content_width):
                 wrapped = [""]
             lines.extend(wrapped[:3])
             if len(wrapped) > 3:
-                lines.append(f"(+{len(wrapped) - 3} more lines)")
+                lines.append(ui_label("(+{n} more lines)",
+                                      locale).format(n=len(wrapped) - 3))
         else:
-            lines.append("(no text output)")
+            lines.append(ui_label("(no text output)", locale))
     error = getattr(outcome, "error", None)
     if error is not None:
         lines.append(
             f"ERROR {truncate_to_width(str(error), max(10, content_width - 7))}")
+    if max_lines is not None:
+        cap = max(2, int(max_lines))
+        if len(lines) > cap:
+            dropped = len(lines) - (cap - 1)
+            lines = lines[:cap - 1]
+            lines.append(ui_label("(+{n} more lines)",
+                                  locale).format(n=dropped))
     return tuple(lines)
 
 
@@ -338,32 +479,287 @@ def _context_lines(values, lifecycle):
         truncate_to_width(line, 28) for line in lines)
 
 
-def _collaboration_lines(values, tier):
-    if tier == "DEGRADED":
-        lines = []
-        for slot_view in values.slots:
-            symbol = _slot_symbol(slot_view, values.events)
-            lines.append(f"{symbol} {slot_view.role.upper()}")
-        return tuple(lines)
-    role_cells = []
-    status_cells = []
-    widths = []
-    for slot_view in values.slots:
-        symbol = _slot_symbol(slot_view, values.events)
-        role_cell = slot_view.role.upper()
-        status_cell = f"{symbol} {slot_view.runtime_id}"
-        width = max(display_width(role_cell),
-                    display_width(status_cell))
-        role_cells.append(role_cell)
-        status_cells.append(status_cell)
-        widths.append(width)
-    line_one = " → ".join(
-        cell + " " * (widths[index] - display_width(cell))
-        for index, cell in enumerate(role_cells))
-    line_two = "   ".join(
-        cell + " " * (widths[index] - display_width(cell))
-        for index, cell in enumerate(status_cells))
-    return (line_one, line_two)
+def _slot_state_word(slot_view, events, lifecycle):
+    """槽位状态词（Phase V §十二封闭八态）——只从真实事件流推导：
+
+    INVOCATION_FINISHED（SUCCESS→DONE/否则 FAILED，终局事实不被
+    lifecycle 叠加盖写）> 在途（PAUSED/PARKED/ABORTED 会话叠加）>
+    STAGE_STARTED 未调用（WAITING）> 未开始（NOT_STARTED）。
+    零时钟、零静默时长推断。"""
+    started = False
+    stage_started = False
+    finished = None
+    for event in events:
+        if (getattr(event, "stage", None) != slot_view.role
+                or getattr(event, "runtime_id", None)
+                != slot_view.runtime_id):
+            continue
+        kind = _event_type_of(event)
+        if kind == "STAGE_STARTED":
+            stage_started = True
+        elif kind == "INVOCATION_STARTED":
+            started = True
+        elif kind == "INVOCATION_FINISHED":
+            finished = _value_of(getattr(event, "status", ""))
+    if finished is not None:
+        return "DONE" if str(finished).upper() == "SUCCESS" else "FAILED"
+    if started:
+        if lifecycle == "PAUSED":
+            return "PAUSED"
+        if lifecycle == "PARKED":
+            return "PARKED"
+        if lifecycle == "ABORTED":
+            return "ABORTED"
+        return "RUNNING"
+    if stage_started:
+        return "WAITING"
+    return "NOT_STARTED"
+
+
+def _pad_cell(text, width):
+    """呈现宽度对齐填充（宽字符安全）。"""
+    return text + " " * max(0, width - display_width(text))
+
+
+def _chain_groups(slots):
+    """组列表抽象的唯一今日生产者：当前组合事实恒为单条顺序链
+    （声明组合序即 plan 序，真实事实）→ 恰一个协作组。
+
+    多组只能来自未来的真实组合事实源；本层与调用方永不按宽度或
+    事件猜测分组。"""
+    return (tuple(slots),)
+
+
+def connection_observed(producer, consumer, events):
+    """连接真值谓词（R1 §九）：──→ 当且仅当存在真实 HANDOFF 事件且
+    stage=产出角色 ∧ runtime_id=接收方 runtime（与 cockpit_entry
+    request_builder 的发射语义逐字对齐）；相邻性绝不蕴含交接。"""
+    for event in events:
+        if (_event_type_of(event) != "HANDOFF"
+                or getattr(event, "stage", None) != producer.role
+                or getattr(event, "runtime_id", None)
+                != consumer.runtime_id):
+            continue
+        return True
+    return False
+
+
+def _pipeline_cells(slots, events, *, lifecycle, pulse, ascii_only,
+                    locale="en"):
+    """每槽位 cell 投影（头/runtime/状态三件的原料）——状态词与符号
+    全部来自 _slot_state_word 真实推导（Phase V 语义复用）；pulse 只
+    翻转 RUNNING 符号（● ↔ ◉，纯呈现）。R2：状态词在渲染点经闭集
+    词表（规范 EN 词恒为符号表键，glyph 查找永不经翻译）。"""
+    cells = []
+    for slot_view in slots:
+        word = _slot_state_word(slot_view, events, lifecycle)
+        if ascii_only:
+            glyph = _AGENT_GLYPHS_ASCII[word]
+        elif word == "RUNNING" and pulse:
+            glyph = "◉"
+        else:
+            glyph = _AGENT_GLYPHS[word]
+        cells.append({
+            "slot": slot_view,
+            "word": word,
+            "head": f"{glyph} {slot_view.role.upper()}",
+            "runtime": slot_view.runtime_id,
+            "state": f"{glyph} {ui_label(word, locale)}",
+        })
+    return cells
+
+
+def _pipeline_marker(index, selected, expanded_stage, slots):
+    """marker 列取值：expanded（含 selected∧expanded）→ ▼；selected
+    未 expanded → ▶；未选中 → None（预留两空格列，布局稳定）。"""
+    if expanded_stage is not None and slots[index].stage == expanded_stage:
+        return "▼"
+    if index == selected:
+        return "▶"
+    return None
+
+
+def pipeline_lines(slots, events, *, lifecycle="RUNNING", pulse=False,
+                   tier="MAIN", width=100, selected_index=0,
+                   expanded_stage=None, groups=None, ascii_only=False,
+                   locale="en"):
+    """协作管线行集（R1 布局宪法：横向=同一协作组内的链相邻关系，
+    纵向=不同协作组）。
+
+    cell 三行 "marker+符号 ROLE / runtime / 符号 状态词"；同行相邻
+    cell 间连接符 ──→=观察到的真实 HANDOFF、┄┄→=计划相邻（§九真值
+    契约）；超列换行 ↳ 前缀 = 同组续行（绝非第二组）；选中 cell 带
+    ▶/▼ marker 与 ▲ 指针。cols=1（含 DEGRADED）退化为纵向链：块间
+    ↓/┆ 同真值律。逐行按宽度截断（不溢出铁律）。R2：locale 只换
+    状态呈现词——tier/容量/换行/续行/marker/指针列/连接符/分组
+    与语言完全正交。"""
+    if not slots:
+        return ()
+    groups = _chain_groups(slots) if groups is None else tuple(groups)
+    cells = _pipeline_cells(slots, events, lifecycle=lifecycle,
+                            pulse=pulse, ascii_only=ascii_only,
+                            locale=locale)
+    selected = max(0, min(selected_index, len(cells) - 1))
+    tier_caps = {"DEGRADED": 1, "MAIN": 2, "MAIN_WIDE": 3, "FULL": 4}
+    cap = tier_caps.get(tier, 2)
+    gap = 5  # " ──→ "
+    cell_width = max(
+        max(display_width(cell["head"]) for cell in cells),
+        max(display_width(cell["runtime"]) for cell in cells),
+        max(display_width(cell["state"]) for cell in cells))
+    cols = 1
+    while (cols + 1 <= cap
+           and (cols + 1) * (cell_width + 2) + cols * gap <= width):
+        cols += 1
+    lines = []
+    group_offset = 0               # 组首成员 → cells 全局索引
+    for group_index, group in enumerate(groups):
+        if group_index:
+            lines.append("")         # 组间空行 = 纵向分界
+        members = list(group)
+        if cols == 1:
+            for member_index in range(len(members)):
+                if member_index:
+                    observed = connection_observed(
+                        members[member_index - 1],
+                        members[member_index], events)
+                    lines.append("  " + ("↓" if observed else "┆"))
+                _append_vertical_block(
+                    lines, cells[group_offset + member_index],
+                    flat=group_offset + member_index, selected=selected,
+                    expanded_stage=expanded_stage, slots=slots,
+                    continued=member_index > 0)
+            group_offset += len(members)
+            continue
+        rows = [members[start:start + cols]
+                for start in range(0, len(members), cols)]
+        for row_index, row in enumerate(rows):
+            row_start = row_index * cols
+            row_prefix = "↳ " if row_index else ""
+            heads, runtimes, states = [], [], []
+            pointer_column = None
+            for position in range(len(row)):
+                flat = group_offset + row_start + position
+                marker = _pipeline_marker(
+                    flat, selected, expanded_stage, slots)
+                prefix = f"{marker} " if marker else "  "
+                heads.append(prefix
+                             + _pad_cell(cells[flat]["head"], cell_width))
+                runtimes.append(
+                    "  " + _pad_cell(cells[flat]["runtime"], cell_width))
+                states.append(
+                    "  " + _pad_cell(cells[flat]["state"], cell_width))
+                if flat == selected:
+                    pointer_column = position * (cell_width + 2 + gap)
+                if position + 1 < len(row):
+                    observed = connection_observed(
+                        members[row_start + position],
+                        members[row_start + position + 1], events)
+                    link = "──→" if observed else "┄┄→"
+                    heads.append(f" {link} ")
+                    runtimes.append(" " + " " * 3 + " ")
+                    states.append(" " + " " * 3 + " ")
+            lines.append(row_prefix + "".join(heads))
+            lines.append(row_prefix + "".join(runtimes))
+            lines.append(row_prefix + "".join(states))
+            if pointer_column is not None:
+                lines.append(row_prefix + " " * pointer_column + "▲")
+        group_offset += len(members)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(truncate_to_width(line, width) for line in lines)
+
+
+def _append_vertical_block(lines, cell, *, flat, selected,
+                           expanded_stage, slots, continued):
+    """cols=1 纵向链的单槽块：↳ 续行前缀 + cell 三行 + 选中 ▲ 指针。"""
+    prefix = "↳ " if continued else ""
+    marker = _pipeline_marker(flat, selected, expanded_stage, slots)
+    marker_prefix = f"{marker} " if marker else "  "
+    lines.append(prefix + marker_prefix + cell["head"])
+    lines.append(prefix + "  " + cell["runtime"])
+    lines.append(prefix + "  " + cell["state"])
+    if flat == selected:
+        lines.append(prefix + "▲")
+
+
+def _activity_line(event, locale="en"):
+    """单事件活动短行——既有字段子集（无时间戳是冻结事实：以 sequence
+    锚定，绝不铸造时刻）。R2：动词短语经闭集词表；stage/status/
+    duration 原文拼装。"""
+    kind = _event_type_of(event)
+    stage = getattr(event, "stage", "") or ""
+    seq = getattr(event, "sequence", "")
+    if kind == "STAGE_STARTED":
+        text = f"{stage} {ui_label('stage started', locale)}"
+    elif kind == "INVOCATION_STARTED":
+        text = f"{stage} {ui_label('started', locale)}"
+    elif kind == "INVOCATION_FINISHED":
+        text = (f"{stage} {ui_label('finished', locale)} "
+                f"{_value_of(getattr(event, 'status', ''))}")
+        duration = getattr(event, "duration_ms", None)
+        if duration is not None:
+            text += f" ({duration}ms)"
+    elif kind == "STAGE_FINISHED":
+        text = f"{stage} {ui_label('stage finished', locale)}"
+    elif kind == "HANDOFF":
+        text = f"{stage} → {getattr(event, 'runtime_id', '')}"
+    else:
+        text = f"{kind} {stage}".rstrip()
+    return f"[{seq}] {text}"
+
+
+def activity_tail_lines(events, *, limit=6, reveal_seqs=(),
+                        ascii_only=False, width=100, locale="en"):
+    """活动尾窗（Phase V §十三/十四）：EventIndex 同源只读尾 K 条——
+    零第二套事件、零伪造；空态诚实一行；reveal_seqs 为新事件揭示
+    标记（纯呈现，调用方瞬态供给）。"""
+    if not events:
+        return (ui_label("No activity yet", locale),)
+    tail = tuple(events[-limit:]) if limit and limit > 0 else tuple(events)
+    reveal = set(reveal_seqs)
+    lines = []
+    for event in tail:
+        line = _activity_line(event, locale)
+        if getattr(event, "sequence", None) in reveal:
+            line = f"▸ {line}"
+        lines.append(line)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(truncate_to_width(line, width) for line in lines)
+
+
+def _header_line(values, lifecycle):
+    """header：identity 左置 + 会话状态右对齐（宽度感知）。"""
+    identity = "dual-agent cockpit"
+    if values.version:
+        identity += f" · v{values.version}"
+    glyphs = (_LIFECYCLE_GLYPHS_ASCII if values.ascii_only
+              else _LIFECYCLE_GLYPHS)
+    state_text = (f"{glyphs.get(lifecycle, '·')} "
+                  f"{ui_label(lifecycle, values.locale)}")
+    gap = (values.width - display_width(identity)
+           - display_width(state_text))
+    if gap >= 1:
+        return identity + " " * gap + state_text
+    identity = truncate_to_width(
+        identity, max(10, values.width - display_width(state_text) - 2))
+    return f"{identity}  {state_text}"
+
+
+def trace_status_line(following, new_count, *, ascii_only=False,
+                      locale="en"):
+    """Trace 钉住状态行（Phase V §二十）：跟随中为空行；钉住时呈现
+    新事件计数与恢复键（follow/unseen 均为呈现态，非事实）。R2：
+    chrome 短句可译；g/end 键位字面与事件计数原样。"""
+    if following:
+        return ""
+    line = ui_label(
+        "pinned · {n} new events · g/end resumes tail",
+        locale).format(n=new_count)
+    if ascii_only:
+        line = _to_ascii(line.replace("·", "-"))
+    return line
 
 
 def _progress_line(values, lifecycle, total_slots):
@@ -382,38 +778,61 @@ def _progress_line(values, lifecycle, total_slots):
         if stage not in finished_stages:
             active = stage
             break
-    line = f"STAGE {min(finished, total_slots)}/{total_slots}"
+    line = (f"{ui_label('STAGE', values.locale)} "
+            f"{min(finished, total_slots)}/{total_slots}")
     if active is not None:
         line += f" · {active}"
     if (lifecycle == "RUNNING"
             and _pause_intent_active(values.facts)):
-        line += "  · pause pending"
+        line += f"  · {ui_label('pause pending', values.locale)}"
     return line
 
 
 def build_projection(values):
-    """七个事实源 → ProjectedState（确定性纯函数）。"""
+    """七个事实源 → ProjectedState（确定性纯函数；动画呈现参数只改
+    渲染字段，绝不参与 lifecycle 推导）。"""
     tier = _tier_for(values.width)
     content_width = (values.width - 4 if tier == "DEGRADED"
                      else min(values.width - 4, 100))
     lifecycle = derive_lifecycle(values.terminal, values.run_state,
                                  values.events, values.facts)
-    header = "dual-agent cockpit"
-    if values.version:
-        header += f" · v{values.version}"
+    glyphs = (_LIFECYCLE_GLYPHS_ASCII if values.ascii_only
+              else _LIFECYCLE_GLYPHS)
     state = ProjectedState(
-        header_line=header,
-        task_line=("TASK "
+        header_line=_header_line(values, lifecycle),
+        task_line=(ui_label("TASK", values.locale) + " "
                    + truncate_to_width(values.task,
                                        max(10, content_width - 5))),
-        badge=f"{_SYMBOLS[lifecycle]} {lifecycle}",
-        collaboration_lines=_collaboration_lines(values, tier),
+        badge=f"{glyphs.get(lifecycle, '·')} "
+              f"{ui_label(lifecycle, values.locale)}",
+        collaboration_lines=pipeline_lines(
+            values.slots, values.events, lifecycle=lifecycle,
+            pulse=values.pulse, tier=tier, width=content_width,
+            selected_index=values.selected_index,
+            expanded_stage=values.expanded_stage,
+            ascii_only=values.ascii_only, locale=values.locale),
+        activity_lines=activity_tail_lines(
+            values.events, reveal_seqs=values.reveal_seqs,
+            ascii_only=values.ascii_only, width=content_width,
+            locale=values.locale),
+        detail_lines=(agent_detail_window(
+            values.slots, values.events, stage=values.expanded_stage,
+            lifecycle=lifecycle, last_outcome=values.last_outcome,
+            width=content_width, ascii_only=values.ascii_only,
+            max_lines=(10 if values.detail_max_lines is None
+                       else values.detail_max_lines),
+            locale=values.locale)
+            if values.expanded_stage is not None else ()),
         progress_line=_progress_line(values, lifecycle,
                                      len(values.slots)),
         tokens_line=("TOKENS · "
                      + format_tokens(
                          _known_token_total(values.usage_records))),
-        result_lines=_result_lines(values.last_outcome, content_width),
+        result_lines=_result_lines(
+            values.last_outcome, content_width,
+            reveal=values.result_reveal,
+            ascii_only=values.ascii_only, locale=values.locale,
+            max_lines=values.result_max_lines),
         context_lines=_context_lines(values, lifecycle),
         trace_obs=tuple(format_event_line(event).rstrip("\n")
                         for event in values.events),
@@ -450,30 +869,56 @@ def _usage_line(record):
 # ------------------------------------------- CU-TUI-4：detail/status 投影
 
 
-def control_receipt_line(result):
+def control_receipt_line(result, *, kind=None, ascii_only=False):
     """一次控制提交的同步回执单行（ControlResult duck 只读投影）。
 
-    status / reason 逐字（封闭词值，零新 ControlStatus）；回执是
-    瞬态 UI 呈现，不是控制历史——历史只来自账本事实。"""
-    line = (f"receipt {getattr(result, 'command_id', '')}: "
-            f"{_value_of(getattr(result, 'status', ''))}")
+    状态前缀符号（✓/✗/⊘）只是封闭三态的视觉标记；status / reason
+    逐字（零新 ControlStatus）；kind 为呈现层已知的外发意图词（零
+    铸造）。回执是瞬态 UI 呈现，不是控制历史——历史只来自账本事实。"""
+    status = _value_of(getattr(result, "status", ""))
+    line = (f"{_RECEIPT_GLYPHS.get(status, '·')} {status}"
+            if status else "receipt")
+    if kind:
+        line += f" {kind}"
+    command_id = getattr(result, "command_id", "")
+    if command_id:
+        line += f" · {command_id}"
     version = getattr(result, "execution_version", None)
     if version is not None:
         line += f" v{version}"
     reason = getattr(result, "reason", None)
     if reason is not None:
         line += f" · {_value_of(reason)}"
+    if ascii_only:
+        line = _to_ascii(line)
     return line
 
 
-def revision_status_lines(facts, pending_count):
+def worker_failure_lines(error, *, ascii_only=False, locale="en"):
+    """worker 残余异常的诚实呈现行（Phase P：捕获可见、退出再抛）。
+
+    只读异常对象自身（类型名 + str 消息，长消息截断）；完整原因
+    保留在异常对象上、由退出路径如实上抛——本呈现绝不替代它，
+    也绝不吞掉它。预期内的执行失败走 RunOutcome 投影（result
+    lines），不经过本函数。首行 = 异常事实原词；次行 = 呈现提示
+    （R2 可译）。"""
+    lines = (f"✗ WORKER ERROR {type(error).__name__}: "
+             f"{truncate_to_width(str(error), 72)}",
+             ui_label("[Q] quit re-raises the original error", locale))
+    if ascii_only:
+        lines = tuple(_to_ascii(line) for line in lines)
+    return lines
+
+
+def revision_status_lines(facts, pending_count, *, locale="en"):
     """修订状态行（四档呈现律，CU-TUI-4 §10）。
 
     pending 只来自注入读数（None → —，绝不推断）；accepted/applied
     只来自账本事实；SUBMISSION 附引擎契约说明（静态文字，非状态
-    声称）；honored 永不呈现——无可观测事实面。"""
+    声称；R2 呈现标签/说明可译，fact_type 原词）；honored 永不
+    呈现——无可观测事实面。"""
     pending = "—" if pending_count is None else str(pending_count)
-    lines = [f"pending {pending}"]
+    lines = [ui_label("pending {n}", locale).format(n=pending)]
     for entry in facts:
         kind = _value_of(getattr(entry, "fact_type", ""))
         if kind not in _REVISION_FACT_TYPES:
@@ -486,7 +931,7 @@ def revision_status_lines(facts, pending_count):
         target = payload.get("target", "—")
         line = f"[{seq}] REVISE_REQUESTED target={target}"
         if str(target) == "SUBMISSION":
-            line += " · applies at next fresh segment"
+            line += ui_label(" · applies at next fresh segment", locale)
         lines.append(line)
     return tuple(lines)
 
@@ -588,25 +1033,51 @@ def funnel_error_lines(error):
     return tuple(lines)
 
 
-def funnel_first_screen(version_text, composition, task_buffer, *,
-                        width=100, ascii_only=False):
-    """首屏六要素组装（NOT_STARTED/COMPOSING 共用，§十三）：
-    header（版本真源由调用方注入，本层零版本读取）/ 唯一指令行 /
-    输入行（内容安全门 + 宽度截断）/ 预览块 / 恰两键提示 / BLOCKED
-    原因行。零 task_id/execution_id/UUID/内部对象/debug metadata。"""
+def funnel_input_line(task_buffer, *, width=100, ascii_only=False):
+    """漏斗输入回显行（CU-TUI-INPUT A1：自顶部 Static 迁入底部 dock
+    的唯一回显面）。内容安全门与宽度截断与既有首屏输入行同律；
+    尾部光标 | 由调用方追加（TUI-4 composer 惯例，投影层不产光标）。
+    确定性纯函数。"""
     buffer_text = str(task_buffer)
     if contains_unsafe_content(buffer_text):
         buffer_text = _FUNNEL_REDACTED
+    line = truncate_to_width(f"> {buffer_text}", width)
+    if ascii_only:
+        line = _to_ascii(line)
+    return line
+
+
+def funnel_keys_hint(*, ascii_only=False):
+    """漏斗两键提示行（CU-TUI-INPUT A1：迁入 dock-controls 的唯一
+    提示面；漏斗呈现 EN 冻结——R2 ERRATA 同律）。"""
+    line = _FUNNEL_KEYS_HINT
+    if ascii_only:
+        line = _to_ascii(line)
+    return line
+
+
+def funnel_first_screen(version_text, composition, task_buffer, *,
+                        width=100, ascii_only=False, include_input=True):
+    """首屏六要素组装（NOT_STARTED/COMPOSING 共用，§十三）：
+    header（版本真源由调用方注入，本层零版本读取）/ 唯一指令行 /
+    输入行（内容安全门 + 宽度截断）/ 预览块 / 恰两键提示 / BLOCKED
+    原因行。零 task_id/execution_id/UUID/内部对象/debug metadata。
+    CU-TUI-INPUT A1：include_input=False 为输入迁入底部 dock 的组装
+    形态——body 省略输入行与两键提示（回显经 funnel_input_line 入
+    dock-input、提示经 funnel_keys_hint 入 dock-controls）；默认
+    True 与既有输出逐字节一致。"""
     header = (f"dual-agent cockpit · {version_text}" if version_text
               else "dual-agent cockpit")
     lines = [header,
-             _FUNNEL_INSTRUCTION,
-             truncate_to_width(f"> {buffer_text}", width)]
+             _FUNNEL_INSTRUCTION]
+    if include_input:
+        lines.append(funnel_input_line(task_buffer, width=width))
     lines.extend(funnel_preview_lines(composition))
     blocked_reason = getattr(composition, "blocked_reason", None)
     if blocked_reason is not None:
         lines.append(blocked_reason)
-    lines.append(_FUNNEL_KEYS_HINT)
+    if include_input:
+        lines.append(_FUNNEL_KEYS_HINT)
     if ascii_only:
         lines = [_to_ascii(line) for line in lines]
     return tuple(lines)
@@ -650,7 +1121,7 @@ def _slot_duration_text(slot_view, events):
 
 
 def _slot_handoff_text(slot_view, events):
-    """交接只来自真实 HANDOFF 事件（stage=产出角色，runtime=接收方）。"""
+    """出向交接：只来自真实 HANDOFF 事件（stage=产出角色，runtime=接收方）。"""
     handoffs = []
     for event in events:
         if (_event_type_of(event) != "HANDOFF"
@@ -658,6 +1129,21 @@ def _slot_handoff_text(slot_view, events):
             continue
         handoffs.append(
             f"→ {getattr(event, 'runtime_id', '')}"
+            f" ({_value_of(getattr(event, 'status', ''))})")
+    return "; ".join(handoffs) if handoffs else "—"
+
+
+def _slot_handoff_inbound_text(slot_view, events):
+    """入向交接：只来自真实 HANDOFF 事件（runtime=本槽 runtime，
+    stage=产出方角色）——相邻顺序绝不产生交接行。"""
+    handoffs = []
+    for event in events:
+        if (_event_type_of(event) != "HANDOFF"
+                or getattr(event, "runtime_id", None)
+                != slot_view.runtime_id):
+            continue
+        handoffs.append(
+            f"{getattr(event, 'stage', '')} → here"
             f" ({_value_of(getattr(event, 'status', ''))})")
     return "; ".join(handoffs) if handoffs else "—"
 
@@ -717,6 +1203,78 @@ def agent_detail(slots, events, usage_records, last_outcome, *,
     return tuple(lines)
 
 
+def agent_detail_window(slots, events, *, stage, lifecycle="RUNNING",
+                        last_outcome=None, width=100, ascii_only=False,
+                        max_lines=10, locale="en"):
+    """Agent Detail 有界投影窗（R1 §十）：管线正下方、单 agent、
+    ≤max_lines 的 bounded projection（非滚动视图）。
+
+    逐区块只读投影：prompt=—（观察契约冻结——事件绝不携带 prompt，
+    零合成、零推断）；handoff 双向只来自真实 HANDOFF 事件；activity
+    为 EventIndex 按 stage==role 过滤的尾 6 条（与主屏活动尾窗同限、
+    同一格式器，零第二套事件缓存）；result=最后一条
+    INVOCATION_FINISHED 原词 + duration + 终态 transcript
+    StepRecord.status（既有真源）；state 复用 _slot_state_word 八态
+    （零新状态机）。超窗尾行 (+k more · T) 指向 Trace——完整历史
+    唯一出口在 Trace，本窗绝不截断真相、只限投影窗。stage 缺席
+    （组合刷新后身份消失）→ 诚实空行集。R2：标签列经闭集词表并
+    _pad_cell 对齐（display-width 感知，CJK 安全）；区块结构与
+    事实行原样。"""
+    target = None
+    for slot_view in slots:
+        if slot_view.stage == stage:
+            target = slot_view
+            break
+    if target is None:
+        return ()
+    filtered = tuple(
+        event for event in events
+        if getattr(event, "stage", None) == target.role)
+    finished_status = None
+    for event in filtered:
+        if _event_type_of(event) == "INVOCATION_FINISHED":
+            finished_status = _value_of(getattr(event, "status", ""))
+    result_value = "—"
+    if finished_status is not None:
+        result_value = str(finished_status)
+        duration = _slot_duration_text(target, events)
+        if duration != "—":
+            result_value += f" · {duration}"
+        step_status = _slot_result_text(target, last_outcome)
+        if step_status != "—":
+            result_value += f" · step {step_status}"
+    word = _slot_state_word(target, events, lifecycle)
+    glyph = (_AGENT_GLYPHS_ASCII[word] if ascii_only
+             else _AGENT_GLYPHS[word])
+
+    def label_pad(key):
+        return _pad_cell(ui_label(key, locale), 8)
+
+    lines = [f"▼ {target.role.upper()}",
+             f"  {label_pad('prompt')}  —",
+             f"  {label_pad('handoff')}  "
+             f"{_pad_cell(ui_label('in', locale), 4)}"
+             f"{_slot_handoff_inbound_text(target, events)}",
+             f"  {label_pad('handoff')}  "
+             f"{_pad_cell(ui_label('out', locale), 4)}"
+             f"{_slot_handoff_text(target, events)}"]
+    for index, event in enumerate(filtered[-6:]):
+        label = (label_pad("activity") if index == 0 else " " * 8)
+        lines.append(f"  {label}  {_activity_line(event, locale)}")
+    lines.extend((
+        f"  {label_pad('result')}  {result_value}",
+        f"  {label_pad('state')}  {glyph} {ui_label(word, locale)}",
+    ))
+    if len(lines) > max_lines:
+        dropped = len(lines) - (max_lines - 1)
+        lines = lines[:max_lines - 1]
+        lines.append(
+            ui_label("(+{n} more · T)", locale).format(n=dropped))
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(truncate_to_width(line, width) for line in lines)
+
+
 def _ascii_state(state):
     """G12 ASCII 降级：逐符号映射，结构与层级不变。"""
     return ProjectedState(
@@ -725,6 +1283,10 @@ def _ascii_state(state):
         badge=_to_ascii(state.badge),
         collaboration_lines=tuple(
             _to_ascii(line) for line in state.collaboration_lines),
+        activity_lines=tuple(
+            _to_ascii(line) for line in state.activity_lines),
+        detail_lines=tuple(
+            _to_ascii(line) for line in state.detail_lines),
         progress_line=_to_ascii(state.progress_line),
         tokens_line=_to_ascii(state.tokens_line),
         result_lines=tuple(

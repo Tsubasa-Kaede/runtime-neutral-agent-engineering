@@ -116,32 +116,39 @@ def build(**kwargs):
 
 
 class AgentCountLayoutTests(unittest.TestCase):
-    """Scenarios 1-3: fixed 2/3/4 role pipelines, zero padding slots."""
+    """Scenarios 1-3 (R1 pipeline): fixed 2/3/4 role chains — 单协作组
+    横排管线，零 padding 槽位，每个真实 agent 恰一个 cell。"""
 
     def test_two_agent_layout(self):
         state = build(task="t", slots=template_slots(2),
                       events=running_events(("architect", "coder")),
                       width=100)
-        self.assertEqual(len(state.collaboration_lines), 2)
+        # MAIN_WIDE 档（width=100）2 cell 单行：heads/runtimes/states
+        # 三行 + 选中指针行
+        self.assertEqual(len(state.collaboration_lines), 4)
         self.assertIn("ARCHITECT", state.collaboration_lines[0])
         self.assertIn("CODER", state.collaboration_lines[0])
-        # first slot finished ok, second waiting, none invented
-        self.assertIn("✓", state.collaboration_lines[1])
-        self.assertIn("○", state.collaboration_lines[1])
-        self.assertNotIn("REVIEWER", state.collaboration_lines[0])
+        # first slot finished ok, second waiting (stage started, not
+        # yet invoked), none invented
+        self.assertIn("✓", state.collaboration_lines[2])
+        self.assertIn("◐", state.collaboration_lines[2])
+        self.assertNotIn("REVIEWER",
+                         "\n".join(state.collaboration_lines))
 
     def test_three_agent_layout(self):
         state = build(task="t", slots=template_slots(3), events=(),
                       width=100)
-        self.assertIn("REVIEWER", state.collaboration_lines[0])
-        self.assertEqual(state.collaboration_lines[1].count("○"), 3)
+        joined = "\n".join(state.collaboration_lines)
+        self.assertIn("REVIEWER", joined)
+        self.assertEqual(joined.count("NOT_STARTED"), 3)
 
     def test_four_agent_layout(self):
         state = build(task="t", slots=template_slots(4), events=(),
                       width=100)
+        joined = "\n".join(state.collaboration_lines)
         for role in ("ARCHITECT", "CODER", "TESTER", "REVIEWER"):
-            self.assertIn(role, state.collaboration_lines[0])
-        self.assertEqual(state.collaboration_lines[1].count("○"), 4)
+            self.assertIn(role, joined)
+        self.assertEqual(joined.count("NOT_STARTED"), 4)
 
     def test_symbol_by_invocation_state(self):
         slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"),
@@ -159,22 +166,25 @@ class AgentCountLayoutTests(unittest.TestCase):
                stage="reviewer", runtime="rt-2", status="STARTED"),
         )
         state = build(task="t", slots=slots_, events=events, width=100)
-        symbols = state.collaboration_lines[1]
-        self.assertIn("✓", symbols)   # architect finished SUCCESS
-        self.assertIn("✗", symbols)   # coder finished FAILED
-        self.assertIn("●", symbols)   # reviewer in flight
+        joined = "\n".join(state.collaboration_lines)
+        self.assertIn("✓", joined)   # architect finished SUCCESS
+        self.assertIn("✗", joined)   # coder finished FAILED
+        self.assertIn("●", joined)   # reviewer in flight
 
-    def test_runtime_ids_rendered_on_status_line(self):
+    def test_runtime_ids_rendered_on_rows(self):
         state = build(task="t", slots=template_slots(2),
                       events=running_events(("architect", "coder")),
                       width=100)
-        self.assertIn("rt-0", state.collaboration_lines[1])
-        self.assertIn("rt-1", state.collaboration_lines[1])
+        joined = "\n".join(state.collaboration_lines)
+        self.assertIn("rt-0", joined)
+        self.assertIn("rt-1", joined)
 
     def test_same_runtime_reuse_renders_both_slots(self):
         slots_ = (slot("architect", "rt-0"), slot("coder", "rt-0"))
         state = build(task="t", slots=slots_, events=(), width=100)
-        self.assertEqual(state.collaboration_lines[1].count("rt-0"), 2)
+        self.assertEqual(
+            sum(line.count("rt-0") for line in state.collaboration_lines),
+            2)
 
 
 # -------------------------------------- scenarios 4-7: responsive breakpoints
@@ -189,14 +199,19 @@ class ResponsiveBreakpointTests(unittest.TestCase):
                       width=79)
         self.assertEqual(state.tier, "DEGRADED")
         self.assertEqual(state.context_lines, ())
-        # stacked: one line per slot instead of the two-line pipeline
-        self.assertEqual(len(state.collaboration_lines), 3)
+        # 纵向链：↳ 续行前缀在场，且不出现水平连接符（同组竖排）
+        joined = "\n".join(state.collaboration_lines)
+        self.assertIn("ARCHITECT", joined)
+        self.assertIn("↳", joined)
+        self.assertNotIn("──→", joined)
+        self.assertNotIn("┄┄→", joined)
 
     def test_main_tier_80_to_99(self):
         state = build(task="t", slots=template_slots(3), events=(),
                       width=90)
         self.assertEqual(state.tier, "MAIN")
-        self.assertEqual(len(state.collaboration_lines), 2)
+        # MAIN 档 2 列：[A,B] 行块（3 行+指针）+ ↳[C] 续行块（3 行）
+        self.assertEqual(len(state.collaboration_lines), 7)
         self.assertEqual(state.context_lines, ())
 
     def test_main_wide_tier_caps_content_at_100(self):
@@ -443,7 +458,8 @@ class TextProjectionTests(unittest.TestCase):
             final=SimpleResult("word " * 400), error=None)
         state = build(task="t", slots=template_slots(2),
                       last_outcome=outcome, width=100)
-        self.assertLessEqual(len(state.result_lines), 4)
+        # Phase V：+1 状态头行（✓ COMPLETED）
+        self.assertLessEqual(len(state.result_lines), 5)
         joined = "\n".join(state.result_lines)
         self.assertIn("more lines", joined)
 
@@ -502,6 +518,8 @@ class AccessibilityTests(unittest.TestCase):
         fields = [state.header_line, state.task_line, state.badge,
                   state.progress_line, state.tokens_line]
         fields.extend(state.collaboration_lines)
+        fields.extend(state.activity_lines)
+        fields.extend(state.detail_lines)
         fields.extend(state.result_lines)
         fields.extend(state.context_lines)
         fields.extend(state.trace_obs)
@@ -527,15 +545,20 @@ class AccessibilityTests(unittest.TestCase):
                       terminal=RunStatus.ABORTED, width=100,
                       ascii_only=True)
         for text in self._all_strings(state):
-            for symbol in "✓●○✗→‖■":
+            for symbol in ("✓", "●", "○", "✗", "→", "‖", "■", "❚", "▫",
+                           "◐", "◉", "»", "▸", "⊘",
+                           "─", "┄", "↓", "┆", "↳", "▲", "▶", "▼"):
                 self.assertNotIn(symbol, text)
-                self.assertIn("[RUN]", state.collaboration_lines[1])
-        self.assertIn("[STOP]", state.badge)  # ABORTED badge wins
+        # ABORTED 终态叠加：在途槽呈现 "!"，未开始槽呈现 "."
+        self.assertIn(".", "\n".join(state.collaboration_lines))
+        self.assertIn("!", state.badge)  # ABORTED badge wins
 
     def test_ascii_arrow_map(self):
-        state = build(task="t", slots=template_slots(2), events=(),
+        events = (ev(ExecutionEventType.HANDOFF, seq=0, stage="architect",
+                     runtime="rt-1"),)
+        state = build(task="t", slots=template_slots(2), events=events,
                       ascii_only=True, width=100)
-        self.assertIn("->", state.collaboration_lines[0])
+        self.assertIn("->", "\n".join(state.activity_lines))
 
 
 # ---------------------------------------- scenarios 30-32: trace source truth
@@ -659,39 +682,71 @@ def transcript_record(slot_id, status="SUCCESS", step_index=0,
 
 
 class ControlReceiptLineTests(unittest.TestCase):
-    """CU-TUI-4 §9/§五：ControlResult 原样进回执——三态 + reason 逐字，
-    零新 ControlStatus 铸造。"""
+    """CU-TUI-4 §9/§五 + Phase P §九：控制结果原样进回执——三态 +
+    reason 逐字，状态符号前缀；kind 为呈现层已知意图词。零新
+    ControlStatus 铸造。"""
 
     def test_accepted_without_reason(self):
         line = projection.control_receipt_line(
             receipt(ControlStatus.ACCEPTED))
-        self.assertEqual(line, "receipt ui-1: ACCEPTED v3")
+        self.assertEqual(line, "✓ ACCEPTED · ui-1 v3")
 
     def test_rejected_reason_verbatim(self):
         line = projection.control_receipt_line(
             receipt(ControlStatus.REJECTED,
                     reason=ControlReason.ALREADY_TERMINAL,
                     version=2, command_id="ui-2"))
-        self.assertEqual(line, "receipt ui-2: REJECTED v2 · ALREADY_TERMINAL")
+        self.assertEqual(line, "✗ REJECTED · ui-2 v2 · ALREADY_TERMINAL")
 
     def test_no_op_reason_verbatim(self):
         line = projection.control_receipt_line(
             receipt(ControlStatus.NO_OP, reason=ControlReason.NOT_PAUSED,
                     version=1, command_id="ui-3"))
-        self.assertEqual(line, "receipt ui-3: NO_OP v1 · NOT_PAUSED")
+        self.assertEqual(line, "⊘ NO_OP · ui-3 v1 · NOT_PAUSED")
 
     def test_plain_string_values_match_enum_shape(self):
         line = projection.control_receipt_line(
             receipt("ACCEPTED", reason="ALREADY_REQUESTED",
                     version=4, command_id="ui-4"))
         self.assertEqual(
-            line, "receipt ui-4: ACCEPTED v4 · ALREADY_REQUESTED")
+            line, "✓ ACCEPTED · ui-4 v4 · ALREADY_REQUESTED")
 
     def test_missing_reason_attribute_renders_status_only(self):
         line = projection.control_receipt_line(
             SimpleNamespace(status="ACCEPTED", execution_version=1,
                             command_id="ui-5"))
-        self.assertEqual(line, "receipt ui-5: ACCEPTED v1")
+        self.assertEqual(line, "✓ ACCEPTED · ui-5 v1")
+
+    def test_kind_rides_after_status(self):
+        line = projection.control_receipt_line(
+            receipt(ControlStatus.ACCEPTED), kind="PAUSE")
+        self.assertEqual(line, "✓ ACCEPTED PAUSE · ui-1 v3")
+
+    def test_ascii_only_degrades_glyphs(self):
+        line = projection.control_receipt_line(
+            receipt(ControlStatus.NO_OP), kind="RESUME", ascii_only=True)
+        self.assertEqual(line, "[SKIP] NO_OP RESUME · ui-1 v3")
+
+
+class WorkerFailureLineTests(unittest.TestCase):
+    """Phase P §四：worker 残余异常的诚实呈现行。"""
+
+    def test_error_type_and_message_visible(self):
+        lines = projection.worker_failure_lines(
+            RuntimeError("driver-honest-failure"))
+        self.assertEqual(
+            lines[0], "✗ WORKER ERROR RuntimeError: driver-honest-failure")
+        self.assertIn("re-raise", lines[1])
+
+    def test_long_message_truncated(self):
+        lines = projection.worker_failure_lines(
+            ValueError("x" * 200))
+        self.assertLessEqual(len(lines[0]), 100)
+
+    def test_ascii_only_degrades(self):
+        lines = projection.worker_failure_lines(
+            RuntimeError("boom"), ascii_only=True)
+        self.assertTrue(lines[0].startswith("[FAIL] WORKER ERROR"))
 
 
 class RevisionStatusLineTests(unittest.TestCase):
@@ -1208,6 +1263,1361 @@ class FunnelRendererGuardTests(unittest.TestCase):
             "Collaboration plan (default)",
             "  architect  ← rt-a · p-a",
             "  coder      ← rt-b · p-b"))
+
+
+# ------------------------ CU-TUI-6 Phase V: agent panel / activity / header
+
+
+def _slot_events(role, runtime, *, started=True, invoked=False,
+                 finished=None):
+    """单槽位事件流构造器（Phase V 状态推导测试专用）。"""
+    events = []
+    seq = 0
+    if started:
+        events.append(ev(ExecutionEventType.STAGE_STARTED, seq=seq,
+                         stage=role, runtime=runtime))
+        seq += 1
+    if invoked:
+        events.append(ev(ExecutionEventType.INVOCATION_STARTED, seq=seq,
+                         stage=role, runtime=runtime, status="STARTED"))
+        seq += 1
+    if finished is not None:
+        events.append(ev(ExecutionEventType.INVOCATION_FINISHED, seq=seq,
+                         stage=role, runtime=runtime, status=finished))
+    return tuple(events)
+
+
+class PipelineCellStateTests(unittest.TestCase):
+    """R1 §五/§七：cell 状态词 + 符号——全部来自真实事件流（STAGE_*/
+    INVOCATION_*）与既有 lifecycle 投影的叠加，零静默推断；selected /
+    expanded 为独立呈现态（marker 列 + ▲ 指针）。"""
+
+    def _panel(self, slots_, events, *, lifecycle="RUNNING", **kwargs):
+        return projection.pipeline_lines(
+            slots_, events, lifecycle=lifecycle, **kwargs)
+
+    def test_two_agent_cells_with_derived_statuses(self):
+        events = running_events(("architect", "coder"))
+        lines = self._panel(template_slots(2), events)
+        self.assertEqual(len(lines), 4)          # heads/runtimes/states/▲
+        self.assertIn("ARCHITECT", lines[0])
+        self.assertIn("rt-0", lines[1])
+        self.assertIn("DONE", lines[2])
+        self.assertIn("WAITING", lines[2])       # STAGE_STARTED 未 INVOCATION
+
+    def test_all_eight_states_derive_from_real_facts(self):
+        s = slot("a", "rt-0")
+        cases = (
+            ("NOT_STARTED", (), "RUNNING"),
+            ("WAITING", _slot_events("a", "rt-0", invoked=False), "RUNNING"),
+            ("RUNNING", _slot_events("a", "rt-0", invoked=True), "RUNNING"),
+            ("DONE", _slot_events("a", "rt-0", invoked=True,
+                                  finished="SUCCESS"), "RUNNING"),
+            ("FAILED", _slot_events("a", "rt-0", invoked=True,
+                                    finished="FAILED"), "RUNNING"),
+            ("PAUSED", _slot_events("a", "rt-0", invoked=True), "PAUSED"),
+            ("PARKED", _slot_events("a", "rt-0", invoked=True), "PARKED"),
+            ("ABORTED", _slot_events("a", "rt-0", invoked=True), "ABORTED"),
+        )
+        for word, events, lifecycle in cases:
+            lines = self._panel((s,), events, lifecycle=lifecycle)
+            self.assertEqual(len(lines), 4, word)
+            self.assertIn(word, lines[2], word)  # 状态词在 states 行
+
+    def test_lifecycle_overlay_never_overwrites_finished_fact(self):
+        s = slot("a", "rt-0")
+        events = _slot_events("a", "rt-0", invoked=True, finished="SUCCESS")
+        lines = self._panel((s,), events, lifecycle="PAUSED")
+        self.assertIn("DONE", lines[2])
+
+    def test_glyphs_match_approved_table(self):
+        s = slot("a", "rt-0")
+        table = (("NOT_STARTED", "○"), ("WAITING", "◐"), ("RUNNING", "●"),
+                 ("DONE", "✓"), ("FAILED", "✗"), ("PAUSED", "❚❚"),
+                 ("PARKED", "▫"), ("ABORTED", "⊘"))
+        for word, glyph in table:
+            events = {
+                "NOT_STARTED": (),
+                "WAITING": _slot_events("a", "rt-0"),
+                "RUNNING": _slot_events("a", "rt-0", invoked=True),
+                "DONE": _slot_events("a", "rt-0", invoked=True,
+                                     finished="SUCCESS"),
+                "FAILED": _slot_events("a", "rt-0", invoked=True,
+                                       finished="FAILED"),
+                "PAUSED": _slot_events("a", "rt-0", invoked=True),
+                "PARKED": _slot_events("a", "rt-0", invoked=True),
+                "ABORTED": _slot_events("a", "rt-0", invoked=True),
+            }[word]
+            lifecycle = word if word in ("PAUSED", "PARKED", "ABORTED") \
+                else "RUNNING"
+            lines = self._panel((s,), events, lifecycle=lifecycle)
+            self.assertIn(glyph, lines[0], word)  # 符号在 heads 行
+            self.assertIn(glyph, lines[2], word)  # 状态符号在 states 行
+
+    def test_pulse_flips_only_running_glyph(self):
+        running = (slot("a", "rt-0"), slot("b", "rt-1"))
+        events = (_slot_events("a", "rt-0", invoked=True)
+                  + _slot_events("b", "rt-1", invoked=False))
+        off = "\n".join(self._panel(running, events))
+        on = "\n".join(self._panel(running, events, pulse=True))
+        self.assertIn("●", off)
+        self.assertIn("◐", on)                # WAITING 不脉冲
+        self.assertNotIn("◉", off)
+        self.assertIn("◉", on)
+        self.assertNotIn("●", on)
+
+    def test_ascii_glyph_set_is_the_approved_one(self):
+        s = slot("a", "rt-0")
+        table = (("NOT_STARTED", ".", "RUNNING"),
+                 ("WAITING", "~", "RUNNING"),
+                 ("RUNNING", "*", "RUNNING"),
+                 ("DONE", "+", "RUNNING"),
+                 ("FAILED", "x", "RUNNING"),
+                 ("PAUSED", "||", "PAUSED"),
+                 ("PARKED", "-", "PARKED"),
+                 ("ABORTED", "!", "ABORTED"))
+        for word, glyph, lifecycle in table:
+            events = {
+                "NOT_STARTED": (),
+                "WAITING": _slot_events("a", "rt-0"),
+                "RUNNING": _slot_events("a", "rt-0", invoked=True),
+                "DONE": _slot_events("a", "rt-0", invoked=True,
+                                     finished="SUCCESS"),
+                "FAILED": _slot_events("a", "rt-0", invoked=True,
+                                       finished="FAILED"),
+                "PAUSED": _slot_events("a", "rt-0", invoked=True),
+                "PARKED": _slot_events("a", "rt-0", invoked=True),
+                "ABORTED": _slot_events("a", "rt-0", invoked=True),
+            }[word]
+            joined = "\n".join(self._panel((s,), events,
+                                           lifecycle=lifecycle,
+                                           ascii_only=True))
+            self.assertIn(glyph, joined, word)
+            for symbol in "●○◐✓✗❚▫⊘◉":
+                self.assertNotIn(symbol, joined, word)
+
+    def test_pulse_ascii_stays_star(self):
+        s = slot("a", "rt-0")
+        events = _slot_events("a", "rt-0", invoked=True)
+        for pulse in (False, True):
+            joined = "\n".join(self._panel((s,), events, pulse=pulse,
+                                           ascii_only=True))
+            self.assertIn("*", joined)
+
+    def test_four_agent_cells_carry_role_and_runtime(self):
+        joined = "\n".join(self._panel(template_slots(4), (), width=120))
+        for role in ("ARCHITECT", "CODER", "TESTER", "REVIEWER"):
+            self.assertIn(role, joined)
+        for runtime in ("rt-0", "rt-1", "rt-2", "rt-3"):
+            self.assertIn(runtime, joined)
+
+    def test_degraded_tier_blocks_never_exceed_width(self):
+        lines = self._panel(template_slots(4), (), tier="DEGRADED",
+                            width=60)
+        for line in lines:
+            self.assertLessEqual(projection.display_width(line), 60)
+
+    def test_lines_never_exceed_width(self):
+        long_rt = slot("architect", "rt-" + "x" * 90)
+        lines = self._panel((long_rt,), (), width=80)
+        for line in lines:
+            self.assertLessEqual(projection.display_width(line), 80)
+
+    def test_selected_marker_pointer_and_reserved_column(self):
+        two = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        lines = self._panel(two, (), selected_index=1)
+        # 未选中 cell 预留 marker 列（两空格开头，布局稳定不跳动）
+        self.assertTrue(lines[0].startswith("  "))
+        self.assertIn("▶ ○ CODER", lines[0])
+        # ▲ 指针对齐到选中 cell 的起始列
+        offset = lines[0].index("▶")
+        self.assertEqual(lines[3][:offset].strip(), "")
+        self.assertEqual(lines[3][offset], "▲")
+
+    def test_expanded_marker_variants(self):
+        two = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        # selected ∧ expanded → ▼（折叠提示）
+        lines = self._panel(two, (), selected_index=0,
+                            expanded_stage="architect")
+        self.assertIn("▼ ○ ARCHITECT", lines[0])
+        self.assertNotIn("▶", lines[0])
+        # selected 未 expanded → ▶；expanded 在别处 → ▼ 留在原 cell
+        lines = self._panel(two, (), selected_index=0,
+                            expanded_stage="coder")
+        self.assertIn("▶ ○ ARCHITECT", lines[0])
+        self.assertIn("▼ ○ CODER", lines[0])
+
+
+class ActivityTailTests(unittest.TestCase):
+    """Phase V §十三/十四：活动尾窗 = EventIndex 同源只读尾 K 条——
+    零第二套事件、零伪造时间戳（事件无时间戳字段是冻结事实）、
+    空态诚实呈现。"""
+
+    def test_empty_shows_honest_state(self):
+        self.assertEqual(projection.activity_tail_lines(()),
+                         ("No activity yet",))
+
+    def test_one_event_line(self):
+        events = (ev(ExecutionEventType.INVOCATION_STARTED, seq=3,
+                     stage="coder", runtime="rt-1", status="STARTED"),)
+        lines = projection.activity_tail_lines(events)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("[3]", lines[0])
+        self.assertIn("coder started", lines[0])
+
+    def test_many_events_keep_only_tail_window(self):
+        events = tuple(
+            ev(ExecutionEventType.STAGE_STARTED, seq=index, stage="a",
+               runtime="rt-0")
+            for index in range(20))
+        lines = projection.activity_tail_lines(events, limit=6)
+        self.assertEqual(len(lines), 6)
+        self.assertIn("[19]", lines[-1])
+        self.assertIn("[14]", lines[0])
+        self.assertNotIn("[13]", "\n".join(lines))
+
+    def test_handoff_renders_real_arrow(self):
+        events = (ev(ExecutionEventType.HANDOFF, seq=1, stage="architect",
+                     runtime="rt-1"),)
+        lines = projection.activity_tail_lines(events)
+        self.assertIn("architect → rt-1", lines[0])
+
+    def test_finished_carries_status_and_duration(self):
+        events = (ev(ExecutionEventType.INVOCATION_FINISHED, seq=2,
+                     stage="coder", runtime="rt-1", status="SUCCESS",
+                     duration_ms=120),)
+        lines = projection.activity_tail_lines(events)
+        self.assertIn("coder finished SUCCESS (120ms)", lines[0])
+
+    def test_reveal_marker_only_on_given_seqs(self):
+        events = (_slot_events("a", "rt-0")[0],
+                  ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+                     stage="a", runtime="rt-0", status="STARTED"))
+        lines = projection.activity_tail_lines(events, reveal_seqs=(1,))
+        self.assertFalse(lines[0].startswith("▸"))
+        self.assertTrue(lines[1].startswith("▸ "))
+
+    def test_ascii_degrades_reveal_and_arrow(self):
+        events = (ev(ExecutionEventType.HANDOFF, seq=0, stage="architect",
+                     runtime="rt-1"),)
+        lines = projection.activity_tail_lines(events, reveal_seqs=(0,),
+                                               ascii_only=True)
+        self.assertIn("->", lines[0])
+        self.assertIn("> ", lines[0])
+        self.assertNotIn("▸", lines[0])
+        self.assertNotIn("→", lines[0])
+
+    def test_no_synthetic_events(self):
+        events = _slot_events("a", "rt-0", invoked=True)
+        lines = projection.activity_tail_lines(events)
+        self.assertEqual(len(lines), len(events))
+        for line, event in zip(lines, events):
+            self.assertIn(f"[{event.sequence}]", line)
+
+    def test_long_lines_truncated_to_width(self):
+        events = (ev(ExecutionEventType.STAGE_STARTED, seq=0,
+                     stage="a" * 200, runtime="rt-0"),)
+        lines = projection.activity_tail_lines(events, width=40)
+        self.assertLessEqual(projection.display_width(lines[0]), 40)
+
+    def test_deterministic(self):
+        events = _slot_events("a", "rt-0", invoked=True)
+        self.assertEqual(projection.activity_tail_lines(events),
+                         projection.activity_tail_lines(events))
+
+
+class HeaderStateTests(unittest.TestCase):
+    """Phase V §九：header 承载 product identity + 会话状态（右对齐），
+    生命周期符号按已批准表，ASCII 降级不失可读。"""
+
+    def test_running_state_right_aligned_with_identity(self):
+        state = build(task="t", slots=template_slots(2),
+                      events=running_events(("architect",)), width=100,
+                      version="9.9")
+        self.assertTrue(state.header_line.endswith("● RUNNING"))
+        self.assertIn("dual-agent cockpit", state.header_line)
+        self.assertIn("v9.9", state.header_line)
+        self.assertLessEqual(projection.display_width(state.header_line),
+                             100)
+
+    def test_each_lifecycle_glyph_in_header(self):
+        run_state = SimpleNamespace()
+        cases = (
+            ("COMPLETED", "✓", dict(terminal=RunStatus.COMPLETED)),
+            ("FAILED", "✗", dict(terminal=RunStatus.FAILED)),
+            ("ABORTED", "⊘", dict(terminal=RunStatus.ABORTED)),
+            ("PAUSED", "❚❚", dict(
+                run_state=run_state,
+                facts=(fact(ControlFactType.PAUSE_REQUESTED),))),
+            ("PARKED", "▫", dict(run_state=run_state)),
+        )
+        for lifecycle, glyph, kwargs in cases:
+            state = build(task="t", slots=template_slots(2), width=100,
+                          **kwargs)
+            self.assertIn(f"{glyph} {lifecycle}", state.header_line,
+                          lifecycle)
+
+    def test_ascii_lifecycle_glyphs(self):
+        state = build(task="t", slots=template_slots(2),
+                      events=running_events(("architect",)),
+                      terminal=RunStatus.ABORTED, width=100,
+                      ascii_only=True)
+        self.assertIn("! ABORTED", state.header_line)
+        self.assertNotIn("⊘", state.header_line)
+
+    def test_narrow_header_never_overflows(self):
+        state = build(task="t", slots=template_slots(2),
+                      events=running_events(("architect",)), width=44)
+        self.assertLessEqual(projection.display_width(state.header_line),
+                             44)
+        self.assertIn("RUNNING", state.header_line)
+
+
+class ResultPresentationTests(unittest.TestCase):
+    """Phase V §十五/十六：终态结果带状态头行；PARKED 不伪造结果；
+    结果揭示前缀是纯呈现参数。"""
+
+    def test_completed_header_then_content(self):
+        outcome = SimpleOutcome(RunStatus.COMPLETED,
+                                SimpleResult("done text"), None)
+        state = build(task="t", slots=template_slots(2),
+                      last_outcome=outcome, width=100)
+        self.assertEqual(state.result_lines[0], "✓ COMPLETED")
+        self.assertIn("done text", "\n".join(state.result_lines[1:]))
+
+    def test_failed_header_and_error_lines(self):
+        outcome = SimpleOutcome(RunStatus.FAILED, None, RuntimeError("boom"))
+        state = build(task="t", slots=template_slots(2),
+                      last_outcome=outcome, width=100)
+        self.assertEqual(state.result_lines[0], "✗ FAILED")
+        joined = "\n".join(state.result_lines)
+        self.assertIn("ERROR", joined)
+        self.assertIn("boom", joined)
+
+    def test_parked_still_single_honest_line(self):
+        outcome = SimpleOutcome(RunStatus.PARKED, None, None)
+        state = build(task="t", slots=template_slots(2),
+                      last_outcome=outcome, width=100)
+        self.assertEqual(state.result_lines, ("PARKED · awaiting resume",))
+
+    def test_result_reveal_prefix_is_pure_input(self):
+        outcome = SimpleOutcome(RunStatus.COMPLETED,
+                                SimpleResult("done text"), None)
+        base = dict(task="t", slots=template_slots(2), width=100,
+                    last_outcome=outcome)
+        revealed = build(**base, result_reveal=True)
+        plain = build(**base, result_reveal=False)
+        self.assertEqual(revealed.result_lines[0], "» ✓ COMPLETED")
+        self.assertEqual(revealed.result_lines[1:],
+                         plain.result_lines[1:])
+        self.assertNotIn("»", plain.result_lines[0])
+
+
+class AnimationPurityTests(unittest.TestCase):
+    """Phase V §四/§二十六：动画参数（pulse/reveal/result_reveal）只改
+    rendering——除对应呈现字段外，一切投影输出逐字节不变；动画绝不
+    被解释为执行状态。"""
+
+    def _kwargs(self):
+        # coder 在途（INVOCATION_STARTED 未 FINISHED）→ 面板存在
+        # RUNNING 槽位，脉冲才有可见翻转面
+        events = tuple(running_events(("architect", "coder"))) + (
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=3,
+               stage="coder", runtime="rt-1", status="STARTED"),)
+        return dict(task="t", slots=template_slots(2), events=events,
+                    width=100)
+
+    def test_pulse_changes_only_agent_panel(self):
+        base = self._kwargs()
+        off = build(**base, pulse=False)
+        on = build(**base, pulse=True)
+        self.assertNotEqual(off.collaboration_lines,
+                            on.collaboration_lines)
+        for name in ("header_line", "task_line", "badge", "progress_line",
+                     "tokens_line", "result_lines", "context_lines",
+                     "trace_obs", "trace_ctrl", "trace_usage", "lifecycle",
+                     "tier", "activity_lines", "detail_lines"):
+            self.assertEqual(getattr(off, name), getattr(on, name), name)
+
+    def test_reveal_changes_only_activity(self):
+        base = self._kwargs()
+        plain = build(**base, reveal_seqs=())
+        marked = build(**base, reveal_seqs=(0,))
+        self.assertNotEqual(plain.activity_lines, marked.activity_lines)
+        for name in ("collaboration_lines", "header_line", "task_line",
+                     "badge", "progress_line", "tokens_line",
+                     "result_lines", "context_lines", "trace_obs",
+                     "trace_ctrl", "trace_usage", "lifecycle", "tier",
+                     "detail_lines"):
+            self.assertEqual(getattr(plain, name), getattr(marked, name),
+                             name)
+
+    def test_result_reveal_changes_only_result(self):
+        base = dict(task="t", slots=template_slots(2), width=100,
+                    last_outcome=SimpleOutcome(
+                        RunStatus.COMPLETED, SimpleResult("out"), None))
+        plain = build(**base, result_reveal=False)
+        revealed = build(**base, result_reveal=True)
+        self.assertNotEqual(plain.result_lines, revealed.result_lines)
+        for name in ("collaboration_lines", "activity_lines",
+                     "header_line", "lifecycle", "trace_obs",
+                     "detail_lines"):
+            self.assertEqual(getattr(plain, name),
+                             getattr(revealed, name), name)
+
+    def test_animation_inputs_keep_determinism(self):
+        base = dict(self._kwargs(), pulse=True, reveal_seqs=(1,),
+                    result_reveal=True)
+        self.assertEqual(build(**base), build(**base))
+
+
+class TraceStatusLineTests(unittest.TestCase):
+    """Phase V §二十：follow 断开时的钉住状态行（纯呈现推导）。"""
+
+    def test_following_renders_empty(self):
+        self.assertEqual(projection.trace_status_line(True, 0), "")
+
+    def test_pinned_shows_new_event_count(self):
+        line = projection.trace_status_line(False, 3)
+        self.assertIn("3 new events", line)
+        self.assertIn("g/end", line)
+
+    def test_ascii_variant_has_no_unicode(self):
+        line = projection.trace_status_line(False, 5, ascii_only=True)
+        self.assertIn("5 new events", line)
+        self.assertNotIn("·", line)
+
+
+# ------------------------------------------------ R1: pipeline + detail
+
+
+def _handoff(seq, producer_role, receiver_runtime, status="EMBEDDED"):
+    return ev(ExecutionEventType.HANDOFF, seq=seq, stage=producer_role,
+              runtime=receiver_runtime, status=status, reason="R")
+
+
+class PipelineLayoutTests(unittest.TestCase):
+    """R1 P2：列容量（FULL 4 / MAIN_WIDE 3 / MAIN 2 / DEGRADED 1）+
+    ↳ 换行续行 + 宽度铁律 + 组抽象（横向=组内协作，纵向=组间）。"""
+
+    def test_full_four_in_one_row(self):
+        lines = projection.pipeline_lines(
+            template_slots(4), (), tier="FULL", width=100)
+        self.assertEqual(len(lines), 4)   # heads/runtimes/states + ▲
+        for role in ("ARCHITECT", "CODER", "TESTER", "REVIEWER"):
+            self.assertIn(role, lines[0])
+
+    def test_main_two_columns_wrap(self):
+        lines = projection.pipeline_lines(
+            template_slots(3), (), tier="MAIN", width=86)
+        self.assertEqual(len(lines), 7)   # 行块(3)+▲+续行块(3)
+        self.assertIn("ARCHITECT", lines[0])
+        self.assertIn("CODER", lines[0])
+        self.assertNotIn("REVIEWER", lines[0])
+        self.assertTrue(lines[4].startswith("↳"))
+        self.assertIn("REVIEWER", lines[4])
+
+    def test_main_wide_three_columns_wrap(self):
+        lines = projection.pipeline_lines(
+            template_slots(4), (), tier="MAIN_WIDE", width=96)
+        self.assertEqual(len(lines), 7)
+        for role in ("ARCHITECT", "CODER", "TESTER"):
+            self.assertIn(role, lines[0])
+        self.assertNotIn("REVIEWER", lines[0])
+        self.assertTrue(lines[4].startswith("↳"))
+        self.assertIn("REVIEWER", lines[4])
+
+    def test_every_line_never_exceeds_width(self):
+        for width in (60, 76, 86, 96, 100):
+            lines = projection.pipeline_lines(
+                template_slots(4), (), width=width)
+            self.assertTrue(lines, width)
+            for line in lines:
+                self.assertLessEqual(
+                    projection.display_width(line), width, width)
+
+    def test_explicit_groups_stack_vertically(self):
+        slots_ = template_slots(3)
+        lines = projection.pipeline_lines(
+            slots_, (), width=100, groups=(slots_[:2], slots_[2:]))
+        joined = "\n".join(lines)
+        self.assertIn("", lines)               # 组间空行 = 纵向分界
+        self.assertEqual(joined.count("┄┄→"), 1)  # 连接符仅存在于组内
+        group2_head = [line for line in lines
+                       if "REVIEWER" in line][0]
+        self.assertFalse(group2_head.startswith("↳"))  # 新组 ≠ 续行
+
+
+class DegradedVerticalTests(unittest.TestCase):
+    """R1 P3：<80 纵向链——块间 ↓/┆ 真值连接行 + ↳ 续行前缀；仍是
+    同一协作组（无组界空行、链序不变），身份与 runtime 不丢。"""
+
+    def _lines(self, count=4, events=(), width=79):
+        return projection.pipeline_lines(
+            template_slots(count), events, tier="DEGRADED", width=width)
+
+    def test_vertical_blocks_with_continuation_prefix(self):
+        lines = self._lines()
+        joined = "\n".join(lines)
+        for role in ("ARCHITECT", "CODER", "TESTER", "REVIEWER"):
+            self.assertIn(role, joined)
+        self.assertEqual(joined.count("↳"), 9)   # 3 个续块 × 3 行
+        self.assertIn("┆", joined)               # 零事件 → 计划连接
+
+    def test_continuation_is_not_a_second_group(self):
+        lines = self._lines()
+        joined = "\n".join(lines)
+        self.assertNotIn("", lines)              # 无组间空行
+        order = [joined.index(role) for role in
+                 ("ARCHITECT", "CODER", "TESTER", "REVIEWER")]
+        self.assertEqual(order, sorted(order))   # 链序保持
+
+    def test_identity_and_runtime_survive_narrow(self):
+        lines = self._lines(width=79)
+        joined = "\n".join(lines)
+        for runtime in ("rt-0", "rt-1", "rt-2", "rt-3"):
+            self.assertIn(runtime, joined)
+        for line in lines:
+            self.assertLessEqual(projection.display_width(line), 79)
+
+
+class ConnectionTruthTests(unittest.TestCase):
+    """R1 P4/§九：连接符真值——相邻绝不蕴含 HANDOFF；──→ 当且仅当真实
+    HANDOFF 事件（stage=产出角色 ∧ runtime=接收方）在场；错位不命中。"""
+
+    def test_observed_handoff_renders_solid_connector(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = (_handoff(0, "architect", "rt-1"),)
+        joined = "\n".join(projection.pipeline_lines(
+            slots_, events, width=100))
+        self.assertIn("──→", joined)
+        self.assertNotIn("┄┄→", joined)
+
+    def test_adjacency_without_handoff_is_planned(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        joined = "\n".join(projection.pipeline_lines(
+            slots_, (), width=100))
+        self.assertIn("┄┄→", joined)
+        self.assertNotIn("──→", joined)   # negative：相邻 ≠ HANDOFF
+
+    def test_misdirected_handoff_misses_the_pair(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"),
+                  slot("reviewer", "rt-2"))
+        wrong_receiver = (_handoff(0, "architect", "rt-2"),)
+        joined = "\n".join(projection.pipeline_lines(
+            slots_, wrong_receiver, width=100))
+        self.assertNotIn("──→", joined)
+
+    def test_reverse_direction_handoff_misses_the_pair(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        reverse = (_handoff(0, "coder", "rt-0"),)
+        joined = "\n".join(projection.pipeline_lines(
+            slots_, reverse, width=100))
+        self.assertIn("┄┄→", joined)
+        self.assertNotIn("──→", joined)
+
+    def test_degraded_vertical_same_truth(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        observed = (_handoff(0, "architect", "rt-1"),)
+        solid = "\n".join(projection.pipeline_lines(
+            slots_, observed, tier="DEGRADED", width=60))
+        self.assertIn("↓", solid)
+        self.assertNotIn("┆", solid)
+        dashed = "\n".join(projection.pipeline_lines(
+            slots_, (), tier="DEGRADED", width=60))
+        self.assertIn("┆", dashed)
+        self.assertNotIn("↓", dashed)
+
+    def test_connection_observed_predicate_is_exact(self):
+        a = slot("architect", "rt-0")
+        b = slot("coder", "rt-1")
+        c = slot("reviewer", "rt-2")
+        hit = (_handoff(0, "architect", "rt-1"),)
+        self.assertTrue(projection.connection_observed(a, b, hit))
+        self.assertFalse(projection.connection_observed(a, b, ()))
+        self.assertFalse(projection.connection_observed(a, c, hit))
+        self.assertFalse(projection.connection_observed(b, c, hit))
+
+
+class DetailWindowTests(unittest.TestCase):
+    """R1 P9-P13/§十：Agent Detail 有界投影窗——Prompt 诚实 —（观察
+    契约冻结，零合成）、Handoff 双向只来自真实事件、Activity 与主屏/
+    Trace 同源同格式器且 ⊆ Trace、Result 只来自 FINISHED+transcript、
+    窗口 ≤ max_lines 且超窗指向 Trace。"""
+
+    def _detail(self, slots_, events, stage="coder", **kwargs):
+        return projection.agent_detail_window(
+            slots_, events, stage=stage, **kwargs)
+
+    def test_prompt_is_honest_dash(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = _slot_events("coder", "rt-1", invoked=True)
+        lines = self._detail(slots_, events)
+        prompt_lines = [line for line in lines if "prompt" in line]
+        self.assertEqual(len(prompt_lines), 1)
+        self.assertTrue(prompt_lines[0].rstrip().endswith("—"))
+
+    def test_handoff_in_and_out_from_real_events(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = ((_handoff(0, "architect", "rt-1"),)
+                  + _slot_events("coder", "rt-1", invoked=True))
+        joined = "\n".join(self._detail(slots_, events))
+        self.assertIn("in", joined)
+        self.assertIn("architect", joined)     # 入向产出方来自事件 stage
+        self.assertIn("EMBEDDED", joined)      # status 原词
+        out_events = events + (_handoff(9, "coder", "rt-x"),)
+        self.assertIn("rt-x", "\n".join(
+            self._detail(slots_, out_events)))
+
+    def test_adjacency_never_invents_handoff(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        lines = self._detail(
+            slots_, _slot_events("coder", "rt-1", invoked=True))
+        handoff_lines = [line for line in lines if "handoff" in line]
+        self.assertEqual(len(handoff_lines), 2)   # in / out
+        for line in handoff_lines:
+            self.assertTrue(line.rstrip().endswith("—"))
+
+    def test_activity_tail_same_source_subset_of_trace(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        many = tuple(
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=i,
+               stage="coder", runtime="rt-1", status="STARTED")
+            for i in range(12))
+        state = build(task="t", slots=slots_, events=many, width=100,
+                      selected_index=1, expanded_stage="coder")
+        detail_text = "\n".join(state.detail_lines)
+
+        def seq_tokens(text):
+            found = set()
+            for chunk in text.split("[")[1:]:
+                digits = chunk.split("]", 1)[0]
+                if digits.isdigit():
+                    found.add(int(digits))
+            return found
+
+        trace_text = "\n".join(state.trace_obs)
+        self.assertTrue(seq_tokens(detail_text) <= seq_tokens(trace_text))
+        # 尾窗：只呈现最近事件，早期 seq 不在 detail；有界窗截尾时
+        # (+k more · T) 指向 Trace（完整历史唯一出口）
+        self.assertNotIn("[0]", detail_text)
+        self.assertIn("[10]", detail_text)
+        self.assertIn("more · T", detail_text)
+
+    def test_result_from_finished_and_transcript(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = (_slot_events("coder", "rt-1", invoked=True,
+                               finished="FAILED")
+                  + (ev(ExecutionEventType.INVOCATION_FINISHED, seq=9,
+                        stage="coder", runtime="rt-1", status="FAILED",
+                        reason="R", duration_ms=1200),))
+        lines = self._detail(slots_, events)
+        result_line = [line for line in lines if "result" in line][0]
+        self.assertIn("FAILED", result_line)
+        self.assertIn("1200ms", result_line)      # 真实 duration
+        outcome = SimpleOutcome(
+            RunStatus.FAILED, None, RuntimeError("boom"),
+            transcript=(transcript_record("coder", status="SUCCESS"),))
+        result_line = [line for line in self._detail(
+            slots_, events, last_outcome=outcome) if "result" in line][0]
+        self.assertIn("step SUCCESS", result_line)  # transcript StepRecord
+
+    def test_result_dash_without_any_fact(self):
+        lines = self._detail((slot("coder", "rt-1"),), ())
+        result_line = [line for line in lines if "result" in line][0]
+        self.assertTrue(result_line.rstrip().endswith("—"))
+
+    def test_state_uses_existing_state_word(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = _slot_events("coder", "rt-1", invoked=True)
+        state_line = [line for line in self._detail(slots_, events)
+                      if "state" in line][0]
+        self.assertIn("RUNNING", state_line)
+        parked = [line for line in self._detail(
+            slots_, events, lifecycle="PARKED") if "state" in line][0]
+        self.assertIn("PARKED", parked)
+
+    def test_window_bound_with_trace_pointer(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        many = tuple(
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=i,
+               stage="coder", runtime="rt-1", status="STARTED")
+            for i in range(12))
+        lines = self._detail(slots_, many)
+        self.assertLessEqual(len(lines), 10)
+        self.assertIn("more · T", lines[-1])
+
+    def test_max_lines_parameter_is_honored(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = _slot_events("coder", "rt-1", invoked=True)
+        lines = self._detail(slots_, events, max_lines=4)
+        self.assertEqual(len(lines), 4)
+        self.assertIn("more · T", lines[-1])
+
+    def test_absent_stage_renders_empty(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        self.assertEqual(self._detail(slots_, (), stage="ghost"), ())
+
+    def test_ascii_mode_maps_new_symbols(self):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        events = ((_handoff(0, "architect", "rt-1"),)
+                  + _slot_events("coder", "rt-1", invoked=True))
+        joined = "\n".join(self._detail(slots_, events, ascii_only=True))
+        for symbol in ("▼", "▲", "▶", "↳", "─", "┄", "↓", "┆", "→"):
+            self.assertNotIn(symbol, joined)
+
+
+class SelectionPurityTests(unittest.TestCase):
+    """R1 P14：selected/expanded 为纯呈现参数——除管线与 detail 外一切
+    投影输出逐字节不变；同入同出确定性。"""
+
+    UNCHANGED = ("header_line", "task_line", "badge", "activity_lines",
+                 "progress_line", "tokens_line", "result_lines",
+                 "context_lines", "trace_obs", "trace_ctrl",
+                 "trace_usage", "lifecycle", "tier")
+
+    def _base(self):
+        events = running_events(("architect", "coder"))
+        return dict(task="t", slots=template_slots(3), events=events,
+                    width=100)
+
+    def test_selection_changes_only_pipeline(self):
+        a = build(**self._base(), selected_index=0)
+        b = build(**self._base(), selected_index=2)
+        self.assertNotEqual(a.collaboration_lines, b.collaboration_lines)
+        self.assertEqual(a.detail_lines, b.detail_lines)  # 均未展开
+        for name in self.UNCHANGED:
+            self.assertEqual(getattr(a, name), getattr(b, name), name)
+
+    def test_expansion_changes_only_pipeline_and_detail(self):
+        a = build(**self._base(), selected_index=1)
+        b = build(**self._base(), selected_index=1,
+                  expanded_stage="coder")
+        self.assertNotEqual(a.collaboration_lines, b.collaboration_lines)
+        self.assertNotEqual(a.detail_lines, b.detail_lines)
+        for name in self.UNCHANGED:
+            self.assertEqual(getattr(a, name), getattr(b, name), name)
+
+    def test_deterministic_repeat(self):
+        kwargs = dict(self._base(), selected_index=1,
+                      expanded_stage="coder")
+        self.assertEqual(build(**kwargs), build(**kwargs))
+
+
+# ------------------- R2: bilingual locale presentation (EN ⇄ ZH)
+
+
+class UiLabelTests(unittest.TestCase):
+    """R2-2（投影半）：_LOCALES/_LABELS 闭集词表 + ui_label 解析律。"""
+
+    def test_locales_closed_pair(self):
+        self.assertEqual(projection._LOCALES, ("en", "zh"))
+
+    def test_en_column_is_canonical_key(self):
+        for key, columns in projection._LABELS.items():
+            self.assertEqual(len(columns), 2)
+            self.assertEqual(columns[0], key)
+
+    def test_en_default_and_unknown_locale_fall_back_to_english(self):
+        for key in ("RUNNING", "TASK", "prompt", "No activity yet"):
+            self.assertEqual(projection.ui_label(key), key)
+            self.assertEqual(projection.ui_label(key, "en"), key)
+            self.assertEqual(projection.ui_label(key, "fr"), key)
+
+    def test_zh_column_values(self):
+        expectations = {
+            "RUNNING": "运行中", "PARKED": "已停驻", "DONE": "已完成",
+            "FAILED": "失败", "WAITING": "等待中", "PAUSED": "已暂停",
+            "ABORTED": "已中止", "NOT_STARTED": "未开始", "IDLE": "空闲",
+            "COMPLETED": "已完成", "TASK": "任务", "prompt": "提示词",
+            "handoff": "交接", "activity": "活动", "result": "结果",
+            "state": "状态", "in": "入", "out": "出",
+        }
+        for key, zh in expectations.items():
+            self.assertEqual(projection.ui_label(key, "zh"), zh, key)
+
+    def test_missing_key_returns_key_verbatim(self):
+        self.assertEqual(projection.ui_label("NOT_A_LABEL", "zh"),
+                         "NOT_A_LABEL")
+
+    def test_state_vocabulary_fully_covered(self):
+        for word in ("RUNNING", "WAITING", "DONE", "FAILED", "PAUSED",
+                     "PARKED", "ABORTED", "NOT_STARTED", "IDLE",
+                     "COMPLETED"):
+            self.assertIn(word, projection._LABELS)
+
+
+def _locale_fixture(**over):
+    """R2 共用投影夹具：2-agent 链——architect 完成（SUCCESS/1200ms/
+    真实 HANDOFF→rt-1）、coder 在途 RUNNING；usage KNOWN。"""
+    slots_ = template_slots(2)
+    events = (
+        ev(ExecutionEventType.STAGE_STARTED, seq=0, stage="architect",
+           runtime="rt-0"),
+        ev(ExecutionEventType.INVOCATION_STARTED, seq=1, stage="architect",
+           runtime="rt-0", status="STARTED"),
+        ev(ExecutionEventType.INVOCATION_FINISHED, seq=2, stage="architect",
+           runtime="rt-0", status="SUCCESS", duration_ms=1200),
+        ev(ExecutionEventType.HANDOFF, seq=3, stage="architect",
+           runtime="rt-1", status="EMBEDDED"),
+        ev(ExecutionEventType.STAGE_STARTED, seq=4, stage="coder",
+           runtime="rt-1"),
+        ev(ExecutionEventType.INVOCATION_STARTED, seq=5, stage="coder",
+           runtime="rt-1", status="STARTED"),
+    )
+    kwargs = dict(
+        task="demo task", slots=slots_, events=events,
+        usage_records=(usage(runtime="rt-0", role="architect"),),
+        width=100)
+    kwargs.update(over)
+    return inputs(**kwargs)
+
+
+class LocaleProjectionTests(unittest.TestCase):
+    """R2-1/R2-3/R2-4/R2-7（投影半）：默认 EN、locale 呈现纯度、
+    事实面不可译。"""
+
+    def test_projectioninputs_locale_defaults_to_en(self):
+        self.assertEqual(_locale_fixture().locale, "en")
+
+    def test_default_equals_explicit_en(self):
+        self.assertEqual(projection.build_projection(_locale_fixture()),
+                         projection.build_projection(_locale_fixture(locale="en")))
+
+    def test_zh_switches_presentation_words_only(self):
+        en = projection.build_projection(_locale_fixture())
+        zh = projection.build_projection(_locale_fixture(locale="zh"))
+        self.assertIn("TASK", en.task_line)
+        self.assertIn("任务", zh.task_line)
+        self.assertIn("demo task", zh.task_line)     # task 原文不译
+        self.assertIn("RUNNING", en.badge)
+        self.assertIn("运行中", zh.badge)
+        self.assertIn("阶段", zh.progress_line)
+        self.assertIn("coder", zh.progress_line)     # 活动阶段名原文
+        self.assertIn("RUNNING", en.header_line)
+        self.assertIn("运行中", zh.header_line)
+        self.assertIn("dual-agent cockpit", zh.header_line)  # identity 不译
+
+    def test_pipeline_state_words_localize_identity_stays(self):
+        zh = projection.build_projection(_locale_fixture(locale="zh"))
+        joined = "\n".join(zh.collaboration_lines)
+        self.assertIn("已完成", joined)              # architect DONE
+        self.assertIn("运行中", joined)              # coder RUNNING
+        self.assertIn("ARCHITECT", joined)           # ROLE 不译
+        self.assertIn("CODER", joined)
+        self.assertIn("rt-0", joined)                # runtime 不译
+        self.assertIn("──→", joined)                 # 真实 HANDOFF 符号不变
+
+    def test_facts_and_trace_identical_across_locales(self):
+        facts_ = (fact(ControlFactType.PAUSE_REQUESTED, seq=0),)
+        en = projection.build_projection(_locale_fixture(facts=facts_))
+        zh = projection.build_projection(
+            _locale_fixture(facts=facts_, locale="zh"))
+        for field in ("trace_obs", "trace_ctrl", "trace_usage",
+                      "lifecycle", "tier"):
+            self.assertEqual(getattr(en, field), getattr(zh, field), field)
+
+    def test_immutable_truth_survives_zh_detail(self):
+        values = _locale_fixture(locale="zh")
+        detail = "\n".join(projection.agent_detail_window(
+            values.slots, values.events, stage="architect", locale="zh"))
+        self.assertIn("▼ ARCHITECT", detail)         # ROLE 不译
+        self.assertIn("→ rt-1 (EMBEDDED)", detail)   # 出向事实原词
+        self.assertIn("SUCCESS · 1200ms", detail)    # 事件 status 原词
+        self.assertIn("[2]", detail)                 # sequence 原样
+        coder = "\n".join(projection.agent_detail_window(
+            values.slots, values.events, stage="coder", locale="zh"))
+        self.assertIn("architect → here (EMBEDDED)", coder)  # 入向原词
+
+    def test_terminal_result_header_keeps_raw_status(self):
+        outcome = SimpleNamespace(
+            status="COMPLETED",
+            final_result=SimpleNamespace(output="done text"),
+            error=None)
+        en = projection.build_projection(_locale_fixture(last_outcome=outcome))
+        zh = projection.build_projection(_locale_fixture(last_outcome=outcome,
+                                             locale="zh"))
+        self.assertEqual(en.result_lines[0], "✓ COMPLETED")
+        self.assertEqual(zh.result_lines[0], "✓ COMPLETED")  # 原词不译
+
+    def test_parked_result_line_localizes(self):
+        outcome = SimpleNamespace(status="PARKED", final_result=None,
+                                  error=None)
+        en = projection.build_projection(_locale_fixture(last_outcome=outcome))
+        zh = projection.build_projection(_locale_fixture(last_outcome=outcome,
+                                             locale="zh"))
+        self.assertEqual(en.result_lines, ("PARKED · awaiting resume",))
+        self.assertEqual(zh.result_lines, ("已停驻 · 等待继续",))
+
+    def test_progress_pause_pending_localizes(self):
+        base = dict(task="t", slots=template_slots(2),
+                    events=running_events(("architect", "coder")),
+                    facts=(fact(ControlFactType.PAUSE_REQUESTED,
+                                seq=0),), width=100)
+        en = build(**base)
+        zh = build(**base, locale="zh")
+        self.assertIn("pause pending", en.progress_line)
+        self.assertIn("暂停待生效", zh.progress_line)
+        self.assertIn("STAGE 0/2", en.progress_line)  # 数字结构原样
+        self.assertIn("阶段 0/2", zh.progress_line)
+
+
+class PresentationLineLocaleTests(unittest.TestCase):
+    """R2 §十一/§十八：短句类呈现词（trace 状态行/worker 第二行/
+    revision 标签/结果溢出行）的 EN/ZH 双列与事实面不译。"""
+
+    def test_trace_status_line_locale(self):
+        en = projection.trace_status_line(False, 3)
+        zh = projection.trace_status_line(False, 3, locale="zh")
+        self.assertEqual(en, "pinned · 3 new events · g/end resumes tail")
+        self.assertEqual(zh, "已钉住 · 3 条新事件 · g/end 恢复跟随")
+        self.assertIn("g/end", zh)                    # 键位字面保留
+
+    def test_worker_failure_second_line_localizes(self):
+        error = RuntimeError("boom")
+        en = projection.worker_failure_lines(error)
+        zh = projection.worker_failure_lines(error, locale="zh")
+        self.assertEqual(en[1], "[Q] quit re-raises the original error")
+        self.assertEqual(zh[1], "[Q] 退出将重新抛出原始错误")
+        self.assertEqual(en[0], zh[0])   # 首行（类型名+消息原文）不译
+
+    def test_revision_pending_label_localizes(self):
+        en = projection.revision_status_lines((), 2)
+        zh = projection.revision_status_lines((), 2, locale="zh")
+        self.assertEqual(en[0], "pending 2")
+        self.assertEqual(zh[0], "待处理 2")
+
+    def test_result_overflow_and_empty_output_lines(self):
+        long_text = " ".join(f"word{i}" for i in range(60))
+        base = dict(task="t", slots=template_slots(2),
+                    events=running_events(("architect", "coder")),
+                    width=100)
+        outcome = SimpleNamespace(
+            status="COMPLETED",
+            final_result=SimpleNamespace(output=long_text), error=None)
+        en = build(**base, last_outcome=outcome)
+        zh = build(**base, last_outcome=outcome, locale="zh")
+        self.assertTrue(any("more lines" in line
+                            for line in en.result_lines))
+        self.assertTrue(any("行未显示" in line
+                            for line in zh.result_lines))
+        empty = SimpleNamespace(status="COMPLETED",
+                                final_result=SimpleNamespace(output=""),
+                                error=None)
+        zh2 = build(**base, last_outcome=empty, locale="zh")
+        self.assertIn("(无文本输出)", "\n".join(zh2.result_lines))
+
+
+class ActivityLocaleTests(unittest.TestCase):
+    """R2 §十一：活动动词短语可译；stage/status/duration 原文拼装。"""
+
+    def test_activity_verbs_localize_facts_stay_raw(self):
+        events = (
+            ev(ExecutionEventType.STAGE_STARTED, seq=0, stage="architect",
+               runtime="rt-0"),
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+               stage="architect", runtime="rt-0", status="STARTED"),
+            ev(ExecutionEventType.INVOCATION_FINISHED, seq=2,
+               stage="architect", runtime="rt-0", status="SUCCESS",
+               duration_ms=1200),
+            ev(ExecutionEventType.STAGE_FINISHED, seq=3, stage="architect",
+               runtime="rt-0"),
+        )
+        en = projection.activity_tail_lines(events)
+        zh = projection.activity_tail_lines(events, locale="zh")
+        self.assertIn("architect stage started", en[0])
+        self.assertIn("architect 阶段已开始", zh[0])
+        self.assertIn("architect finished SUCCESS (1200ms)", en[2])
+        self.assertIn("architect 已完成 SUCCESS (1200ms)", zh[2])
+        self.assertIn("architect stage finished", en[3])
+        self.assertIn("architect 阶段已完成", zh[3])
+        for line_en, line_zh in zip(en, zh):
+            self.assertIn("[", line_zh)              # sequence 锚定原样
+
+    def test_empty_activity_localizes(self):
+        self.assertEqual(projection.activity_tail_lines(()),
+                         ("No activity yet",))
+        self.assertEqual(projection.activity_tail_lines((), locale="zh"),
+                         ("暂无活动",))
+
+
+class DetailLocaleTests(unittest.TestCase):
+    """R2-8：Detail 五标签 + in/out 可译；结构/事实行原样；CJK 标签列
+    display-width 对齐。"""
+
+    def _detail(self, locale):
+        values = _locale_fixture()
+        return projection.agent_detail_window(
+            values.slots, values.events, stage="architect", locale=locale)
+
+    def test_labels_localize_facts_stay_raw(self):
+        en = "\n".join(self._detail("en"))
+        zh = "\n".join(self._detail("zh"))
+        for label in ("prompt", "handoff", "activity", "result", "state"):
+            self.assertIn(label, en)
+        for label in ("提示词", "交接", "活动", "结果", "状态"):
+            self.assertIn(label, zh)
+        self.assertIn(" in  ", en)
+        self.assertIn(" out ", en)
+        self.assertIn("入", zh)
+        self.assertIn("出", zh)
+        self.assertIn("▼ ARCHITECT", zh)
+
+    def test_structure_identical_across_locales(self):
+        self.assertEqual(len(self._detail("en")), len(self._detail("zh")))
+
+    def test_label_value_column_alignment_display_width(self):
+        en_lines = self._detail("en")
+        zh_lines = self._detail("zh")
+        en_prompt = next(line for line in en_lines
+                         if "prompt" in line)
+        zh_prompt = next(line for line in zh_lines
+                         if "提示词" in line)
+
+        def value_column(line):
+            width = 0
+            for character in line:
+                if character == "—":
+                    return width
+                width += projection.display_width(character)
+            return -1
+
+        self.assertEqual(value_column(en_prompt),
+                         value_column(zh_prompt))
+
+
+class PipelineLocaleTests(unittest.TestCase):
+    """R2-9：locale 与布局正交——同输入 EN/ZH 的行数、续行、marker、
+    指针列、连接符完全一致，仅呈现词变化。"""
+
+    _SYMBOLS = ("↳", "▲", "▶", "▼", "──→", "┄┄→", "↓", "┆")
+
+    def _structure(self, lines):
+        return [tuple(line.count(symbol) for symbol in self._SYMBOLS)
+                for line in lines]
+
+    def test_structure_invariant_across_tiers(self):
+        cases = ((2, 100), (3, 100), (4, 100), (3, 89), (4, 140), (2, 79))
+        for count, width in cases:
+            slots_ = template_slots(count)
+            events = running_events(_TEMPLATES[count])
+            tier = projection._tier_for(width)
+            content = (width - 4 if tier == "DEGRADED"
+                       else min(width - 4, 100))
+            common = dict(lifecycle="RUNNING", tier=tier, width=content,
+                          selected_index=1)
+            en = projection.pipeline_lines(slots_, events, **common)
+            zh = projection.pipeline_lines(slots_, events, locale="zh",
+                                           **common)
+            self.assertEqual(len(en), len(zh), (count, width))
+            self.assertEqual(self._structure(en), self._structure(zh),
+                             (count, width))
+            for en_line, zh_line in zip(en, zh):
+                if "▲" in en_line:
+                    # 指针行（空格+▲，无呈现词）逐字节一致
+                    self.assertEqual(en_line, zh_line)
+
+    def test_explicit_en_equals_default(self):
+        slots_ = template_slots(3)
+        events = running_events(_TEMPLATES[3])
+        self.assertEqual(
+            projection.pipeline_lines(slots_, events, tier="MAIN",
+                                      width=96),
+            projection.pipeline_lines(slots_, events, tier="MAIN",
+                                      width=96, locale="en"))
+
+
+class CJKWidthLocaleTests(unittest.TestCase):
+    """R2-10：EN/ZH × 四档 × 2/3/4 agents——一切渲染行不溢出
+    （display_width 逐行 ≤ content width）。"""
+
+    def test_pipeline_and_detail_fit_width_all_tiers(self):
+        for count in (2, 3, 4):
+            slots_ = template_slots(count)
+            events = running_events(_TEMPLATES[count])
+            for width in (79, 89, 100, 140):
+                tier = projection._tier_for(width)
+                content = (width - 4 if tier == "DEGRADED"
+                           else min(width - 4, 100))
+                for locale in ("en", "zh"):
+                    lines = projection.pipeline_lines(
+                        slots_, events, lifecycle="RUNNING", tier=tier,
+                        width=content, locale=locale,
+                        expanded_stage=slots_[0].stage)
+                    self.assertTrue(lines)
+                    for line in lines:
+                        self.assertLessEqual(
+                            projection.display_width(line), content,
+                            (count, width, locale, line))
+                    detail = projection.agent_detail_window(
+                        slots_, events, stage=slots_[0].stage,
+                        lifecycle="RUNNING", width=content, locale=locale)
+                    for line in detail:
+                        self.assertLessEqual(
+                            projection.display_width(line), content,
+                            (count, width, locale, line))
+
+    def test_build_projection_zh_end_to_end_fit(self):
+        state = build(task="任务文本 task text", slots=template_slots(4),
+                      events=running_events(_TEMPLATES[4]), width=79,
+                      expanded_stage="architect", locale="zh")
+        for line in (state.collaboration_lines + state.detail_lines
+                     + state.activity_lines):
+            self.assertLessEqual(projection.display_width(line), 75, line)
+
+
+class AsciiLocaleTests(unittest.TestCase):
+    """R2-11：ascii_only 与 locale 正交——四象限全部可用、互不污染。"""
+
+    _UNICODE_SYMBOLS = ("─", "┄", "↓", "┆", "↳", "▲", "▶", "▼",
+                        "●", "○", "✓", "✗", "❚❚", "▫", "◐", "◉")
+
+    def _fixtures(self):
+        slots_ = template_slots(2)
+        events = (
+            ev(ExecutionEventType.STAGE_STARTED, seq=0, stage="architect",
+               runtime="rt-0"),
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+               stage="architect", runtime="rt-0", status="STARTED"),
+            ev(ExecutionEventType.INVOCATION_FINISHED, seq=2,
+               stage="architect", runtime="rt-0", status="SUCCESS"),
+            ev(ExecutionEventType.HANDOFF, seq=3, stage="architect",
+               runtime="rt-1", status="EMBEDDED"),
+            ev(ExecutionEventType.STAGE_STARTED, seq=4, stage="coder",
+               runtime="rt-1"),
+        )
+        return slots_, events
+
+    def test_four_quadrants(self):
+        slots_, events = self._fixtures()
+        unicode_en = projection.pipeline_lines(slots_, events)
+        unicode_zh = projection.pipeline_lines(slots_, events,
+                                               locale="zh")
+        ascii_en = projection.pipeline_lines(slots_, events,
+                                             ascii_only=True)
+        ascii_zh = projection.pipeline_lines(slots_, events,
+                                             ascii_only=True, locale="zh")
+        # Unicode 象限：符号与 locale 无关
+        self.assertIn("──→", "\n".join(unicode_en))
+        self.assertIn("──→", "\n".join(unicode_zh))
+        # ASCII 象限：零 Unicode 符号残留（含 ZH）
+        joined = "\n".join(ascii_zh)
+        for symbol in self._UNICODE_SYMBOLS:
+            self.assertNotIn(symbol, joined)
+        self.assertIn("已完成", joined)               # ZH 文字合法在场
+        self.assertIn("等待中", joined)
+        # EN ASCII 仍是 EN 词
+        self.assertIn("DONE", "\n".join(ascii_en))
+        # 显式 en 与默认逐字节一致
+        self.assertEqual(unicode_en,
+                         projection.pipeline_lines(slots_, events,
+                                                   locale="en"))
+
+    def test_detail_ascii_zh_quadrant(self):
+        slots_, events = self._fixtures()
+        text = "\n".join(projection.agent_detail_window(
+            slots_, events, stage="architect", ascii_only=True,
+            locale="zh"))
+        for symbol in ("▼", "●", "✓"):
+            self.assertNotIn(symbol, text)
+        self.assertIn("提示词", text)
+        self.assertIn("ARCHITECT", text)
+
+
+# ------------------- CU-TUI-INPUT: funnel dock input + zone budgets
+
+
+class FunnelInputLineTests(unittest.TestCase):
+    """CU-TUI-INPUT A1：漏斗输入回显行——迁入底部 dock 的唯一回显面。
+    安全门/宽度截断与既有首屏输入行同律；尾部光标 | 由调用方追加
+    （TUI-4 composer 惯例，投影层不产光标）。"""
+
+    def test_basic_echo_line(self):
+        self.assertEqual(projection.funnel_input_line("fix the bug"),
+                         "> fix the bug")
+
+    def test_empty_buffer_echoes_bare_prompt(self):
+        self.assertEqual(projection.funnel_input_line(""), "> ")
+
+    def test_unsafe_buffer_redacted(self):
+        secret = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+        line = projection.funnel_input_line(secret)
+        self.assertEqual(line, "> [redacted: unsafe content]")
+        self.assertNotIn(secret, line)
+
+    def test_long_buffer_truncated_to_width(self):
+        line = projection.funnel_input_line("x" * 200, width=40)
+        self.assertLessEqual(projection.display_width(line), 40)
+        self.assertTrue(line.startswith("> "))
+        self.assertTrue(line.endswith("..."))
+
+    def test_ascii_mode_keeps_prompt_shape(self):
+        self.assertEqual(
+            projection.funnel_input_line("task", ascii_only=True),
+            "> task")
+
+    def test_deterministic_repeat(self):
+        self.assertEqual(projection.funnel_input_line("task"),
+                         projection.funnel_input_line("task"))
+
+
+class FunnelKeysHintTests(unittest.TestCase):
+    """CU-TUI-INPUT A1：两键提示行——迁入 dock-controls 的唯一提示面
+    （漏斗呈现 EN 冻结，R2 ERRATA 同律）。"""
+
+    def test_hint_line(self):
+        self.assertEqual(projection.funnel_keys_hint(),
+                         "Enter start · q quit")
+
+    def test_ascii_keeps_middle_dot(self):
+        # · 不在 ASCII 降级表（既有行为保持）——ascii 变体逐字节相同
+        self.assertEqual(projection.funnel_keys_hint(ascii_only=True),
+                         projection.funnel_keys_hint())
+
+
+class FunnelFirstScreenDockTests(unittest.TestCase):
+    """CU-TUI-INPUT A1：include_input=False = 输入迁入底部 dock 的
+    首屏组装形态——body 省略输入行与两键提示（回显入 dock-input、
+    提示入 dock-controls）；默认 True 与既有输出逐字节一致。"""
+
+    OK = composition((binding("architect", "codex-cli", "openai"),
+                      binding("coder", "claude-cli", "anthropic")))
+
+    def test_default_is_byte_identical_to_legacy(self):
+        self.assertEqual(
+            projection.funnel_first_screen("2.5.0", self.OK, "task"),
+            ("dual-agent cockpit · 2.5.0",
+             "Describe the collaboration task",
+             "> task",
+             "Collaboration plan (default)",
+             "  architect  ← codex-cli · openai",
+             "  coder      ← claude-cli · anthropic",
+             "Enter start · q quit"))
+
+    def test_dock_shape_omits_input_and_keys_hint(self):
+        lines = projection.funnel_first_screen(
+            "2.5.0", self.OK, "task", include_input=False)
+        self.assertEqual(lines, (
+            "dual-agent cockpit · 2.5.0",
+            "Describe the collaboration task",
+            "Collaboration plan (default)",
+            "  architect  ← codex-cli · openai",
+            "  coder      ← claude-cli · anthropic"))
+        joined = "\n".join(lines)
+        self.assertNotIn("> task", joined)
+        self.assertNotIn("Enter start", joined)
+
+    def test_dock_shape_blocked_composition(self):
+        blocked = composition(
+            blocked_reason="default collaboration needs at least 2 "
+                           "VERIFIED runtimes (found 1)")
+        lines = projection.funnel_first_screen(
+            "2.5.0", blocked, "", include_input=False)
+        self.assertEqual(lines, (
+            "dual-agent cockpit · 2.5.0",
+            "Describe the collaboration task",
+            "default collaboration needs at least 2 VERIFIED runtimes "
+            "(found 1)"))
+
+    def test_dock_shape_ascii(self):
+        lines = projection.funnel_first_screen(
+            "2.5.0", self.OK, "t", ascii_only=True, include_input=False)
+        joined = "\n".join(lines)
+        self.assertNotIn("←", joined)
+        self.assertIn("<-", joined)
+
+
+class DetailBudgetTests(unittest.TestCase):
+    """CU-TUI-INPUT A4：ProjectionInputs.detail_max_lines 呈现参数
+    （None=默认 10 既有行为；int=有界窗收窄上限）——TUI 高度预算的
+    投影面，纯呈现、零事实触碰。"""
+
+    def _budget_fixture(self, **over):
+        slots_ = (slot("architect", "rt-0"), slot("coder", "rt-1"))
+        many = tuple(
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=i,
+               stage="coder", runtime="rt-1", status="STARTED")
+            for i in range(12))
+        kwargs = dict(task="t", slots=slots_, events=many, width=100,
+                      selected_index=1, expanded_stage="coder")
+        kwargs.update(over)
+        return build(**kwargs)
+
+    def test_none_keeps_default_window_bound(self):
+        state = self._budget_fixture()
+        explicit = self._budget_fixture(detail_max_lines=None)
+        self.assertEqual(state.detail_lines, explicit.detail_lines)
+        self.assertLessEqual(len(state.detail_lines), 10)
+
+    def test_int_shrinks_window_with_trace_pointer(self):
+        state = self._budget_fixture(detail_max_lines=5)
+        self.assertEqual(len(state.detail_lines), 5)
+        self.assertIn("more · T", state.detail_lines[-1])
+
+    def test_budget_above_natural_leaves_window_uncapped(self):
+        # 预算 ≥ 自然高度 → 不收窄（逐字节等于默认形态）
+        natural = self._budget_fixture()
+        state = self._budget_fixture(detail_max_lines=10)
+        self.assertEqual(state.detail_lines, natural.detail_lines)
+
+    def test_budget_does_not_touch_other_fields(self):
+        base = self._budget_fixture()
+        shrunk = self._budget_fixture(detail_max_lines=5)
+        self.assertEqual(base.collaboration_lines,
+                         shrunk.collaboration_lines)
+        self.assertEqual(base.activity_lines, shrunk.activity_lines)
+        self.assertEqual(base.result_lines, shrunk.result_lines)
+        self.assertEqual(base.progress_line, shrunk.progress_line)
+        self.assertEqual(base.tokens_line, shrunk.tokens_line)
+
+
+class ResultBudgetTests(unittest.TestCase):
+    """CU-TUI-INPUT A4：ProjectionInputs.result_max_lines 呈现参数
+    （None=既有行为；int=收窄——头行保留 + (+N more lines) 诚实溢出
+    标记）。交付物绝不整区隐没。"""
+
+    def _outcome_fixture(self, **over):
+        # 每词 90 列 → textwrap(96) 每词恰一行：5 词 = 5 内容行（确定
+        # 性包装，既有形态 = 头行 + 3 行 + "(+2 more lines)"）
+        output = " ".join("x" * 90 for _ in range(5))
+        outcome = SimpleOutcome(RunStatus.COMPLETED,
+                                SimpleResult(output), None)
+        kwargs = dict(task="t", slots=template_slots(2),
+                      events=running_events(("architect", "coder")),
+                      width=100, last_outcome=outcome)
+        kwargs.update(over)
+        return build(**kwargs)
+
+    def test_none_keeps_legacy_shape(self):
+        state = self._outcome_fixture()
+        explicit = self._outcome_fixture(result_max_lines=None)
+        self.assertEqual(state.result_lines, explicit.result_lines)
+        # 既有形态：头行 + ≤3 内容行 + 溢出标记
+        self.assertEqual(len(state.result_lines), 5)
+        self.assertTrue(state.result_lines[0].startswith("✓ COMPLETED"))
+        self.assertEqual(state.result_lines[-1], "(+2 more lines)")
+
+    def test_int_caps_to_header_plus_marker(self):
+        state = self._outcome_fixture(result_max_lines=2)
+        self.assertEqual(len(state.result_lines), 2)
+        self.assertTrue(state.result_lines[0].startswith("✓ COMPLETED"))
+        # 折叠行数 = 头行之外的全部既有行（3 内容行 + 旧溢出标记）
+        self.assertEqual(state.result_lines[1], "(+4 more lines)")
+
+    def test_status_word_is_never_dropped(self):
+        # 收窄永不吞头行（RunOutcome.status 事实直显）
+        for cap in (2, 3, 4):
+            state = self._outcome_fixture(result_max_lines=cap)
+            self.assertTrue(state.result_lines[0].startswith("✓ COMPLETED"))
+
+    def test_budget_does_not_touch_other_fields(self):
+        base = self._outcome_fixture()
+        shrunk = self._outcome_fixture(result_max_lines=2)
+        self.assertEqual(base.collaboration_lines,
+                         shrunk.collaboration_lines)
+        self.assertEqual(base.detail_lines, shrunk.detail_lines)
+        self.assertEqual(base.activity_lines, shrunk.activity_lines)
+        self.assertEqual(base.tokens_line, shrunk.tokens_line)
 
 
 if __name__ == "__main__":
