@@ -1944,7 +1944,9 @@ class R1ExpansionPilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._cockpit_expanded_stage,
                              "step-0-architect")
             self.assertIn("▼ ARCHITECT", app.detail_text)
-            self.assertIn("▼ ● ARCHITECT", app.agent_text)
+            # 展开标记在 architect 行（脉冲相位 ●/◉ 由 tick 派生，两种皆合法）
+            self.assertTrue("▼ ● ARCHITECT" in app.agent_text
+                            or "▼ ◉ ARCHITECT" in app.agent_text)
             self.assertTrue(app.query_one("#detail-zone").display)
             gate.release.set()
 
