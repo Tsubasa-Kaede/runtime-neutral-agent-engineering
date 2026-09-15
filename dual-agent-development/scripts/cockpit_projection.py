@@ -169,6 +169,11 @@ _LABELS = {
     # CU-TUI-INPUT A3：COMMAND 模式标签（TUI 消费；单键命令面的
     # 呈现标记，替代误导性的 shell 风格 ">" 提示符）
     "command": ("command", "命令"),
+    # CU-INPUT-2 W8（C2-R1）：COMMAND 态转向提示——A3 [COMMAND] 标签的
+    # 前提反转（普通字符从 no-op 变为即输入）；enter 键字母恒 EN
+    # （既有 mandates：键字母不翻译）
+    "type to steer · enter submits": ("type to steer · enter submits",
+                                      "输入即可转向 · enter 提交"),
 }
 
 
