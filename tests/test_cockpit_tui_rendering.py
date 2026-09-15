@@ -3492,5 +3492,393 @@ class ComposerTruncationPilotTests(unittest.IsolatedAsyncioTestCase):
             gate.release.set()
 
 
+class UX2R2SlashPilotTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R2：slash 命令面——注册表四 kind 路由 + 诚实 unknown +
+    local 命令零控制面依赖 + /target 两态。意图 COMMAND 走
+    _slash_execute；真相仍唯一经控制面裁决（local 类零外发）。"""
+
+    async def _type(self, pilot, text):
+        for character in text:
+            await pilot.press(character)
+
+    async def test_slash_pause_dispatches_with_receipt_in_log(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/pause")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [("PAUSE", None, None)])
+            self.assertEqual(app._composer_text(), "")
+            self.assertIn("PAUSE", app.log_text)     # 回执行 Log
+            gate.release.set()
+
+    async def test_slash_resume_dispatches(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/resume")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [("RESUME", None, None)])
+            gate.release.set()
+
+    async def test_slash_abort_goes_through_confirm_bar(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/abort")
+            await pilot.press("enter")
+            await pilot.pause()
+            # 既有 a 路径：先确认、零直接外发
+            self.assertEqual(recorded, [])
+            self.assertEqual(app._cockpit_mode, "confirm")
+            self.assertEqual(app._dock_receipt_line(), "abort? (y/n)")
+            await pilot.press("y")
+            await pilot.pause()
+            self.assertEqual(recorded, [("ABORT", None, None)])
+            self.assertEqual(app._cockpit_mode, "command")
+            gate.release.set()
+
+    async def test_slash_trace_opens_readonly_screen(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/trace")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, cockpit_tui.TraceScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, cockpit_tui.TraceScreen)
+            gate.release.set()
+
+    async def test_slash_target_no_arg_toggles_two_states(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/target")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [])          # local：零外发
+            self.assertEqual(app._cockpit_revise_target, "SUBMISSION")
+            self.assertIn("SUBMISSION", app.log_text)
+            await self._type(pilot, "/target")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_revise_target,
+                             "NEXT_INVOCATION")
+            gate.release.set()
+
+    async def test_slash_target_agent_arg_is_honest_not_implemented(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/target architect")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [])
+            self.assertEqual(app._cockpit_revise_target,
+                             "NEXT_INVOCATION")     # 不变
+            self.assertIn("not implemented", app.log_text)
+            gate.release.set()
+
+    async def test_slash_lang_and_context_are_local_zero_dispatch(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            show_context_before = app._cockpit_show_context
+            await self._type(pilot, "/lang")
+            await pilot.press("enter")
+            await self._type(pilot, "/context")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [])
+            self.assertEqual(app._cockpit_locale, "zh")
+            self.assertNotEqual(app._cockpit_show_context,
+                                show_context_before)
+            gate.release.set()
+
+    async def test_slash_help_lists_all_nine_en_frozen(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/help")
+            await pilot.press("enter")
+            await pilot.pause()
+            lines = app.log_text.splitlines()
+            self.assertEqual(len(lines), 9)          # 恰九行、零 echo
+            for name in ("pause", "resume", "abort", "trace", "help",
+                         "lang", "context", "clear", "target"):
+                self.assertTrue(
+                    any(line.startswith(f"/{name} — ") for line in lines),
+                    name)
+            gate.release.set()
+
+    async def test_slash_clear_clears_log_display_only(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "hello")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertNotEqual(app.log_text, "")
+            await self._type(pilot, "/clear")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app.log_text, "")       # 有损缓存清显示
+            # last_submit 召回源独立保留（E 召回在 /clear 后仍可用）
+            self.assertEqual(app._cockpit_last_submit, "hello")
+            gate.release.set()
+
+    async def test_unknown_slash_is_honest_noop_zero_dispatch(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/nope")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [])
+            self.assertEqual(app._composer_text(), "")
+            self.assertIn("unknown command", app.log_text)
+            gate.release.set()
+
+    async def test_local_slash_works_without_control_dispatcher(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)           # control 缺席
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/lang")
+            await pilot.press("enter")
+            await pilot.pause()
+            # local 命令不依赖控制面；缓冲照常清空
+            self.assertEqual(app._cockpit_locale, "zh")
+            self.assertEqual(app._composer_text(), "")
+            gate.release.set()
+
+    async def test_dispatch_slash_without_control_is_silent_noop(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)           # control 缺席
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/pause")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIsNone(app._cockpit_receipt)  # 零回执零伪造
+            gate.release.set()
+
+
+class UX2R2SlashHintPilotTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R2：autocomplete 最小面——slash 输入期 hint 行呈现注册表
+    候选；非 slash 键入保持既有动词行（hint 行恒一行有界）。"""
+
+    async def _type(self, pilot, text):
+        for character in text:
+            await pilot.press(character)
+
+    async def test_slash_prefix_narrows_candidates(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/p")
+            await pilot.pause()
+            self.assertEqual(app._dock_controls_line(), "/pause")
+            await self._type(pilot, "ause")
+            await pilot.pause()
+            self.assertEqual(app._dock_controls_line(), "/pause")
+            gate.release.set()
+
+    async def test_slash_t_shows_trace_and_target(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/t")
+            await pilot.pause()
+            self.assertEqual(app._dock_controls_line(),
+                             "/trace · /target")
+            gate.release.set()
+
+    async def test_unknown_slash_prefix_hints_unknown(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "/zz")
+            await pilot.pause()
+            self.assertIn("unknown command",
+                          app._dock_controls_line())
+            gate.release.set()
+
+    async def test_non_slash_typing_keeps_verb_hint(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "hi")
+            await pilot.pause()
+            self.assertTrue(app._dock_controls_line().startswith(
+                "enter send · ctrl+j newline"))
+            gate.release.set()
+
+    async def test_slash_typing_never_full_projection(self):
+        # AC3 延续：slash 键击只走局部 dock 刷新，零 build_projection
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        counter = []
+        original = cockpit_tui.build_projection
+
+        def counting(values):
+            counter.append(len(counter))
+            return original(values)
+
+        with mock.patch.object(cockpit_tui.CockpitApp, "set_interval",
+                               lambda self, *args, **kwargs: None):
+            async with app.run_test(size=(100, 30)) as pilot:
+                with mock.patch.object(cockpit_tui, "build_projection",
+                                       counting):
+                    await pilot.pause()
+                    app._refresh()
+                    settled = len(counter)
+                    await self._type(pilot, "/pause")
+                    await pilot.pause()
+                    self.assertEqual(len(counter), settled)
+        gate.release.set()
+
+
+class UX2R2RevisionRecallPilotTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R2：E 召回改写——REVISION 语义（同 REVISE 通道、新
+    command_id 载荷、echo 词 you · revise）；gate 保护无提交场景；
+    ESC 撤销召回态。"""
+
+    async def _type(self, pilot, text):
+        for character in text:
+            await pilot.press(character)
+
+    async def test_e_recall_edits_prior_submission_as_revision(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "fix api")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                recorded, [("REVISE", "fix api", "NEXT_INVOCATION")])
+            await pilot.press("e")          # 空缓冲 + 有历史 → 召回
+            await pilot.pause()
+            self.assertEqual(app._composer_text(), "fix api")
+            self.assertTrue(app._cockpit_revision_recall)
+            await self._type(pilot, " now")
+            await pilot.press("enter")
+            await pilot.pause()
+            # 同一 REVISE 通道（意图只决定 echo 词条与召回呈现）
+            self.assertEqual(
+                recorded[1], ("REVISE", "fix api now",
+                              "NEXT_INVOCATION"))
+            self.assertIn("you · revise", app.log_text)
+            gate.release.set()
+
+    async def test_e_without_prior_submission_is_plain_text(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("e")          # gate：无历史提交 → 文字
+            await pilot.pause()
+            self.assertEqual(app._composer_text(), "e")
+            self.assertFalse(app._cockpit_revision_recall)
+            gate.release.set()
+
+    async def test_escape_cancels_recall_state(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "fix api")
+            await pilot.press("enter")
+            await pilot.press("e")          # 召回
+            await pilot.press("escape")     # 放弃改写（清稿+撤召回态）
+            await pilot.pause()
+            self.assertEqual(app._composer_text(), "")
+            self.assertFalse(app._cockpit_revision_recall)
+            await self._type(pilot, "new text")
+            await pilot.press("enter")
+            await pilot.pause()
+            # 撤销后的提交回 STEER 词条
+            self.assertIn("you · steer", app.log_text)
+            self.assertNotIn("you · revise", app.log_text)
+            gate.release.set()
+
+    async def test_edit_hint_gated_on_real_availability(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            self.assertNotIn("[E]dit", app._dock_controls_line())
+            await self._type(pilot, "hello")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIn("[E]dit", app._dock_controls_line())
+            gate.release.set()
+
+    async def test_terminal_hint_omits_edit(self):
+        gate = _Gate()
+        session = _LiveSession()
+        session.terminal = RunStatus.COMPLETED
+        session.last_outcome = _outcome(RunStatus.COMPLETED)
+        app = make_app(
+            driver=gate.driver, session=session,
+            control=make_control(
+                [], receipt_result("REJECTED",
+                                   reason="ALREADY_TERMINAL")))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await self._type(pilot, "done")
+            await pilot.press("enter")     # 终态诚实拒绝（last_submit 置）
+            await pilot.pause()
+            self.assertEqual(app._cockpit_last_submit, "done")
+            self.assertNotIn("[E]dit", app._dock_controls_line())
+            gate.release.set()
+
+
+class UX2R2FunnelSlashFrozenTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R2：漏斗判定冻结——Start 前斜杠是任务文本域（恒 TASK），
+    绝不触发命令路由。"""
+
+    async def test_slash_text_in_funnel_is_task_not_command(self):
+        start = _StartRecorder([composed_run_double()])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            for character in "/pause":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await pilot.pause()
+            # 漏斗把 "/pause" 原文当任务提交（判定逻辑零改动）
+            self.assertEqual(start.calls[0][0], "/pause")
+
+
 if __name__ == "__main__":
     unittest.main()

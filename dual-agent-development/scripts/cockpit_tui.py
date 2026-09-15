@@ -43,7 +43,15 @@ from __future__ import annotations
 import sys
 import threading
 
-from cockpit_input import classify_submit
+from cockpit_input import (
+    INTENT_COMMAND,
+    INTENT_REVISION,
+    SLASH_REGISTRY,
+    classify_submit,
+    parse_slash,
+    slash_candidates,
+    slash_help_lines,
+)
 from cockpit_projection import (
     AgentSlotView,
     ProjectionInputs,
@@ -99,8 +107,9 @@ _TARGETS = ("NEXT_INVOCATION", "SUBMISSION")
 # UX2-R1（DESIGN LOCK v1.1 原则 5）：普通文字就是文字，命令降权为
 # 空缓冲 hidden shortcuts——composer 缓冲为空时这些裸键保持既有
 # 命令语义（六键契约降权不降义）；缓冲非空时全部归文本本体
-# （"quick fix" 的 q、"parse" 的 p 均为文字）。e 不再是命令：
-# "打开 composer" 结构性无意义（召回编辑是 R2 /revise 语义）。
+# （"quick fix" 的 q、"parse" 的 p 均为文字）。UX2-R2：e 召回最近
+# 提交供改写（REVISION 语义——gate=空缓冲 ∧ 存在历史提交），
+# 不入裸命令键集（无历史提交时 e 是文字本体）。
 _BARE_COMMAND_KEYS = frozenset(("p", "r", "a", "q", "t", "c", "l", "L"))
 
 # RUNNING 观察区选择器（漏斗态整组隐藏，Start 后整组复现）。
@@ -228,12 +237,24 @@ def _build_classes() -> None:
                 self.insert("\n")
                 return
             if key == "escape":
-                # 清稿（单一层级——常驻 composer 无"退出"目标）
+                # 清稿（单一层级——常驻 composer 无"退出"目标）；
+                # 同时撤销 E 召回态（ESC = 放弃改写）
                 event.prevent_default()
                 event.stop()
+                app._cockpit_revision_recall = False
                 if self.text:
                     self.text = ""
                     app._refresh_dock()
+                return
+            if (not self.text and key == "e"
+                    and app._cockpit_last_submit):
+                # UX2-R2：E 召回（空缓冲且存在历史提交）——载入最近
+                # 提交原文供改写，下次 Enter 分类 REVISION；无历史提交
+                # 时 e 是文字本体（gate 保护）。终态/Trace 顶由调用
+                # 面收敛（hint 不呈现 [E]dit；Trace 顶焦点不在 composer）。
+                event.prevent_default()
+                event.stop()
+                app._revision_recall()
                 return
             if (not self.text and key in _BARE_COMMAND_KEYS
                     and event.character is not None):
@@ -352,6 +373,13 @@ def _build_classes() -> None:
             # 失，重启回 en；绝不入 RunState/账本/EventIndex/UsageLog/
             # 执行请求，绝不写回任何事实源。
             self._cockpit_locale = "en"
+            # UX2-R2 呈现态：E 召回（最近提交原文镜像——echo 缓存
+            # UI 自有，绝不触碰 pending/队列真相；改写提交仍走 REVISE
+            # 铸造新 command_id）与 slash hint 上下文旗标（hint 行恰
+            # 在进入/变化/离开 slash 输入时刷新 dock 行）。零事实写回。
+            self._cockpit_last_submit = ""
+            self._cockpit_revision_recall = False
+            self._cockpit_slash_hint = False
             # 渲染文本快照（funnel_text 先例：属性镜像便于测试断言）
             self.header_text = ""
             self.task_text = ""
@@ -467,6 +495,14 @@ def _build_classes() -> None:
             # BINDING 处理，覆盖不了删除/粘贴类编辑。
             if self._funnel_pre_start():
                 self._funnel_after_edit()
+                return
+            # UX2-R2：slash 上下文提示——恰在进入/变化/离开 slash 输入
+            # 时刷新一次 dock hint 行（局部 _refresh_dock，零投影——
+            # AC3 边界延续；非 slash 普通键击保持零 dock 扰动）。
+            in_slash = self._composer_text().startswith("/")
+            if in_slash or self._cockpit_slash_hint:
+                self._cockpit_slash_hint = in_slash
+                self._refresh_dock()
 
         # ------------------------------------------------ 数据
 
@@ -721,24 +757,43 @@ def _build_classes() -> None:
                     label = label[1:]
                 return f"[{key[0]}]{label}"
 
+            # UX2-R2：slash 输入上下文——hint 行临时呈现注册表候选
+            # （autocomplete 最小实现，无补全键）；零候选=未知命令
+            # 诚实提示。非 slash 输入保持既有动词行（下方）。
+            composer_text = self._composer_text()
+            if composer_text.startswith("/"):
+                prefix = composer_text[1:].split(" ")[0]
+                matches = slash_candidates(prefix)
+                if not matches:
+                    return word(
+                        "unknown command · /help lists commands")
+                return " · ".join(f"/{name}" for name in matches)
+
             submit = word("enter send · ctrl+j newline")
             language = "[L] EN" if locale == "zh" else "[L]中文"
             target = self._cockpit_revise_target
             lifecycle = getattr(
                 getattr(self, "last_state", None), "lifecycle", None)
+            # UX2-R2：[E]dit（召回最近提交改写）——真实可用性呈现：
+            # 存在历史提交且非终态才在场（终态 steer 诚实塌缩）。
+            edit = (verb("Edit")
+                    if (self._cockpit_last_submit
+                        and lifecycle not in
+                        _TERMINAL_LIFECYCLE_HINTS)
+                    else "")
             if self._cockpit_mode == MODE_CONFIRM:
                 line = word("abort? · y confirm · n/esc cancel")
             elif lifecycle in ("PAUSED", "PARKED"):
-                line = (f"{submit} {verb('Resume')} {verb('Abort')} "
-                        f"{verb('Trace')} {language} {verb('Quit')} "
-                        f"{word('→')} {target}")
+                line = (f"{submit} {edit} {verb('Resume')} "
+                        f"{verb('Abort')} {verb('Trace')} {language} "
+                        f"{verb('Quit')} {word('→')} {target}")
             elif lifecycle in _TERMINAL_LIFECYCLE_HINTS:
                 line = (f"{submit} {verb('Trace')} {language} "
                         f"{verb('Quit')} {word('→')} {target}")
             else:
-                line = (f"{submit} {verb('Pause')} {verb('Abort')} "
-                        f"{verb('Trace')} {language} {verb('Quit')} "
-                        f"{word('→')} {target}")
+                line = (f"{submit} {edit} {verb('Pause')} "
+                        f"{verb('Abort')} {verb('Trace')} {language} "
+                        f"{verb('Quit')} {word('→')} {target}")
             if self.size.width >= 140:
                 line += f" {verb('Context')}"
             return line
@@ -783,34 +838,124 @@ def _build_classes() -> None:
             del self._cockpit_log_lines[:-_LOG_RING_LINES]
             self.log_text = "\n".join(self._cockpit_log_lines)
 
-        def _echo_line(self, text: str) -> str:
-            """提交回显行（echo 源 = 用户提交原文，UI 自有呈现态）。"""
-            label = ui_label("you · steer", self._cockpit_locale)
+        def _echo_line(self, text: str, intent: str = "STEER") -> str:
+            """提交回显行（echo 源 = 用户提交原文，UI 自有呈现态）。
+
+            R2：REVISION 召回改写走 "you · revise" 词条（Log 闭集
+            纪律——行词全经投影层词表）。"""
+            label_key = ("you · revise"
+                         if intent == INTENT_REVISION else "you · steer")
+            label = ui_label(label_key, self._cockpit_locale)
             return f"{label} [{self._cockpit_revise_target}] {text}"
 
         def _composer_submit(self) -> None:
             """Enter 提交（常驻 composer 唯一提交径）。
 
-            空白 no-op（既有语义）；dispatcher 缺席 no-op（零回执零
-            伪造，缓冲保持）。提交 = echo 行入 Log + REVISE dispatch +
-            回执行入 Log；缓冲清空、composer 原地不动（AC1）。意图
-            经 cockpit_input 分类（R1 真子集：Start 后恒 STEER）。
-            accepted ≠ applied ≠ honored——applied 只在 Trace CTRL
-            事实面，Log 回执行只呈现同步裁决结果。"""
+            空白 no-op（既有语义）。R2 意图路由：COMMAND → slash 执行
+            （注册表封闭集，不依赖控制面在场——local 命令在任何态
+            可用）；STEER/REVISION → 既有 REVISE 通道（同一 dispatch，
+            分类只决定 echo 词条；dispatcher 缺席诚实 no-op、缓冲
+            保持）。提交后镜像 last_submit（E 召回源）。accepted ≠
+            applied ≠ honored——applied 只在 Trace CTRL 事实面。"""
             composer = self.query("#composer")
             text = composer[0].text if composer else ""
-            if not text.strip() or self._cockpit_control is None:
+            if not text.strip():
                 return
             intent = classify_submit(
                 funnel_pre_start=self._funnel_pre_start(),
-                text=text)
-            self._log_append(self._echo_line(text))
+                text=text,
+                revision_recall=self._cockpit_revision_recall)
+            self._cockpit_revision_recall = False
+            if intent == INTENT_COMMAND:
+                name, arg = parse_slash(text)
+                self._slash_execute(name, arg)
+                if composer:
+                    composer[0].text = ""
+                self._refresh_dock()
+                return
+            if self._cockpit_control is None:
+                return
+            self._cockpit_last_submit = text
+            self._log_append(self._echo_line(text, intent))
             result = self._dispatch(
                 "REVISE", text=text,
                 target=self._cockpit_revise_target)
             if result is not None and composer:
                 composer[0].text = ""
             self._refresh_dock()
+
+        def _revision_recall(self) -> None:
+            """E（空缓冲）召回最近提交原文入 composer 供改写。
+
+            召回源是 UI 自有 echo 镜像（非事实源读回）；改写后的
+            提交仍是新的 REVISE（新 command_id），绝不触碰 pending/
+            队列真相。设置 recall 态使下次 Enter 分类 REVISION。"""
+            if not self._cockpit_last_submit:
+                self._log_append(ui_label(
+                    "no prior submission · type to steer",
+                    self._cockpit_locale))
+                self._refresh_dock()
+                return
+            composer = self.query("#composer")
+            if composer:
+                composer[0].text = self._cockpit_last_submit
+                composer[0].move_cursor(composer[0].document.end)
+            self._cockpit_revision_recall = True
+            self._refresh_dock()
+
+        def _slash_execute(self, name, arg) -> None:
+            """Slash 命令执行（R2 封闭注册表，恰四 kind）。
+
+            dispatch 类走既有 _dispatch（控制面唯一裁决、回执行
+            Log）；confirm 类走既有 a 路径（确认条）；screen 类走既有
+            t 路径（推屏）；local 类纯呈现切换（零外发）。未知命令
+            诚实反馈、零外发。/target <agent> 明确不实现（Lock C）。"""
+            spec = SLASH_REGISTRY.get(name)
+            if spec is None:
+                self._log_append(ui_label(
+                    "unknown command · /help lists commands",
+                    self._cockpit_locale))
+                return
+            kind = spec["kind"]
+            if kind == "dispatch":
+                self._dispatch(spec["dispatch_kind"])
+                self._refresh()
+            elif kind == "confirm":
+                self._cockpit_mode = MODE_CONFIRM
+                self._refresh()
+            elif kind == "screen":
+                self.push_screen(TraceScreen())
+            elif name == "lang":
+                # local：与 l/L 裸键同径（零推进切换）
+                self._cockpit_locale = (
+                    "zh" if self._cockpit_locale == "en" else "en")
+                self._refresh(advance_tick=False)
+            elif name == "context":
+                self._cockpit_show_context = not self._cockpit_show_context
+                self._refresh()
+            elif name == "clear":
+                # Log 是有损派生缓存（D 裁决）：清显示不触碰事实源；
+                # last_submit 召回源独立保留。
+                self.query_one("#collab-log").clear()
+                self._cockpit_log_lines = []
+                self.log_text = ""
+            elif name == "help":
+                # EN 冻结面（漏斗 R2 ERRATA 同律——命令名不译）
+                for line in slash_help_lines():
+                    self._log_append(line)
+            elif name == "target":
+                if arg:
+                    self._log_append(ui_label(
+                        "/target <agent> is not implemented",
+                        self._cockpit_locale))
+                else:
+                    # 无参：queue ⇄ prompt 二选一（tab 同径）
+                    other = [item for item in _TARGETS
+                             if item != self._cockpit_revise_target]
+                    self._cockpit_revise_target = other[0]
+                    self._log_append(
+                        f'{ui_label("→", self._cockpit_locale)} '
+                        f'{self._cockpit_revise_target}')
 
         # ------------------------------------------------ 首跑漏斗（CU-TUI-5）
 

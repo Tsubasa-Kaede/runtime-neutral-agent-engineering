@@ -167,6 +167,19 @@ _LABELS = {
     "enter send · ctrl+j newline": ("enter send · ctrl+j newline",
                                     "回车发送 · ctrl+j 换行"),
     "you · steer": ("you · steer", "你 · 转向"),
+    # UX2-R2：E 召回动词（R1 移除后随召回语义回归）、修订 echo、
+    # slash 反馈词（unknown/无提交/未实现——闭集纪律：Log 行全经词表）
+    "Edit": ("Edit", "编辑"),
+    "you · revise": ("you · revise", "你 · 修订"),
+    "unknown command · /help lists commands": (
+        "unknown command · /help lists commands",
+        "未知命令 · /help 查看命令表"),
+    "no prior submission · type to steer": (
+        "no prior submission · type to steer",
+        "暂无可修订提交 · 直接键入即转向"),
+    "/target <agent> is not implemented": (
+        "/target <agent> is not implemented",
+        "/target <agent> 尚未实现"),
 }
 
 
