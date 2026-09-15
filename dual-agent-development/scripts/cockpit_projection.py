@@ -24,6 +24,7 @@ P3 活跃事件 > P4 空闲呈现态），accepted 绝不直接投影为状态�
 from __future__ import annotations
 
 import textwrap
+from bisect import bisect_right
 
 from console_observation import format_event_line
 from content_safety import contains_unsafe_content
@@ -34,8 +35,10 @@ __all__ = (
     "format_tokens", "truncate_to_width", "ui_label",
     "agent_detail", "pipeline_lines", "activity_tail_lines",
     "agent_detail_window", "connection_observed",
+    "apply_budget_narrowing",
     "control_receipt_line", "event_detail_line", "trace_status_line",
     "revision_status_lines", "worker_failure_lines",
+    "trace_observation_lines", "trace_control_lines", "trace_usage_lines",
     "DEFAULT_ROLE_TEMPLATES",
     "funnel_preview_lines", "funnel_blocked_line", "funnel_enter_lines",
     "funnel_changed_lines", "funnel_error_lines", "funnel_first_screen",
@@ -209,7 +212,7 @@ class ProjectionInputs:
                  "version", "width", "ascii_only",
                  "pulse", "reveal_seqs", "result_reveal",
                  "selected_index", "expanded_stage", "locale",
-                 "detail_max_lines", "result_max_lines")
+                 "detail_max_lines", "result_max_lines", "include_trace")
 
     def __init__(self, *, task="", slots=(), events=(), facts=(),
                  usage_records=(), terminal=None, run_state=None,
@@ -217,7 +220,8 @@ class ProjectionInputs:
                  width=100, ascii_only=False, pulse=False, reveal_seqs=(),
                  result_reveal=False, selected_index=0,
                  expanded_stage=None, locale="en",
-                 detail_max_lines=None, result_max_lines=None):
+                 detail_max_lines=None, result_max_lines=None,
+                 include_trace=True):
         self.task = task
         self.slots = tuple(slots)
         self.events = tuple(events)
@@ -250,6 +254,11 @@ class ProjectionInputs:
         # 与既有投影逐字节一致。
         self.detail_max_lines = detail_max_lines
         self.result_max_lines = result_max_lines
+        # CU-PERF-1 W2 纯呈现参数：trace 三字段是否随投影计算
+        # （缺省 True = 既有构造点零迁移、输出逐字节一致；False 时
+        # trace_obs/trace_ctrl/trace_usage 为 ()——trace 消费方改经
+        # trace_*_lines 三函数直取，主屏不显示 trace 故可免算）。
+        self.include_trace = include_trace
 
 
 class ProjectedState:
@@ -306,27 +315,49 @@ def _event_type_of(event):
     return _value_of(getattr(event, "event_type", ""))
 
 
+# WIDE_RANGES 的二分查找形态（CU-PERF-1 W6）：区间端点排序副本 +
+# 成员判断 O(log n)。与 _WIDE_RANGES 同一冻结数据源派生，非第二
+# 词表——构造处断言两者覆盖一致。
+_WIDE_STARTS = tuple(low for low, _high in _WIDE_RANGES)
+_WIDE_ENDS = tuple(high for _low, high in _WIDE_RANGES)
+
+
+def _char_width(code):
+    """单码点呈现宽度（宽字符 2 列；bisect 区间查找）。"""
+    index = bisect_right(_WIDE_STARTS, code) - 1
+    if index >= 0 and code <= _WIDE_ENDS[index]:
+        return 2
+    return 1
+
+
 def display_width(text):
-    """终端呈现宽度（宽字符 2 列；零依赖实用实现）。"""
+    """终端呈现宽度（宽字符 2 列；CU-PERF-1 W6 快路径）。
+
+    isascii 全串快路径（宽字符区与 ASCII 零交集）+ 逐字符
+    bisect 区间查找；输出与逐区间 any() 线性扫描逐字节一致
+    （边界端点等价由测试锁死）。"""
+    if text.isascii():
+        return len(text)
     total = 0
     for character in text:
-        code = ord(character)
-        wide = any(low <= code <= high for low, high in _WIDE_RANGES)
-        total += 2 if wide else 1
+        total += _char_width(ord(character))
     return total
 
 
 def truncate_to_width(text, limit):
-    """按呈现宽度截断，尾部以 ... 标注（绝不产生横滚）。"""
+    """按呈现宽度截断，尾部以 ... 标注（绝不产生横滚）。
+
+    CU-PERF-1 W6：与 display_width 共享 _char_width 单一实现
+    （既有内联区间循环与 display_width 重复实现的历史形态消除）。"""
+    if text.isascii() and len(text) <= limit:
+        return text
     if display_width(text) <= limit:
         return text
     budget = max(0, limit - 3)
     parts = []
     used = 0
     for character in text:
-        code = ord(character)
-        cost = 2 if any(low <= code <= high
-                        for low, high in _WIDE_RANGES) else 1
+        cost = _char_width(ord(character))
         if used + cost > budget:
             break
         parts.append(character)
@@ -834,16 +865,102 @@ def build_projection(values):
             ascii_only=values.ascii_only, locale=values.locale,
             max_lines=values.result_max_lines),
         context_lines=_context_lines(values, lifecycle),
-        trace_obs=tuple(format_event_line(event).rstrip("\n")
-                        for event in values.events),
-        trace_ctrl=tuple(_control_line(entry) for entry in values.facts),
-        trace_usage=tuple(_usage_line(record)
-                          for record in values.usage_records),
+        trace_obs=(trace_observation_lines(values.events)
+                   if values.include_trace else ()),
+        trace_ctrl=(trace_control_lines(values.facts)
+                    if values.include_trace else ()),
+        trace_usage=(trace_usage_lines(values.usage_records)
+                     if values.include_trace else ()),
         lifecycle=lifecycle,
         tier=tier)
     if values.ascii_only:
         return _ascii_state(state)
     return state
+
+
+def trace_observation_lines(events, *, ascii_only=False):
+    """Trace OBS 页行集（CU-PERF-1 W2 所有权分离）。
+
+    逐事件 format_event_line 的唯一实现点；build_projection 与
+    TraceScreen 均经此取数（零第二实现）。ascii_only 时逐行符号
+    降级，与 _ascii_state 尾部转换同律。"""
+    lines = tuple(format_event_line(event).rstrip("\n")
+                  for event in events)
+    if ascii_only:
+        lines = tuple(_to_ascii(line) for line in lines)
+    return lines
+
+
+def trace_control_lines(facts, *, ascii_only=False):
+    """Trace CTRL 页行集（CU-PERF-1 W2）：账本条目逐条控制行。"""
+    lines = tuple(_control_line(entry) for entry in facts)
+    if ascii_only:
+        lines = tuple(_to_ascii(line) for line in lines)
+    return lines
+
+
+def trace_usage_lines(usage_records, *, ascii_only=False):
+    """Trace USAGE 页行集（CU-PERF-1 W2）：用量记录逐条行。"""
+    lines = tuple(_usage_line(record) for record in usage_records)
+    if ascii_only:
+        lines = tuple(_to_ascii(line) for line in lines)
+    return lines
+
+
+def apply_budget_narrowing(state, values, *, detail_max_lines=None,
+                           result_max_lines=None):
+    """A4 收窄的窄域重算（CU-PERF-1 W3）。
+
+    只重算受 detail_max_lines / result_max_lines 影响的两个字段
+    （其唯一消费点在 build_projection 内恰为 agent_detail_window
+    与 _result_lines 两处调用）；其余字段原样引用返回新 state——
+    与携带同参数的全量 build_projection 逐字段相等（确定性纯函数，
+    golden 矩阵锁死）。纯呈现，零事实触碰。"""
+    detail_lines = state.detail_lines
+    result_lines = state.result_lines
+    if (detail_max_lines is not None
+            and values.expanded_stage is not None):
+        detail_lines = agent_detail_window(
+            values.slots, values.events, stage=values.expanded_stage,
+            lifecycle=state.lifecycle, last_outcome=values.last_outcome,
+            width=_content_width_for(values.width),
+            ascii_only=values.ascii_only,
+            max_lines=detail_max_lines,
+            locale=values.locale)
+    if result_max_lines is not None:
+        result_lines = _result_lines(
+            values.last_outcome, _content_width_for(values.width),
+            reveal=values.result_reveal,
+            ascii_only=values.ascii_only, locale=values.locale,
+            max_lines=result_max_lines)
+    if values.ascii_only:
+        detail_lines = tuple(
+            _to_ascii(line) for line in detail_lines)
+        result_lines = tuple(
+            _to_ascii(line) for line in result_lines)
+    return ProjectedState(
+        header_line=state.header_line,
+        task_line=state.task_line,
+        badge=state.badge,
+        collaboration_lines=state.collaboration_lines,
+        activity_lines=state.activity_lines,
+        detail_lines=detail_lines,
+        progress_line=state.progress_line,
+        tokens_line=state.tokens_line,
+        result_lines=result_lines,
+        context_lines=state.context_lines,
+        trace_obs=state.trace_obs,
+        trace_ctrl=state.trace_ctrl,
+        trace_usage=state.trace_usage,
+        lifecycle=state.lifecycle,
+        tier=state.tier)
+
+
+def _content_width_for(width):
+    """content_width 的单一再导出（build_projection 同式）。"""
+    tier = _tier_for(width)
+    return (width - 4 if tier == "DEGRADED"
+            else min(width - 4, 100))
 
 
 def _control_line(entry):
@@ -1219,7 +1336,9 @@ def agent_detail_window(slots, events, *, stage, lifecycle="RUNNING",
     唯一出口在 Trace，本窗绝不截断真相、只限投影窗。stage 缺席
     （组合刷新后身份消失）→ 诚实空行集。R2：标签列经闭集词表并
     _pad_cell 对齐（display-width 感知，CJK 安全）；区块结构与
-    事实行原样。"""
+    事实行原样。CU-PERF-1 W3b：事件扫描收敛为单遍——一遍同时
+    收集过滤尾窗/在途/阶段启动/终局状态/时长/双向 handoff，
+    后 O(1) 组合；各字段语义与多遍形态逐字节一致（golden 锁死）。"""
     target = None
     for slot_view in slots:
         if slot_view.stage == stage:
@@ -1227,25 +1346,72 @@ def agent_detail_window(slots, events, *, stage, lifecycle="RUNNING",
             break
     if target is None:
         return ()
-    filtered = tuple(
-        event for event in events
-        if getattr(event, "stage", None) == target.role)
-    finished_status = None
-    for event in filtered:
-        if _event_type_of(event) == "INVOCATION_FINISHED":
+    # 单遍收集（stage==role 过滤下的全部派生量）
+    filtered_tail = []      # 过滤事件尾窗原料（全量保留，后取尾 6）
+    started = False         # INVOCATION_STARTED 在场
+    stage_started = False   # STAGE_STARTED 在场
+    finished_status = None  # 最后一次 INVOCATION_FINISHED 状态
+    last_duration = None    # 最后一次 FINISHED 携带的 duration_ms
+    handoff_out = []        # HANDOFF(stage=产出角色 → 本槽出向)
+    handoff_in = []         # HANDOFF(runtime=本槽 → 本槽入向)
+    for event in events:
+        if getattr(event, "stage", None) != target.role:
+            # 入向 handoff 的 stage 是产出方角色——只在 runtime 匹配
+            # 分支消费（下方独立判定），此处不归入任何 stage 过滤量
+            if (_event_type_of(event) == "HANDOFF"
+                    and getattr(event, "runtime_id", None)
+                    == target.runtime_id):
+                handoff_in.append(
+                    f"{getattr(event, 'stage', '')} → here"
+                    f" ({_value_of(getattr(event, 'status', ''))})")
+            continue
+        filtered_tail.append(event)
+        kind = _event_type_of(event)
+        if kind == "STAGE_STARTED":
+            stage_started = True
+        elif kind == "INVOCATION_STARTED":
+            started = True
+        elif kind == "INVOCATION_FINISHED":
             finished_status = _value_of(getattr(event, "status", ""))
+            duration = getattr(event, "duration_ms", None)
+            if duration is not None:
+                last_duration = duration
+        elif kind == "HANDOFF":
+            handoff_out.append(
+                f"→ {getattr(event, 'runtime_id', '')}"
+                f" ({_value_of(getattr(event, 'status', ''))})")
     result_value = "—"
     if finished_status is not None:
         result_value = str(finished_status)
-        duration = _slot_duration_text(target, events)
-        if duration != "—":
-            result_value += f" · {duration}"
+        if last_duration is not None:
+            result_value += f" · {last_duration}ms"
         step_status = _slot_result_text(target, last_outcome)
         if step_status != "—":
             result_value += f" · step {step_status}"
-    word = _slot_state_word(target, events, lifecycle)
+    # 状态词：八态推导（_slot_state_word 同语义的 O(1) 组合——
+    # 收集量即其全部输入）
+    if finished_status is not None:
+        word = ("DONE" if str(finished_status).upper() == "SUCCESS"
+                else "FAILED")
+    elif started:
+        if lifecycle == "PAUSED":
+            word = "PAUSED"
+        elif lifecycle == "PARKED":
+            word = "PARKED"
+        elif lifecycle == "ABORTED":
+            word = "ABORTED"
+        else:
+            word = "RUNNING"
+    elif stage_started:
+        word = "WAITING"
+    else:
+        word = "NOT_STARTED"
     glyph = (_AGENT_GLYPHS_ASCII[word] if ascii_only
              else _AGENT_GLYPHS[word])
+    handoff_out_text = ("; ".join(handoff_out)
+                        if handoff_out else "—")
+    handoff_in_text = ("; ".join(handoff_in)
+                       if handoff_in else "—")
 
     def label_pad(key):
         return _pad_cell(ui_label(key, locale), 8)
@@ -1253,12 +1419,10 @@ def agent_detail_window(slots, events, *, stage, lifecycle="RUNNING",
     lines = [f"▼ {target.role.upper()}",
              f"  {label_pad('prompt')}  —",
              f"  {label_pad('handoff')}  "
-             f"{_pad_cell(ui_label('in', locale), 4)}"
-             f"{_slot_handoff_inbound_text(target, events)}",
+             f"{_pad_cell(ui_label('in', locale), 4)}{handoff_in_text}",
              f"  {label_pad('handoff')}  "
-             f"{_pad_cell(ui_label('out', locale), 4)}"
-             f"{_slot_handoff_text(target, events)}"]
-    for index, event in enumerate(filtered[-6:]):
+             f"{_pad_cell(ui_label('out', locale), 4)}{handoff_out_text}"]
+    for index, event in enumerate(filtered_tail[-6:]):
         label = (label_pad("activity") if index == 0 else " " * 8)
         lines.append(f"  {label}  {_activity_line(event, locale)}")
     lines.extend((

@@ -44,6 +44,7 @@ from cockpit_projection import (
     AgentSlotView,
     ProjectionInputs,
     agent_detail,
+    apply_budget_narrowing,
     build_projection,
     control_receipt_line,
     derive_lifecycle,
@@ -55,7 +56,10 @@ from cockpit_projection import (
     funnel_input_line,
     funnel_keys_hint,
     revision_status_lines,
+    trace_control_lines,
+    trace_observation_lines,
     trace_status_line,
+    trace_usage_lines,
     ui_label,
     worker_failure_lines,
 )
@@ -311,6 +315,18 @@ def _build_classes() -> None:
 
         # ------------------------------------------------ 数据
 
+        def _zone_update(self, selector: str, text: str) -> None:
+            """仅内容变化时更新 DOM（CU-PERF-1 W1：主屏变更检测）。
+
+            TraceScreen._update_static 同款写门镜像（_cockpit_last
+            只存最后写入值——不命中即写即新，无失效语义）；快照
+            属性由调用方无条件维护（测试消费面不变），display
+            布尔亦由调用方独立赋值（布局与文本解耦）。"""
+            widget = self.query_one(selector)
+            if getattr(widget, "_cockpit_last", None) != text:
+                widget._cockpit_last = text
+                widget.update(text)
+
         def _collect_inputs(self):
             """入口供应的事实源只读快照 → 投影输入（零第二真相）。"""
             width = self.size.width or 100
@@ -330,7 +346,11 @@ def _build_classes() -> None:
                 last_outcome=(None if session is None
                               else session.last_outcome),
                 width=width,
-                ascii_only=self._cockpit_ascii)
+                ascii_only=self._cockpit_ascii,
+                # CU-PERF-1 W2：主屏不显示 trace（唯一消费方是
+                # TraceScreen，改经 trace_*_lines 三函数直取）——
+                # 免除每 tick 的全事件格式化白算。
+                include_trace=False)
 
         def _refresh(self, *, advance_tick: bool = True) -> None:
             """READ → PROJECT → RENDER（UI 线程执行）。
@@ -398,21 +418,21 @@ def _build_classes() -> None:
                     values, state, result_rows=result_rows))
             self.last_state = state
             self.header_text = state.header_line
-            self.query_one("#header-zone").update(state.header_line)
+            self._zone_update("#header-zone", state.header_line)
             self.task_text = state.task_line
-            self.query_one("#task-zone").update(state.task_line)
+            self._zone_update("#task-zone", state.task_line)
             self.agent_text = "\n".join(state.collaboration_lines)
-            self.query_one("#collab-zone").update(self.agent_text)
+            self._zone_update("#collab-zone", self.agent_text)
             # R1 Detail 有界窗：管线正下方；身份消失/未展开 = 诚实空；
             # 高度预算与活动尾窗同门规（<24 隐藏，Trace 仍是全量出口）
             self.detail_text = "\n".join(state.detail_lines)
             detail = self.query_one("#detail-zone")
-            detail.update(self.detail_text)
+            self._zone_update("#detail-zone", self.detail_text)
             detail.display = bool(self.detail_text) \
                 and self.size.height >= 24 and detail_fits
             self.activity_text = "\n".join(state.activity_lines)
             activity = self.query_one("#activity-zone")
-            activity.update(self.activity_text)
+            self._zone_update("#activity-zone", self.activity_text)
             # 高度预算（§二十二）：<24 行优先保留 Header/Task/Agents/
             # Status/Dock，隐藏活动尾窗（Trace 页仍可看全量历史）；
             # CU-TUI-INPUT A4：≥24 但预算不足时同样让位（整区隐藏）
@@ -425,20 +445,22 @@ def _build_classes() -> None:
                 result_text = "\n".join(state.result_lines)
             self.result_text = result_text
             result = self.query_one("#result-zone")
-            result.update(result_text)
+            self._zone_update("#result-zone", result_text)
             # 空态整区隐藏（零结果零占位；有结果恒在场）
             result.display = bool(result_text)
-            self.query_one("#progress-zone").update(
+            self._zone_update(
+                "#progress-zone",
                 f"{state.progress_line}\n{state.tokens_line}")
-            self.query_one("#dock-controls").update(
-                self._dock_controls_line())
-            self.query_one("#dock-receipt").update(
-                self._dock_receipt_line())
-            self.query_one("#dock-input").update(self._dock_input_line())
+            self._zone_update("#dock-controls",
+                              self._dock_controls_line())
+            self._zone_update("#dock-receipt",
+                              self._dock_receipt_line())
+            self._zone_update("#dock-input", self._dock_input_line())
             panel = self.query_one("#context-panel")
             wide = self.size.width >= 140
             if state.context_lines and wide and self._cockpit_show_context:
-                panel.update("\n".join(state.context_lines))
+                self._zone_update("#context-panel",
+                                  "\n".join(state.context_lines))
                 panel.display = True
             else:
                 panel.display = False
@@ -483,10 +505,16 @@ def _build_classes() -> None:
             # activity 最后：让位即整区隐藏（§二十二 门规同型）
             rem -= detail_kept
             activity_fits = rem >= len(state.activity_lines)
-            # 仅在发生收窄时重建（第二遍纯函数；其余字段逐字节不变）
+            # CU-PERF-1 W3：收窄经窄域重算（仅 detail/result 两字段
+            # 受 max_lines 影响——其唯一消费点在 build_projection 内
+            # 恰两处）；与携带同参数的全量重建逐字段相等（golden
+            # 锁死），消除 A4 每 tick 第二遍全量投影。
             if (values.detail_max_lines is not None
                     or values.result_max_lines is not None):
-                state = build_projection(values)
+                state = apply_budget_narrowing(
+                    state, values,
+                    detail_max_lines=values.detail_max_lines,
+                    result_max_lines=values.result_max_lines)
             return state, detail_fits, activity_fits
 
         # ------------------------------------------------ dock 呈现
@@ -613,13 +641,12 @@ def _build_classes() -> None:
             if self._cockpit_funnel_message:
                 lines = lines + tuple(self._cockpit_funnel_message)
             self.funnel_text = "\n".join(lines)
-            self.query_one("#funnel-screen").update(self.funnel_text)
-            self.query_one("#dock-controls").update(
-                self._dock_controls_line())
-            self.query_one("#dock-receipt").update(
-                self._dock_receipt_line())
-            self.query_one("#dock-input").update(
-                self._dock_input_line())
+            self._zone_update("#funnel-screen", self.funnel_text)
+            self._zone_update("#dock-controls",
+                              self._dock_controls_line())
+            self._zone_update("#dock-receipt",
+                              self._dock_receipt_line())
+            self._zone_update("#dock-input", self._dock_input_line())
 
         def _funnel_key(self, key: str, character) -> None:
             """漏斗键语义（§十二）：Enter/Esc/Backspace 专属处理；
@@ -967,15 +994,21 @@ def _build_classes() -> None:
                 if maximum and float(container.scroll_y) < (
                         float(maximum) - 0.5):
                     self._follow_off()
+            # CU-PERF-1 W2：trace 所有权分离——本屏只消费三个 trace
+            # 字段（全量 build_projection 的其余产出从不显示），改经
+            # trace_*_lines 三函数直取（事实面恒 en——locale 与主屏
+            # 呈现参数同律，trace 词表零翻译）；slots/usage/width 仍经
+            # _collect_inputs 只读快照供给。主屏 include_trace=False
+            # 后，Trace 开启期每 0.5s 恰一份事件格式化（本处）。
             values = app._collect_inputs()
-            state = build_projection(values)
             events = values.events
             seqs = [getattr(event, "sequence", None) for event in events]
             selected = self._trace_selected_seq
             marker_index = (seqs.index(selected)
                             if selected in seqs else None)
             obs_lines = []
-            for index, line in enumerate(state.trace_obs):
+            for index, line in enumerate(trace_observation_lines(
+                    events, ascii_only=values.ascii_only)):
                 obs_lines.append(
                     ("▸ " if index == marker_index else "  ") + line)
             self.observation_text = "\n".join(obs_lines)
@@ -989,10 +1022,13 @@ def _build_classes() -> None:
             if app._cockpit_revision_pending is not None:
                 pending = app._cockpit_revision_pending()
             self.ctrl_text = "\n".join(
-                state.trace_ctrl + ("",)
+                trace_control_lines(values.facts,
+                                    ascii_only=values.ascii_only) + ("",)
                 + revision_status_lines(values.facts, pending))
             self._update_static("#trace-ctrl", self.ctrl_text)
-            self.usage_text = "\n".join(state.trace_usage)
+            self.usage_text = "\n".join(
+                trace_usage_lines(values.usage_records,
+                                  ascii_only=values.ascii_only))
             self._update_static("#trace-usage", self.usage_text)
             self.agents_text = "\n".join(agent_detail(
                 values.slots, values.events, values.usage_records,

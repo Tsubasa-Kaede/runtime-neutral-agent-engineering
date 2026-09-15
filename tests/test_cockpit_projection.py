@@ -2620,5 +2620,337 @@ class ResultBudgetTests(unittest.TestCase):
         self.assertEqual(base.tokens_line, shrunk.tokens_line)
 
 
+# ---------------------- CU-PERF-1: trace ownership / narrowing / fast width
+
+
+class IncludeTraceEquivalenceTests(unittest.TestCase):
+    """T1：include_trace=False 只清三 trace 字段，其余逐字节一致。"""
+
+    def test_false_empties_exactly_three_trace_fields(self):
+        events = running_events(("architect", "coder"))
+        facts = (fact(ControlFactType.PAUSE_REQUESTED, seq=0),)
+        records = (usage(), usage(runtime="rt-1", role="code"))
+        common = dict(
+            task="demo", slots=template_slots(2), events=events,
+            facts=facts, usage_records=records, width=100,
+            expanded_stage="architect")
+        full = build(**common)
+        without = build(include_trace=False, **common)
+        self.assertEqual(without.trace_obs, ())
+        self.assertEqual(without.trace_ctrl, ())
+        self.assertEqual(without.trace_usage, ())
+        for name in ("header_line", "task_line", "badge",
+                     "collaboration_lines", "activity_lines",
+                     "detail_lines", "progress_line", "tokens_line",
+                     "result_lines", "context_lines", "lifecycle",
+                     "tier"):
+            self.assertEqual(
+                getattr(full, name), getattr(without, name),
+                f"field {name} diverged with include_trace=False")
+
+    def test_default_true_matches_explicit_true(self):
+        events = running_events(("architect", "coder"))
+        kwargs = dict(task="t", slots=template_slots(2), events=events)
+        self.assertEqual(build(**kwargs),
+                         build(include_trace=True, **kwargs))
+
+    def test_false_ascii_path_empties_trace_fields_too(self):
+        events = running_events(("arch",))
+        kwargs = dict(task="t", slots=template_slots(2), events=events,
+                      ascii_only=True, width=60)
+        without = build(include_trace=False, **kwargs)
+        self.assertEqual((without.trace_obs, without.trace_ctrl,
+                          without.trace_usage), ((), (), ()))
+
+
+class TraceFunctionsGoldenTests(unittest.TestCase):
+    """T2：三函数 == 全量 build_projection 对应字段（含 ascii 态）。"""
+
+    def test_observation_lines_match_projection_field(self):
+        events = running_events(("architect", "coder"))
+        state = build(task="t", slots=template_slots(2), events=events)
+        self.assertEqual(
+            projection.trace_observation_lines(events), state.trace_obs)
+
+    def test_control_lines_match_projection_field(self):
+        facts = (fact(ControlFactType.PAUSE_REQUESTED, seq=0,
+                      payload={"k": "v"}),
+                 fact(ControlFactType.RESUME_REQUESTED, seq=1))
+        state = build(task="t", slots=template_slots(2), facts=facts)
+        self.assertEqual(
+            projection.trace_control_lines(facts), state.trace_ctrl)
+
+    def test_usage_lines_match_projection_field(self):
+        records = (usage(), usage(runtime="rt-1", role="code",
+                                  status=UsageObservation.UNSUPPORTED))
+        state = build(task="t", slots=template_slots(2),
+                      usage_records=records)
+        self.assertEqual(
+            projection.trace_usage_lines(records), state.trace_usage)
+
+    def test_ascii_flags_match_ascii_state(self):
+        events = running_events(("arch",))
+        facts = (fact(ControlFactType.PAUSE_REQUESTED, seq=0),)
+        records = (usage(),)
+        state = build(task="t", slots=template_slots(2), events=events,
+                      facts=facts, usage_records=records, ascii_only=True)
+        self.assertEqual(
+            projection.trace_observation_lines(
+                events, ascii_only=True), state.trace_obs)
+        self.assertEqual(
+            projection.trace_control_lines(
+                facts, ascii_only=True), state.trace_ctrl)
+        self.assertEqual(
+            projection.trace_usage_lines(
+                records, ascii_only=True), state.trace_usage)
+
+
+class ApplyBudgetNarrowingGoldenTests(unittest.TestCase):
+    """T3：窄域重算 == 携带同参数的全量重建（字段级矩阵）。"""
+
+    def _matrix_inputs(self, *, ascii_only, locale, expanded,
+                       terminal=None, final=None):
+        events = running_events(("architect", "coder"))
+        return inputs(
+            task="demo", slots=template_slots(2), events=events,
+            width=100, ascii_only=ascii_only, locale=locale,
+            expanded_stage=("arch" if expanded else None),
+            terminal=terminal,
+            last_outcome=SimpleOutcome("COMPLETED", final, None)
+            if final is not None else None)
+
+    def _assert_narrow_equals_full(self, values, detail_max,
+                                   result_max):
+        base = projection.build_projection(values)
+        narrow = projection.apply_budget_narrowing(
+            base, values,
+            detail_max_lines=detail_max, result_max_lines=result_max)
+        values2 = inputs(
+            **{k: getattr(values, k) for k in (
+                "task", "slots", "events", "facts", "usage_records",
+                "terminal", "run_state", "last_outcome", "capabilities",
+                "version", "width", "ascii_only", "pulse", "reveal_seqs",
+                "result_reveal", "selected_index", "expanded_stage",
+                "locale")})
+        values2.detail_max_lines = detail_max
+        values2.result_max_lines = result_max
+        full = projection.build_projection(values2)
+        for name in ("detail_lines", "result_lines"):
+            self.assertEqual(
+                getattr(narrow, name), getattr(full, name),
+                f"{name} diverged (detail_max={detail_max} "
+                f"result_max={result_max})")
+        for name in ("header_line", "task_line", "badge",
+                     "collaboration_lines", "activity_lines",
+                     "progress_line", "tokens_line", "context_lines",
+                     "trace_obs", "trace_ctrl", "trace_usage",
+                     "lifecycle", "tier"):
+            self.assertEqual(
+                getattr(narrow, name), getattr(base, name),
+                f"untouched field {name} diverged")
+
+    def test_golden_matrix_detail_x_result_x_ascii_x_locale(self):
+        for ascii_only in (False, True):
+            for locale in ("en", "zh"):
+                for expanded in (False, True):
+                    values = self._matrix_inputs(
+                        ascii_only=ascii_only, locale=locale,
+                        expanded=expanded,
+                        final="line one\nline two\nline three")
+                    for detail_max in (None, 3, 7):
+                        for result_max in (None, 2, 4):
+                            self._assert_narrow_equals_full(
+                                values, detail_max, result_max)
+
+    def test_reveal_and_terminal_axes(self):
+        for reveal in (False, True):
+            values = self._matrix_inputs(
+                ascii_only=False, locale="zh", expanded=True,
+                terminal="COMPLETED" if reveal else None,
+                final="x\ny\nz")
+            values.result_reveal = reveal
+            self._assert_narrow_equals_full(values, 4, 3)
+
+    def test_narrowing_without_limits_returns_same_state(self):
+        values = self._matrix_inputs(ascii_only=False, locale="en",
+                                     expanded=True, final="r")
+        base = projection.build_projection(values)
+        same = projection.apply_budget_narrowing(base, values)
+        self.assertEqual(same, base)
+
+
+class DisplayWidthFastPathTests(unittest.TestCase):
+    """T8：快路径与既有线性扫描逐点等价（参考实现对照）。"""
+
+    def _reference_width(self, text):
+        total = 0
+        for character in text:
+            code = ord(character)
+            wide = any(low <= code <= high
+                       for low, high in projection._WIDE_RANGES)
+            total += 2 if wide else 1
+        return total
+
+    def test_wide_range_boundary_endpoints(self):
+        points = []
+        for low, high in projection._WIDE_RANGES:
+            points.extend((low - 1, low, low + 1, high - 1, high,
+                           high + 1))
+        for code in points:
+            if code < 0:
+                continue
+            text = chr(code)
+            self.assertEqual(
+                projection.display_width(text),
+                self._reference_width(text),
+                f"codepoint U+{code:04X} diverged")
+
+    def test_assorted_probes(self):
+        probes = (
+            "", "ascii only 123", "任务 运行中",
+            "混合 abc 任务 → ▸ · ‖",
+            "ひらがな カタカナ", "한국어",
+            "７８９　ＡＢ",
+            chr(0x1100) + chr(0x115F) + chr(0x1160)
+            + chr(0xFF60) + chr(0xFF61),
+            chr(0xFFE6) + chr(0xFFE7),
+        )
+        for text in probes:
+            self.assertEqual(
+                projection.display_width(text),
+                self._reference_width(text))
+
+    def test_truncate_to_width_equivalence(self):
+        samples = (
+            "short",
+            "ascii text exactly long enough to need"
+            " truncation at small limits yes indeed",
+            "任务文本需要截断的任务文本需要截断的任务文本",
+            "mixed 混合 abc → ok",
+        )
+        for text in samples:
+            for limit in (1, 3, 5, 10, 20, 60):
+                self.assertEqual(
+                    projection.truncate_to_width(text, limit),
+                    self._reference_truncate(text, limit))
+
+    def test_truncate_ascii_fast_path_consistent(self):
+        text = "pure ascii sentence for truncation checks"
+        for limit in (5, 12, len(text)):
+            self.assertEqual(
+                projection.truncate_to_width(text, limit),
+                self._reference_truncate(text, limit))
+
+    def _reference_truncate(self, text, limit):
+        if self._reference_width(text) <= limit:
+            return text
+        budget = max(0, limit - 3)
+        parts = []
+        used = 0
+        for character in text:
+            code = ord(character)
+            cost = 2 if any(
+                low <= code <= high
+                for low, high in projection._WIDE_RANGES) else 1
+            if used + cost > budget:
+                break
+            parts.append(character)
+            used += cost
+        return "".join(parts) + "..."
+
+
+class DetailWindowSinglePassTests(unittest.TestCase):
+    """T9：单遍扫描重构与既有语义等价（golden 事件序列）。
+
+    既有 agent_detail_window 直测点（R1/预算/locale 系列）保持
+    不动即为主等价证明；此处补跨区块语义的组合序列。"""
+
+    def _window(self, events, *, stage="architect", lifecycle="RUNNING",
+                ascii_only=False, locale="en", max_lines=10):
+        return projection.agent_detail_window(
+            template_slots(2), events, stage=stage,
+            lifecycle=lifecycle, last_outcome=None, width=100,
+            ascii_only=ascii_only, max_lines=max_lines, locale=locale)
+
+    def test_full_lifecycle_event_sequence(self):
+        events = (
+            ev(ExecutionEventType.STAGE_STARTED, seq=0,
+               stage="architect", runtime="rt-0"),
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+               stage="architect", runtime="rt-0", status="STARTED"),
+            ev(ExecutionEventType.HANDOFF, seq=2,
+               stage="architect", runtime="rt-1", status="EMBEDDED",
+               reason="EMBEDDED"),
+            ev(ExecutionEventType.HANDOFF, seq=4,
+               stage="coder", runtime="rt-0", status="EMBEDDED",
+               reason="EMBEDDED"),
+            ev(ExecutionEventType.INVOCATION_FINISHED, seq=3,
+               stage="architect", runtime="rt-0", status="SUCCESS",
+               duration_ms=42),
+        )
+        joined = "\n".join(self._window(events))
+        self.assertIn("ARCHITECT", joined)
+        self.assertIn("SUCCESS · 42ms", joined)
+        self.assertIn("→ rt-1 (EMBEDDED)", joined)       # 出向 handoff
+        self.assertIn("coder → here (EMBEDDED)", joined)  # 入向 handoff
+        self.assertIn("[1] architect started", joined)    # 尾窗活动
+
+    def test_inbound_handoff_from_other_stage_counts(self):
+        events = (
+            ev(ExecutionEventType.HANDOFF, seq=0, stage="coder",
+               runtime="rt-0", status="EMBEDDED", reason="EMBEDDED"),
+            ev(ExecutionEventType.STAGE_STARTED, seq=1,
+               stage="architect", runtime="rt-0"),
+        )
+        joined = "\n".join(self._window(events))
+        self.assertIn("coder → here (EMBEDDED)", joined)
+        self.assertIn("WAITING", joined)   # STAGE_STARTED 在场 → 等待
+
+    def test_lifecycle_overlay_axis(self):
+        events = (
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+               stage="architect", runtime="rt-0", status="STARTED"),
+        )
+        for lifecycle, expected in (
+                ("RUNNING", "RUNNING"), ("PAUSED", "PAUSED"),
+                ("PARKED", "PARKED"), ("ABORTED", "ABORTED")):
+            joined = "\n".join(
+                self._window(events, lifecycle=lifecycle))
+            self.assertIn(expected, joined)
+
+    def test_finished_failure_overrides_lifecycle(self):
+        events = (
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=1,
+               stage="architect", runtime="rt-0", status="STARTED"),
+            ev(ExecutionEventType.INVOCATION_FINISHED, seq=2,
+               stage="architect", runtime="rt-0", status="FAILURE",
+               duration_ms=7),
+        )
+        joined = "\n".join(self._window(events, lifecycle="PARKED"))
+        self.assertIn("FAILED", joined)
+        self.assertIn("FAILURE · 7ms", joined)
+
+    def test_locale_and_ascii_axes(self):
+        events = (ev(ExecutionEventType.STAGE_STARTED, seq=0,
+                     stage="architect", runtime="rt-0"),)
+        zh = "\n".join(self._window(events, locale="zh"))
+        self.assertIn("状态", zh)
+        self.assertIn("等待中", zh)
+        ascii_lines = "\n".join(self._window(events, ascii_only=True))
+        self.assertIn("WAITING", ascii_lines)
+
+    def test_tail_window_limit_and_overflow_marker(self):
+        events = tuple(
+            ev(ExecutionEventType.INVOCATION_STARTED, seq=i,
+               stage="architect", runtime="rt-0", status="STARTED")
+            for i in range(9))
+        joined = "\n".join(self._window(events, max_lines=10))
+        self.assertIn("(+3 more", joined)  # 9 行活动超尾 6 → 溢出
+
+    def test_empty_events_honest_window(self):
+        joined = "\n".join(self._window(()))
+        self.assertIn("—", joined)
+        self.assertIn("NOT_STARTED", joined)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1891,11 +1891,17 @@ class R1SelectionPilotTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             events_before = app._cockpit_events()
-            trace_before = app.last_state.trace_obs
+            # CU-PERF-1 W2：主屏 include_trace=False 后 trace_obs 恒
+            # （）——数据驱动稳定性 witness 迁至 activity_lines 与
+            # lifecycle（同一只读快照面，语义不变）。
+            activity_before = app.last_state.activity_lines
+            lifecycle_before = app.last_state.lifecycle
             await pilot.press("right")
             await pilot.pause()
             self.assertEqual(app._cockpit_events(), events_before)
-            self.assertEqual(app.last_state.trace_obs, trace_before)
+            self.assertEqual(app.last_state.activity_lines,
+                             activity_before)
+            self.assertEqual(app.last_state.lifecycle, lifecycle_before)
             self.assertIsNone(app._cockpit_session.run_state)
             gate.release.set()
 
@@ -2726,6 +2732,214 @@ class CommandAffordanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._cockpit_mode, "command")
             gate.release.set()
 
+
+# ------------------- CU-PERF-1: change detection / narrow pass / trace split
+
+
+class ChangeDetectionPilotTests(unittest.IsolatedAsyncioTestCase):
+    """T4/T10：主屏变更检测——同输入零 update、pulse 恰一区、零事件
+    空闲多 tick 零 update。"""
+
+    async def _drive(self, app, ticks):
+        for _ in range(ticks):
+            app._refresh()
+            await asyncio.sleep(0)
+
+    def _patched_static_update_counter(self, calls):
+        """Static.update 为同步签名（返回 None）——包装器保持同步，
+        计数后原样委托。"""
+        from textual.widgets import Static as _Static
+        original_update = _Static.update
+
+        def counting(self, *args, **kwargs):
+            calls.append(getattr(self, "id", None) or "?")
+            return original_update(self, *args, **kwargs)
+        return mock.patch.object(_Static, "update", counting)
+
+    async def test_identical_refresh_zero_updates(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            app._refresh()
+            await pilot.pause()
+            calls = []
+            with self._patched_static_update_counter(calls):
+                app._refresh(advance_tick=False)   # 同输入零推进
+                app._refresh(advance_tick=False)
+            self.assertEqual(calls, [])            # T4：0 次底层 update
+            gate.release.set()
+
+    async def test_pulse_flip_updates_exactly_collab_zone(self):
+        gate = _Gate()
+
+        def events():
+            return (_event(0, ExecutionEventType.STAGE_STARTED),
+                    _event(1, ExecutionEventType.INVOCATION_STARTED))
+
+        app = make_app(driver=gate.driver, events=events)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            # 对齐相位边界：推进至偶数 tick（pulse 相位稳定）
+            while app._cockpit_tick % 2:
+                app._refresh()
+            app._refresh()               # 基线写入完成
+            await pilot.pause()
+            calls = []
+            with self._patched_static_update_counter(calls):
+                # pulse 每 2 tick 翻转：恰 2 次推进跨恰 1 次相位翻转
+                app._refresh()
+                app._refresh()
+            # 恰一次真实 DOM 写入，且目标是协作管线区（pulse 翻转
+            # RUNNING 符号；其余区零事实变化零写入）
+            self.assertEqual(calls.count("collab-zone"), 1)
+            self.assertEqual(len(calls), 1)
+            gate.release.set()
+
+    async def test_zero_event_idle_multi_tick_zero_updates(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver,
+                       events=lambda: (), plan=())
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            app._refresh()
+            await pilot.pause()
+            calls = []
+            with self._patched_static_update_counter(calls):
+                for _ in range(4):
+                    app._refresh()      # 零事件零在途 → pulse 不入渲染
+            self.assertEqual(calls, [])  # T10：空闲多 tick 0 update
+            gate.release.set()
+
+
+class NarrowSinglePassPilotTests(unittest.IsolatedAsyncioTestCase):
+    """T5：A4 收窄触发场景 build_projection 每 tick 恰 1 次。"""
+
+    async def test_a4_narrow_single_projection_per_tick(self):
+        gate = _Gate()
+        # 展开 + 矮终端 + 多行 result → 预算收窄必然触发
+        session = _SessionProjection()
+        session.last_outcome = RunOutcome(
+            status=RunStatus.COMPLETED,
+            final_result=SimpleNamespace(
+                output="line one\nline two\nline three\nline four"))
+
+        def events():
+            return (_event(0, ExecutionEventType.STAGE_STARTED),
+                    _event(1, ExecutionEventType.INVOCATION_STARTED),
+                    _event(2, ExecutionEventType.INVOCATION_FINISHED,
+                           duration_ms=5))
+
+        app = make_app(driver=gate.driver, events=events,
+                       session=session)
+        async with app.run_test(size=(100, 24)) as pilot:   # 矮终端
+            await pilot.pause()
+            app._cockpit_expanded_stage = "step-0-architect"
+            app._refresh()
+            await pilot.pause()
+            counter = []
+            original = cockpit_tui.build_projection
+
+            def counting(values):
+                counter.append(len(counter))
+                return original(values)
+
+            with mock.patch.object(cockpit_tui, "build_projection",
+                                  counting):
+                app._refresh()
+            self.assertEqual(len(counter), 1)   # T5：恰 1 次（改前 2）
+            gate.release.set()
+
+
+class MainTraceTransitionTests(unittest.IsolatedAsyncioTestCase):
+    """T6：MAIN↔TRACE 往返——变更检测镜像不卡死后继事实更新。"""
+
+    async def test_round_trip_then_fact_change_still_renders(self):
+        gate = _Gate()
+        holder = {"events": ()}
+
+        def events():
+            return holder["events"]
+
+        app = make_app(driver=gate.driver, events=events)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, cockpit_tui.TraceScreen)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, cockpit_tui.TraceScreen)
+            # escape 同时经 App on_key 进入 confirm（既有语义：先回
+            # command 再开 Trace——R2 坑清单同款）
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_mode, "command")
+            # 往返后事实源变化 → 主屏如实更新（镜像无 stale）
+            holder["events"] = (
+                _event(0, ExecutionEventType.STAGE_STARTED),)
+            app._refresh()
+            self.assertIn("stage started",
+                          app.activity_text)
+            await pilot.press("t")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, cockpit_tui.TraceScreen)
+            self.assertIn("[0]", app.screen.observation_text)
+            gate.release.set()
+
+    async def test_trace_screen_projection_count_zero(self):
+        gate = _Gate()
+
+        def events():
+            return (_event(0, ExecutionEventType.STAGE_STARTED),)
+
+        app = make_app(driver=gate.driver, events=events)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            counter = []
+            with mock.patch.object(cockpit_tui, "build_projection",
+                                  side_effect=lambda v: (
+                                      counter.append(1),
+                                      cockpit_tui.__dict__ and None,
+                                  )[1] or None) as _patched:
+                # _trace_refresh 自身不得触发任何 build_projection
+                app.screen._trace_refresh()
+            self.assertEqual(counter, [])   # T7：Trace 屏 0 次全量投影
+            gate.release.set()
+
+
+class TraceOwnershipPilotTests(unittest.IsolatedAsyncioTestCase):
+    """T7：TraceScreen 三函数直取——文本与三函数输出 golden 相等。"""
+
+    async def test_obs_text_matches_trace_observation_lines(self):
+        gate = _Gate()
+        events = (_event(0, ExecutionEventType.STAGE_STARTED),
+                  _event(1, ExecutionEventType.INVOCATION_STARTED))
+        app = make_app(driver=gate.driver, events=lambda: events)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("t")
+            await pilot.pause()
+            expected_lines = [
+                "  " + cockpit_projection.format_event_line(e).rstrip("\n")
+                for e in events]
+            self.assertEqual(
+                app.screen.observation_text.split("\n"), expected_lines)
+            gate.release.set()
+
+    async def test_main_projection_skips_trace_fields(self):
+        gate = _Gate()
+        events = (_event(0, ExecutionEventType.STAGE_STARTED),)
+        app = make_app(driver=gate.driver, events=lambda: events)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            # 主屏投影 include_trace=False（W2 免算断言）
+            values = app._collect_inputs()
+            self.assertFalse(values.include_trace)
+            self.assertEqual(app.last_state.trace_obs, ())
+            gate.release.set()
 
 if __name__ == "__main__":
     unittest.main()
