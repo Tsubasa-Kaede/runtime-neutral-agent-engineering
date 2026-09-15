@@ -13,9 +13,12 @@
 - 本层不持有第二份执行真相：lifecycle/usage/observation/修订状态
   全部经 cockpit_projection 从既有事实源纯投影；选择/跟随/回执等
   呈现态绝不写回任何事实源（READ 与 DISPATCH 两径严格分离）；
-- 交互模型恰三态（CU-TUI-4 C2）：COMMAND 单键面 /
-  REVISION_COMPOSER 修订编辑 / ABORT_CONFIRM 破坏性确认——此外
-  无第四输入模式；
+- 交互模型恰三态（CU-TUI-4 C2）——UX2-R1（C2-R2）将三态降级为
+  内部实现概念：常驻 Persistent Composer（唯一文本输入面、唯一
+  focusable widget）从启动到退出在场，普通文字即文字，命令降权
+  为空缓冲 hidden shortcuts；MODE_COMMAND/REVISION_COMPOSER/
+  ABORT_CONFIRM 三词永不外露（MODE_CONFIRM 保持——确认条仅消费
+  y/n/escape，其余键仍归 composer）；
 - G16：依赖缺席的回退发生在入口层（textual_available）；
   本层真实异常诚实上抛/如实呈现失败，绝不伪装成功；
 - CU-TUI-5 首跑漏斗：单一 CockpitApp、单次 run()——漏斗是 App 的
@@ -40,6 +43,7 @@ from __future__ import annotations
 import sys
 import threading
 
+from cockpit_input import classify_submit
 from cockpit_projection import (
     AgentSlotView,
     ProjectionInputs,
@@ -53,14 +57,13 @@ from cockpit_projection import (
     funnel_enter_lines,
     funnel_error_lines,
     funnel_first_screen,
-    funnel_input_line,
     funnel_keys_hint,
+    funnel_prefill_text,
     revision_status_lines,
     trace_control_lines,
     trace_observation_lines,
     trace_status_line,
     trace_usage_lines,
-    truncate_to_width,
     ui_label,
     worker_failure_lines,
 )
@@ -72,7 +75,12 @@ __all__ = ("CockpitApp", "TraceScreen", "new_event_store",
            "STAGE_TERMINAL")
 
 
-# 交互三态（CU-TUI-4 C2 裁决：恰此三态，无第四模式）。
+# 交互三态（CU-TUI-4 C2 裁决：恰此三态，无第四模式）。UX2-R1
+# （C2-R2）：三态全部降级为内部实现概念——常驻 composer 使
+# MODE_COMMAND/MODE_COMPOSER 的区分结构性消失（composer 不是
+# mode，是布局基座；常量保留为词汇与 guard 测试面），用户可见
+# 面零 mode 名；MODE_CONFIRM 保持（确认条消费 y/n/escape，其余
+# 键仍归 composer——DESIGN LOCK v1.1 §3）。
 MODE_COMMAND = "command"
 MODE_COMPOSER = "composer"
 MODE_CONFIRM = "confirm"
@@ -88,27 +96,27 @@ STAGE_TERMINAL = "funnel_terminal"
 # 修订 target 封闭二选一（引擎既有词值，呈现层零新词）。
 _TARGETS = ("NEXT_INVOCATION", "SUBMISSION")
 
-# CU-INPUT-2 W1（C2-R1）：COMMAND 态 auto-ingress 的命令键豁免集——
-# 这些键保持既有命令/契约语义（六键 p/r/a/e/q/t + c/l/L + space=展开
-# R1 契约），其余可打印字符即输入（开 composer 入缓冲）。大写命令
-# 字母变体不入集（漏斗 Q 先例：P/Q 等直接 ingress）。
-_INGRESS_EXEMPT = frozenset(("p", "r", "a", "e", "q", "t", "c",
-                             "l", "L", " "))
+# UX2-R1（DESIGN LOCK v1.1 原则 5）：普通文字就是文字，命令降权为
+# 空缓冲 hidden shortcuts——composer 缓冲为空时这些裸键保持既有
+# 命令语义（六键契约降权不降义）；缓冲非空时全部归文本本体
+# （"quick fix" 的 q、"parse" 的 p 均为文字）。e 不再是命令：
+# "打开 composer" 结构性无意义（召回编辑是 R2 /revise 语义）。
+_BARE_COMMAND_KEYS = frozenset(("p", "r", "a", "q", "t", "c", "l", "L"))
 
 # RUNNING 观察区选择器（漏斗态整组隐藏，Start 后整组复现）。
-# CU-TUI-INPUT A1/A2：#input-dock 恒在场（漏斗与 RUNNING 同一底部
-# dock——Start 前后输入位置恒底，绝不跳变），故不在隐藏组内。
+# CU-TUI-INPUT A1/A2 + UX2-R1：#input-dock（composer）恒在场
+# （漏斗与 RUNNING 同一底部 dock——Start 前后输入位置恒底，绝不
+# 跳变），故不在隐藏组内；#collab-log 属主屏观察区（漏斗态隐藏）。
 _MAIN_ZONE_SELECTORS = (
     "#header-zone", "#task-zone", "#collab-zone", "#detail-zone",
-    "#activity-zone", "#result-zone", "#progress-zone",
+    "#activity-zone", "#result-zone", "#progress-zone", "#collab-log",
     "#context-panel")
 
-# 底部输入 dock 的保留行数（CU-TUI-INPUT A4 高度预算真源：CSS
-# height 与内容预算共用此常量，绝不双写）。
-_DOCK_ROWS = 3
-
-# 回执有界寿命：按刷新次数衰减（零时钟，确定性）。
-_RECEIPT_TICKS = 6
+# UX2-R1：composer 行数上限（内部滚动，绝不外撑破坏布局）与
+# Collaboration Log ring 上限（D 裁决：ring 仅淘汰显示行——有损
+# 派生缓存，真相在引擎三源 + TraceScreen）。
+_COMPOSER_MAX_ROWS = 5
+_LOG_RING_LINES = 1000
 
 # 结果揭示有界寿命（Phase V A-3）：终态到达后按刷新次数衰减。
 _RESULT_REVEAL_TICKS = 4
@@ -175,17 +183,112 @@ def _build_classes() -> None:
     from textual.binding import Binding
     from textual.containers import Container, VerticalScroll
     from textual.screen import Screen
-    from textual.widgets import Static, TabbedContent, TabPane
+    from textual.widgets import Static, TabbedContent, TabPane, TextArea
+    from textual.widgets import RichLog
+
+    class CockpitComposer(TextArea):  # type: ignore[misc]
+        """UX2-R1 持久转向 composer（DESIGN LOCK v1.1 §5）：唯一文本
+        输入面、唯一 focusable widget——从漏斗 task 输入到终态恒在场、
+        恒钉底、恒持焦点（真 caret → 终端 IME 候选窗锚定输入位）。
+
+        键语义（全部先于 TextArea 原生处理，prevent_default+stop）：
+        - Enter 恒提交（漏斗态=task 判定，Start 后=STEER 提交）；
+          Ctrl+J / Shift+Enter = 换行（B 裁决：Ctrl+J 字节级 LF 恒
+          可达为保底主键，Alt+Enter 终端可达处同义——多终端差异）；
+        - 空缓冲裸键 = hidden shortcuts（_BARE_COMMAND_KEYS +
+          ←/→ 选中 + space 展开——R1 契约降权不降义）；缓冲非空时
+          一切归文本（含 p/q 字母本体）；
+        - MODE_CONFIRM：y/n/escape 由确认条消费，其余仍归 composer。
+        typing 全程零投影（TextArea 自渲染；AC：typing 不触发完整
+        projection——CU-PERF-1 边界延续）。
+        """
+
+        async def _on_key(self, event) -> None:
+            key = getattr(event, "key", "")
+            app = self.app
+            if app._funnel_pre_start():
+                await self._funnel_key(event, key)
+                return
+            if app._cockpit_mode == MODE_CONFIRM:
+                if key in ("y", "n", "escape"):
+                    event.prevent_default()
+                    event.stop()
+                    app._confirm_key(key)
+                    return
+                await super()._on_key(event)
+                return
+            if key == "enter":
+                event.prevent_default()
+                event.stop()
+                app._composer_submit()
+                return
+            if key in ("ctrl+j", "shift+enter"):
+                event.prevent_default()
+                event.stop()
+                self.insert("\n")
+                return
+            if key == "escape":
+                # 清稿（单一层级——常驻 composer 无"退出"目标）
+                event.prevent_default()
+                event.stop()
+                if self.text:
+                    self.text = ""
+                    app._refresh_dock()
+                return
+            if (not self.text and key in _BARE_COMMAND_KEYS
+                    and event.character is not None):
+                event.prevent_default()
+                event.stop()
+                app._bare_key(key)
+                return
+            if not self.text and key in ("left", "right", "space"):
+                # 空缓冲导航/展开（R1 契约：←/→ 选中、space 展开；
+                # Enter 已归提交——空提交 no-op 既有语义）
+                event.prevent_default()
+                event.stop()
+                app._pipeline_nav_key(key)
+                return
+            await super()._on_key(event)
+
+        async def _funnel_key(self, event, key: str) -> None:
+            """F-R1：漏斗 task 输入 = composer 本体（判定逻辑零改动，
+            仅输入面迁移）。q 仅空缓冲退出、ESC 清稿不退出、可打印
+            字符原生入缓冲——CU-TUI-5 §十二语义逐字保持。"""
+            app = self.app
+            if key == "enter":
+                event.prevent_default()
+                event.stop()
+                app._funnel_enter()
+                return
+            if key == "escape":
+                event.prevent_default()
+                event.stop()
+                app._funnel_composer_clear()
+                return
+            if key == "q" and not self.text:
+                event.prevent_default()
+                event.stop()
+                app.exit()
+                return
+            if key in ("ctrl+j", "shift+enter"):
+                event.prevent_default()
+                event.stop()
+                self.insert("\n")
+                return
+            await super()._on_key(event)
 
     class CockpitApp(App):  # type: ignore[misc]
-        """主界面：六区 + 固定底 dock + （≥140 列）Context 面板。"""
+        """主界面：五层结构 Header / Task / Pipeline / Collaboration
+        Log / Persistent Composer（UX2-R1）+ （≥140 列）Context 面板
+        + detail/activity/result 观察区（保留原位，R1 契约不动）。"""
 
         CSS = f"""
         #funnel-screen {{ display: none; }}
-        #input-dock {{ dock: bottom; height: {_DOCK_ROWS}; }}
-        #dock-controls {{ height: 1; }}
+        #input-dock {{ dock: bottom; height: auto; }}
         #dock-receipt {{ height: 1; }}
-        #dock-input {{ height: 1; }}
+        #dock-controls {{ height: 1; }}
+        #composer {{ height: auto; max-height: {_COMPOSER_MAX_ROWS}; }}
+        #collab-log {{ height: 1fr; }}
         #context-panel {{ dock: right; width: 28; display: none; }}
         #header-zone {{ height: 1; }}
         #detail-zone {{ height: auto; }}
@@ -193,9 +296,9 @@ def _build_classes() -> None:
         #result-zone {{ height: auto; }}
         """
 
-        # 字母键全部经 on_key 按态分发（避免框架级绑定绕过状态机）。
         # tab 是 Screen 默认焦点键会先期消费——priority 绑定改走
-        # composer 的 target 切换；ctrl+c 与 q 同径（冻结决策）。
+        # target 切换（hidden shortcut）；ctrl+c 与 q 同径（冻结决策）。
+        # 其余键全部经常驻 composer（唯一焦点）按态分发。
         BINDINGS = [
             Binding("tab", "cockpit_tab", "Target", priority=True),
             Binding("ctrl+c", "cockpit_quit", "Quit", priority=True),
@@ -217,12 +320,13 @@ def _build_classes() -> None:
             # CU-TUI-4 注入面（DISPATCH / READ 两径，均零引擎知识）
             self._cockpit_control = control
             self._cockpit_revision_pending = revision_pending
-            # 呈现态（绝不入投影输入、绝不持久、绝不写回事实源）
+            # 呈现态（绝不入投影输入、绝不持久、绝不写回事实源）。
+            # UX2-R1：composer 常驻——_cockpit_revise_text 缓冲真源
+            # 移入 #composer widget（单一真相），此处只余 mode
+            # （CONFIRM 确认条）与 target（session-sticky）。
             self._cockpit_mode = MODE_COMMAND
-            self._cockpit_revise_text = ""
             self._cockpit_revise_target = _TARGETS[0]
             self._cockpit_receipt = None
-            self._cockpit_receipt_ttl = 0
             self.outcome = None
             self.failure = None
             self._cockpit_thread = None
@@ -264,11 +368,19 @@ def _build_classes() -> None:
             self._cockpit_start_composition = start_composition
             self._cockpit_composed = None
             self._cockpit_funnel_timeout = timeout_seconds
-            self._cockpit_funnel_buffer = task_token if task_token else ""
+            # F-R1：task 草稿真源 = #composer widget；此 prefill 在
+            # 漏斗挂载时装载（stage 派生同旧：非空白即 COMPOSING）。
+            self._cockpit_funnel_prefill = task_token if task_token else ""
             self._cockpit_funnel_message = ()
             self._cockpit_stage = (
-                STAGE_COMPOSING if self._cockpit_funnel_buffer.strip()
+                STAGE_COMPOSING if self._cockpit_funnel_prefill.strip()
                 else STAGE_NOT_STARTED)
+            # UX2-R1 Collaboration Log（D 裁决：有损派生缓存）——
+            # R1 骨架恰两源：echo（用户提交原文）+ 回执（控制面
+            # 同步投影）；ring 上限仅淘汰显示行，log_text 为测试镜像
+            # （funnel_text 先例）。Task 永不进 Log（AC17）。
+            self._cockpit_log_lines = []
+            self.log_text = ""
             self._cockpit_disclosure = None
             self._cockpit_version_text = _version_text()
             if composition_preview is not None:
@@ -277,9 +389,10 @@ def _build_classes() -> None:
         # ------------------------------------------------ 布局
 
         def compose(self):
-            # R1 主屏次序：Header / Task / Collaboration Pipeline /
-            # Agent Detail（选中且展开时有界窗）/ Live Activity /
-            # Result / Status / Bottom Dock（+ ≥140 Context）
+            # UX2-R1 五层结构：Header / Task / Collaboration Pipeline /
+            # （detail/activity/result 观察区保留原位）/ Collaboration
+            # Log（弹性 1fr）/ Persistent Composer dock（确认条 +
+            # composer + hint）+ ≥140 Context
             yield Static("", id="funnel-screen")
             yield Static("", id="header-zone")
             yield Static("", id="task-zone")
@@ -288,10 +401,14 @@ def _build_classes() -> None:
             yield Static("", id="activity-zone")
             yield Static("", id="result-zone")
             yield Static("", id="progress-zone")
+            yield RichLog(id="collab-log", max_lines=_LOG_RING_LINES,
+                          wrap=True, auto_scroll=True)
             with Container(id="input-dock"):
-                yield Static("", id="dock-controls")
                 yield Static("", id="dock-receipt")
-                yield Static("", id="dock-input")
+                yield CockpitComposer(
+                    id="composer", compact=True, soft_wrap=True,
+                    show_line_numbers=False)
+                yield Static("", id="dock-controls")
             yield Static("", id="context-panel")
 
         def on_mount(self) -> None:
@@ -302,11 +419,19 @@ def _build_classes() -> None:
 
         def _funnel_mount(self) -> None:
             """漏斗初始呈现：主界面观察区隐藏，单一漏斗屏在场。
-            CU-TUI-INPUT A1/A2：底部输入 dock 恒在场（不在隐藏组）——
-            漏斗与 RUNNING 同一 dock，输入位置全程恒底。"""
+            F-R1：task 输入面 = 常驻 composer（prefill 装载 + 持焦）。"""
             for selector in _MAIN_ZONE_SELECTORS:
                 self.query_one(selector).display = False
             self.query_one("#funnel-screen").display = True
+            composer = self.query_one("#composer")
+            if self._cockpit_funnel_prefill:
+                # 内容安全门同律（funnel_input_line 先例）：unsafe
+                # prefill 以占位符装载——秘密绝不进入 TUI 呈现态。
+                composer.text = funnel_prefill_text(
+                    self._cockpit_funnel_prefill)
+                # 光标归位文档末尾（.text 赋值后光标停起点，键入会前插）
+                composer.move_cursor(composer.document.end)
+            composer.focus()
             self._funnel_refresh()
 
         def _running_mount(self) -> None:
@@ -314,12 +439,34 @@ def _build_classes() -> None:
             self.query_one("#funnel-screen").display = False
             for selector in _MAIN_ZONE_SELECTORS:
                 self.query_one(selector).display = True
+            self._focus_composer()
             self._refresh()
             # 数据驱动重投影：仅当事实源变化时内容才变化（零动画）
             self.set_interval(0.5, self._refresh)
             self._cockpit_thread = threading.Thread(
                 target=self._drive_loop, daemon=True)
             self._cockpit_thread.start()
+
+        def _focus_composer(self) -> None:
+            """UX2-R1：composer 唯一焦点（自愈式——TraceScreen pop 或
+            任何焦点漂移后回到 composer；绝不抢 TraceScreen 在顶期）。"""
+            if isinstance(self.screen, TraceScreen):
+                return
+            composer = self.query("#composer")
+            if composer and self.focused is not composer[0]:
+                composer[0].focus()
+
+        def _composer_text(self) -> str:
+            """composer 缓冲只读读取（teardown 竞态安全）。"""
+            composer = self.query("#composer")
+            return composer[0].text if composer else ""
+
+        def _on_text_area_changed(self, event) -> None:
+            # F-R1：任何编辑路径（键、BINDING 如 backspace、粘贴）统一
+            # 经 Changed 消息同步漏斗 stage——显式调用时序上先于
+            # BINDING 处理，覆盖不了删除/粘贴类编辑。
+            if self._funnel_pre_start():
+                self._funnel_after_edit()
 
         # ------------------------------------------------ 数据
 
@@ -374,6 +521,8 @@ def _build_classes() -> None:
                 # teardown 竞态：主屏节点已不在 DOM（App 关停换屏窗口）
                 # ——跳过本轮渲染。纯呈现关切，零事实影响。
                 return
+            # UX2-R1：唯一焦点自愈（TraceScreen pop / 焦点漂移后归位）
+            self._focus_composer()
             if advance_tick:
                 self._cockpit_tick += 1
             values = self._collect_inputs()
@@ -404,15 +553,14 @@ def _build_classes() -> None:
             if lifecycle != self._cockpit_prev_lifecycle:
                 if lifecycle in _TERMINAL_LIFECYCLE_HINTS:
                     self._cockpit_result_reveal_ticks = _RESULT_REVEAL_TICKS
-                    # CU-INPUT-2 W5（C2-R1）：终态塌缩——对已终结的
-                    # 执行 steer 无意义，保留会伪造可提交假象；清缓冲
-                    # 塌缩回 COMMAND（单向，T/Q/L 恢复首要性）。本块
-                    # 恒在 UI 线程执行（interval / call_from_thread）。
-                    # E 仍可再开 composer → Enter → 真实 dispatch →
-                    # session 终态门诚实 REJECTED 回执（零特判分支）。
-                    if self._cockpit_mode == MODE_COMPOSER:
-                        self._cockpit_revise_text = ""
-                        self._cockpit_mode = MODE_COMMAND
+                    # UX2-R1 终态塌缩：清 composer 草稿（对已终结执行
+                    # steer 无意义，保留会伪造可提交假象）。composer
+                    # 常驻——终态键入+Enter 仍走真实 dispatch → session
+                    # 终态门诚实 REJECTED 回执入 Log（零特判分支）。
+                    # 本块恒在 UI 线程执行（interval / call_from_thread）。
+                    composer = self.query("#composer")
+                    if composer and composer[0].text:
+                        composer[0].text = ""
                 self._cockpit_prev_lifecycle = lifecycle
             if advance_tick and self._cockpit_result_reveal_ticks > 0:
                 self._cockpit_result_reveal_ticks -= 1
@@ -468,11 +616,8 @@ def _build_classes() -> None:
             self._zone_update(
                 "#progress-zone",
                 f"{state.progress_line}\n{state.tokens_line}")
-            self._zone_update("#dock-controls",
-                              self._dock_controls_line())
-            self._zone_update("#dock-receipt",
-                              self._dock_receipt_line())
-            self._zone_update("#dock-input", self._dock_input_line())
+            # UX2-R1：dock 两行（hint + 确认条）；receipt 已入 Log
+            self._refresh_dock()
             panel = self.query_one("#context-panel")
             wide = self.size.width >= 140
             if state.context_lines and wide and self._cockpit_show_context:
@@ -481,18 +626,14 @@ def _build_classes() -> None:
                 panel.display = True
             else:
                 panel.display = False
-            # 回执有界衰减（按刷新次数，零时钟；零推进渲染不消耗寿命）
-            if advance_tick and self._cockpit_receipt_ttl > 0:
-                self._cockpit_receipt_ttl -= 1
-                if self._cockpit_receipt_ttl == 0:
-                    self._cockpit_receipt = None
 
         # ------------------------------------------------ 高度预算（A4）
 
         def _apply_content_budget(self, values, state, *, result_rows):
             """CU-TUI-INPUT A4：dock 保留高度预算（纯呈现）。
 
-            Σ可见区行数 ≤ 终端高 - _DOCK_ROWS（dock 恒底部 3 行，
+            Σ可见区行数 ≤ 终端高 - dock 动态保留高度
+            （_dock_reserved_rows：composer 1..5 + hint 1 + 确认条 0/1，
             内容绝不绘入其保留区）。优先集（§二十二）恒保留：Header
             (1) / Task (1) / Collaboration / Status(2)。让位次序：
             (1) activity 尾窗整区隐藏——Trace 仍是全量出口；
@@ -504,7 +645,7 @@ def _build_classes() -> None:
             超出经 ProjectionInputs 呈现参数第二遍重建投影——确定性
             纯函数、零事实触碰；未超出时零重建、零行为差。
             返回 (state, detail_fits, activity_fits)。"""
-            avail = (self.size.height or 24) - _DOCK_ROWS
+            avail = (self.size.height or 24) - self._dock_reserved_rows()
             fixed = 2 + len(state.collaboration_lines) + 2
             rem = avail - fixed
             # result 先占位（空态由调用方整区隐藏；非空保留至余量）
@@ -536,31 +677,36 @@ def _build_classes() -> None:
 
         # ------------------------------------------------ dock 呈现
 
-        def _refresh_dock(self) -> None:
-            """CU-INPUT-2 W4：键击级局部渲染——恰三行 dock。
+        def _dock_reserved_rows(self) -> int:
+            """UX2-R1：dock 动态保留高度 = composer 行数（1..上限，
+            内滚不外撑）+ hint 1 + 回执条 1（#dock-receipt 恒 height:1
+            ——空态占位行，MODE_CONFIRM 只换内容不换高）。composer
+            缺席（teardown 竞态）回退 3。
+            # ponytail: 行数按 \\n 计——软换行长行可能低估 1-2 行，
+            余量由 dock auto 高度自然吸收；若实测裁剪再引入按显示宽计算。"""
+            composer = self.query("#composer")
+            if not composer:
+                return 3
+            rows = len(composer[0].text.splitlines()) or 1
+            rows = min(max(rows, 1), _COMPOSER_MAX_ROWS)
+            return rows + 2
 
-            只重算三行纯派生（controls/receipt/input）经 _zone_update
-            写门镜像比较；零 build_projection、零事件扫描、零主屏
-            zone 触碰（CU-PERF-1 W1 延伸：typing 路径此前每键击
-            全量 _refresh——本方法取代之，键击性能严格优于基线）。
-            全量事实重投影仍由 0.5s interval _refresh 独占。"""
+        def _refresh_dock(self) -> None:
+            """键击级局部渲染（CU-PERF-1 W1 延伸）：恰两行 dock
+            （hint + 确认条）。composer 本体由 TextArea 自渲染——
+            零 build_projection、零事件扫描、零主屏 zone 触碰。"""
             self._zone_update("#dock-controls",
                               self._dock_controls_line())
             self._zone_update("#dock-receipt",
                               self._dock_receipt_line())
-            self._zone_update("#dock-input", self._dock_input_line())
 
         def _dock_controls_line(self) -> str:
-            """Controls 行：键位提示（Lifecycle × 交互态派生）。
-
-            回执已分离至独立 receipt 行；提示只呈现当前真实可用的
-            键——RUNNING 不提示 R（受理必 NO_OP）、停驻态不提示 P、
-            终态只剩 T/Q；≥140 列追加 [C]ontext（面板真实在场）。
-            R2：COMMAND 三档均含语言提示（EN 态 [L]中文 / ZH 态
-            [L] EN——指向对侧语言，可发现性不依赖先验知识）；键字母
-            恒 EN，动词经投影层闭集词表（单一词表真源）。
-            CU-TUI-INPUT A1：漏斗期本行 = 两键提示（EN 冻结，
-            funnel_keys_hint 唯一真源——与回显同处底部 dock）。"""
+            """Hint 行（composer 下方，恒一行）：提交力学恒在 +
+            lifecycle 动词（空缓冲 hidden shortcuts 的唯一可发现面）
+            + 语言/退出提示 + target 角标。R2：slash 命令面接管可发现
+            性后本行收敛。键字母恒 EN，动词经投影层闭集词表（单一
+            词表真源；语言提示键字母恒 EN mandates——[L]中文 而非
+            [L]Chinese，旧惯例保持）。"""
             if self._funnel_pre_start():
                 return funnel_keys_hint(
                     ascii_only=self._cockpit_ascii)
@@ -570,92 +716,101 @@ def _build_classes() -> None:
                 return ui_label(key, locale)
 
             def verb(key):
-                # 键字母恒 EN（ mandates §十九/§三十三：[L]中文 而非
-                # [中]…）；EN 态首字母入方括号（[R]esume 惯例），
-                # ZH 态完整动词跟在 EN 键字母后（[R]继续）。
                 label = word(key)
                 if label == key:
                     label = label[1:]
                 return f"[{key[0]}]{label}"
 
-            if self._cockpit_mode == MODE_COMPOSER:
-                return word("revise · enter submit · tab target · esc cancel")
-            if self._cockpit_mode == MODE_CONFIRM:
-                return word("abort? · y confirm · n/esc cancel")
+            submit = word("enter send · ctrl+j newline")
+            language = "[L] EN" if locale == "zh" else "[L]中文"
+            target = self._cockpit_revise_target
             lifecycle = getattr(
                 getattr(self, "last_state", None), "lifecycle", None)
-            language = "[L] EN" if locale == "zh" else "[L]中文"
-            if lifecycle in ("PAUSED", "PARKED"):
-                line = (f"{verb('Resume')} {verb('Edit')} "
-                        f"{verb('Abort')} {verb('Trace')} "
-                        f"{language} {verb('Quit')}")
+            if self._cockpit_mode == MODE_CONFIRM:
+                line = word("abort? · y confirm · n/esc cancel")
+            elif lifecycle in ("PAUSED", "PARKED"):
+                line = (f"{submit} {verb('Resume')} {verb('Abort')} "
+                        f"{verb('Trace')} {language} {verb('Quit')} "
+                        f"{word('→')} {target}")
             elif lifecycle in _TERMINAL_LIFECYCLE_HINTS:
-                line = f"{verb('Trace')} {language} {verb('Quit')}"
+                line = (f"{submit} {verb('Trace')} {language} "
+                        f"{verb('Quit')} {word('→')} {target}")
             else:
-                line = (f"{verb('Pause')} {verb('Edit')} "
-                        f"{verb('Abort')} {verb('Trace')} "
-                        f"{language} {verb('Quit')}")
+                line = (f"{submit} {verb('Pause')} {verb('Abort')} "
+                        f"{verb('Trace')} {language} {verb('Quit')} "
+                        f"{word('→')} {target}")
             if self.size.width >= 140:
                 line += f" {verb('Context')}"
             return line
 
         def _dock_receipt_line(self) -> str:
-            """Receipt 行：瞬态回执（TTL 内在场，否则空行）。
-
-            回执是控制结果的只读投影；持久控制真相唯一在
-            账本（Trace CTRL tab），本行绝不成为事实源。"""
-            if self._cockpit_receipt and self._cockpit_receipt_ttl > 0:
-                return self._cockpit_receipt
-            return ""
-
-        def _dock_input_line(self) -> str:
-            """Input 行：漏斗回显 / 转向提示 / 修订编辑 / 确认问题。
-
-            CU-TUI-INPUT A1：漏斗期 = 底部 dock 回显行（光标 | 由本层
-            追加——TUI-4 composer 惯例；安全门/截断在投影层）。
-            CU-INPUT-2 W8（C2-R1）：COMMAND 态呈转向提示（A3 [COMMAND]
-            标签的前提被 auto-ingress 反转——普通字符从 no-op 变为
-            即输入）。
-            CU-INPUT-2 W9：composer 行超宽截断——缓冲体经投影层
-            truncate_to_width 收窄（尾部 ... 诚实溢出），尾随光标 |
-            恒在场（纯呈现，绝不产生横滚）。"""
-            if self._funnel_pre_start():
-                return funnel_input_line(
-                    self._cockpit_funnel_buffer,
-                    width=self.size.width or 100,
-                    ascii_only=self._cockpit_ascii) + "|"
-            if self._cockpit_mode == MODE_COMPOSER:
-                prefix = f"revise [{self._cockpit_revise_target}] "
-                budget = (self.size.width or 100) - len(prefix) - 1
-                body = truncate_to_width(self._cockpit_revise_text, budget)
-                return f"{prefix}{body}|"
+            """确认条（composer 上方）：仅 MODE_CONFIRM 在场；回执已
+            迁入 Collaboration Log（AC4：回执不再瞬态闪没）。"""
             if self._cockpit_mode == MODE_CONFIRM:
                 return "abort? (y/n)"
-            # CU-INPUT-2 W8（C2-R1）：A3 [COMMAND] 标签前提反转——
-            # 普通字符从 no-op 变为即输入，标签改呈转向提示（闭集
-            # 词表恰一词条；enter 键字母恒 EN）。
-            return ui_label("type to steer · enter submits",
-                            self._cockpit_locale)
+            return ""
 
         # ------------------------------------------------ 意图外发（唯一通道）
 
         def _dispatch(self, kind, text=None, target=None):
             """DISPATCH 边界：呈现层意图 → 注入回调外发意图 → 同步回执。
 
-            RESUME/ABORT 受理（ACCEPTED）时唤醒驱动循环的停驻等待
-            ——wake 仅为私有同步原语，绝非执行真相。dispatcher 缺席
-            时诚实 no-op（零回执、零伪造状态）。"""
+            UX2-R1（AC4）：回执行入 Collaboration Log（持久可见），
+            不再是 TTL 瞬态；_cockpit_receipt 仅存最后回执镜像（测试
+            消费面）。RESUME/ABORT 受理（ACCEPTED）时唤醒驱动循环的
+            停驻等待——wake 仅为私有同步原语，绝非执行真相。dispatcher
+            缺席时诚实 no-op（零回执、零伪造状态）。"""
             if self._cockpit_control is None:
                 return None
             result = self._cockpit_control(kind, text=text, target=target)
             self._cockpit_receipt = control_receipt_line(
                 result, kind=kind, ascii_only=self._cockpit_ascii)
-            self._cockpit_receipt_ttl = _RECEIPT_TICKS
+            self._log_append(self._cockpit_receipt)
             status = getattr(result, "status", None)
             if (kind in ("RESUME", "ABORT")
                     and getattr(status, "value", status) == "ACCEPTED"):
                 self._cockpit_wake.set()
             return result
+
+        def _log_append(self, line: str) -> None:
+            """Collaboration Log 追加（UX2-R1 骨架：echo + 回执两源）。
+
+            Log 是有损派生缓存（D 裁决）：ring 上限仅淘汰显示行，
+            真相在引擎三源 + TraceScreen——本层绝不从 Log 读回任何
+            语义。log_text 快照仅供测试断言（funnel_text 先例）。"""
+            self.query_one("#collab-log").write(line)
+            self._cockpit_log_lines.append(line)
+            del self._cockpit_log_lines[:-_LOG_RING_LINES]
+            self.log_text = "\n".join(self._cockpit_log_lines)
+
+        def _echo_line(self, text: str) -> str:
+            """提交回显行（echo 源 = 用户提交原文，UI 自有呈现态）。"""
+            label = ui_label("you · steer", self._cockpit_locale)
+            return f"{label} [{self._cockpit_revise_target}] {text}"
+
+        def _composer_submit(self) -> None:
+            """Enter 提交（常驻 composer 唯一提交径）。
+
+            空白 no-op（既有语义）；dispatcher 缺席 no-op（零回执零
+            伪造，缓冲保持）。提交 = echo 行入 Log + REVISE dispatch +
+            回执行入 Log；缓冲清空、composer 原地不动（AC1）。意图
+            经 cockpit_input 分类（R1 真子集：Start 后恒 STEER）。
+            accepted ≠ applied ≠ honored——applied 只在 Trace CTRL
+            事实面，Log 回执行只呈现同步裁决结果。"""
+            composer = self.query("#composer")
+            text = composer[0].text if composer else ""
+            if not text.strip() or self._cockpit_control is None:
+                return
+            intent = classify_submit(
+                funnel_pre_start=self._funnel_pre_start(),
+                text=text)
+            self._log_append(self._echo_line(text))
+            result = self._dispatch(
+                "REVISE", text=text,
+                target=self._cockpit_revise_target)
+            if result is not None and composer:
+                composer[0].text = ""
+            self._refresh_dock()
 
         # ------------------------------------------------ 首跑漏斗（CU-TUI-5）
 
@@ -667,13 +822,12 @@ def _build_classes() -> None:
 
         def _funnel_refresh(self) -> None:
             """漏斗屏渲染：投影层首屏组装 + 瞬态状态行（no-op 提示/
-            BLOCKED 原因/红行/变更横幅）。CU-TUI-INPUT A1/A2：输入
-            回显与两键提示迁入底部 dock（与 RUNNING 同位——Start 前后
-            输入位置恒底，顶部 body 不再有输入行）；dock 三行经
-            _dock_*_line 漏斗分支供给（单一真源/行）。"""
+            BLOCKED 原因/红行/变更横幅）。F-R1（UX2-R1）：task 输入面
+            = 常驻 composer（缓冲真源 #composer.text）；dock 两行 =
+            两键提示 + 空 确认条。"""
             lines = funnel_first_screen(
                 self._cockpit_version_text, self._cockpit_disclosure,
-                self._cockpit_funnel_buffer,
+                self._composer_text(),
                 width=self.size.width or 100,
                 ascii_only=self._cockpit_ascii,
                 include_input=False)
@@ -681,49 +835,34 @@ def _build_classes() -> None:
                 lines = lines + tuple(self._cockpit_funnel_message)
             self.funnel_text = "\n".join(lines)
             self._zone_update("#funnel-screen", self.funnel_text)
-            self._zone_update("#dock-controls",
-                              self._dock_controls_line())
-            self._zone_update("#dock-receipt",
-                              self._dock_receipt_line())
-            self._zone_update("#dock-input", self._dock_input_line())
+            self._refresh_dock()
 
-        def _funnel_key(self, key: str, character) -> None:
-            """漏斗键语义（§十二）：Enter/Esc/Backspace 专属处理；
-            q 仅空缓冲时退出（COMPOSING 中 q 为可打印字符本体）；
-            可打印字符经 event.character 入缓冲（修饰组合结构性排除）。"""
-            if key == "enter":
-                self._funnel_enter()
-                return
-            if key == "escape":
-                # 清空缓冲（不退出）：draft 归零、回到 NOT_STARTED
-                self._cockpit_funnel_buffer = ""
-                self._cockpit_stage = STAGE_NOT_STARTED
+        def _funnel_after_edit(self) -> None:
+            """F-R1：composer 原生编辑后的 stage 同步（派生态：
+            非空白=COMPOSING，空白=NOT_STARTED；stage 跃迁清瞬态
+            消息——CU-TUI-5 可打印分支语义等价）。"""
+            stage = (STAGE_COMPOSING if self._composer_text().strip()
+                     else STAGE_NOT_STARTED)
+            if stage != self._cockpit_stage:
+                self._cockpit_stage = stage
                 self._cockpit_funnel_message = ()
-                self._funnel_refresh()
-                return
-            if key == "backspace":
-                self._cockpit_funnel_buffer = \
-                    self._cockpit_funnel_buffer[:-1]
-                if not self._cockpit_funnel_buffer:
-                    self._cockpit_stage = STAGE_NOT_STARTED
-                self._funnel_refresh()
-                return
-            if key == "q" and not self._cockpit_funnel_buffer:
-                # 前置态直接退出 exit 0（零执行、零事件、零确认）
-                self.exit()
-                return
-            if character is not None and len(character) == 1:
-                self._cockpit_funnel_buffer += character
-                self._cockpit_stage = STAGE_COMPOSING
-                self._cockpit_funnel_message = ()
-                self._funnel_refresh()
-                return
-            # 其余（修饰组合/功能键）no-op
+            self._funnel_refresh()
+
+        def _funnel_composer_clear(self) -> None:
+            """F-R1：ESC 清稿（原 _funnel_key escape 分支语义——
+            不退出、draft 归零、回 NOT_STARTED、清瞬态消息）。"""
+            composer = self.query("#composer")
+            if composer:
+                composer[0].text = ""
+            self._cockpit_stage = STAGE_NOT_STARTED
+            self._cockpit_funnel_message = ()
+            self._funnel_refresh()
 
         def _funnel_enter(self) -> None:
-            """Enter 判定（§十二顺序）：空白 no-op 提示 → 预览 BLOCKED
-            原因+hint → 就绪才经注入闭包 Start（真相零进本层）。"""
-            buffer = self._cockpit_funnel_buffer
+            """Enter 判定（§十二顺序，F-R1 缓冲真源改 composer）：
+            空白 no-op 提示 → 预览 BLOCKED 原因+hint → 就绪才经注入
+            闭包 Start（真相零进本层；判定逻辑零改动）。"""
+            buffer = self._composer_text()
             feedback = funnel_enter_lines(self._cockpit_disclosure, buffer)
             if feedback:
                 self._cockpit_funnel_message = feedback
@@ -750,7 +889,8 @@ def _build_classes() -> None:
 
         def _funnel_start_success(self, composed) -> None:
             """Start 成功：late-bind 组合句柄 → 换屏 RUNNING（同一
-            App、同一次 run；内层三态/P/R/E/A/X/Trace 原样接管）。"""
+            App、同一次 run；常驻 composer 原位接管 STEER 输入——
+            task 文本进 Task zone，绝不入 Log，AC17）。"""
             self._cockpit_composed = composed
             self._cockpit_stage = STAGE_RUNNING
             self._cockpit_drive = composed.drive
@@ -762,25 +902,32 @@ def _build_classes() -> None:
             self._cockpit_session = composed.session
             self._cockpit_control = composed.dispatch_control
             self._cockpit_revision_pending = composed.revision_pending
+            composer = self.query("#composer")
+            if composer:
+                composer[0].text = ""
             self._running_mount()
 
-        # ------------------------------------------------ 键位（状态机）
+        # ------------------------------------------------ 键位（常驻 composer）
 
         def on_key(self, event) -> None:
+            """UX2-R1：常态输入全部经常驻 composer（唯一焦点）消费；
+            到达此处的只有 TraceScreen 在顶时未被其绑定消费的冒泡键
+            ——"冒泡命令照旧触发"契约保持（v1.0 §8）；语言切换仅
+            主屏（冻结先例）；t 不再二次叠屏（Trace 在顶 no-op）。"""
             key = getattr(event, "key", "")
-            character = getattr(event, "character", None)
-            if self._funnel_pre_start():
-                self._funnel_key(key, character)
+            if isinstance(self.screen, TraceScreen):
+                if key in ("l", "L"):
+                    return
+                if key in ("p", "r", "a", "q", "c"):
+                    self._bare_key(key)
                 return
-            if self._cockpit_mode == MODE_COMPOSER:
-                self._composer_key(key, character)
-                return
-            if self._cockpit_mode == MODE_CONFIRM:
-                self._confirm_key(key)
-                return
-            self._command_key(key, character)
 
-        def _command_key(self, key: str, character) -> None:
+        def _bare_key(self, key: str) -> None:
+            """空缓冲裸键 hidden shortcuts（六键契约降权不降义——
+            语义逐字沿用 _command_key 旧分支）。e 不再是命令：
+            "打开 composer" 结构性无意义（召回编辑是 R2 /revise）。
+            仅两径可达：composer 空缓冲（composer._on_key 拦截）或
+            TraceScreen 在顶冒泡——后者 l/L 已被 on_key 先行排除。"""
             if key == "p":
                 self._dispatch("PAUSE")
                 self._refresh()
@@ -790,18 +937,6 @@ def _build_classes() -> None:
             elif key == "a":
                 self._cockpit_mode = MODE_CONFIRM
                 self._refresh()
-            elif key == "escape":
-                # Phase P：ESC@COMMAND 与 A 同径进入中止确认——零新
-                # 语义、零绕过（本项目无 runtime 取消契约，不发明）
-                self._cockpit_mode = MODE_CONFIRM
-                self._refresh()
-            elif key == "e":
-                # CU-INPUT-2 W6：Trace 在顶 no-op（l-guard 同型）——修
-                # 既有"开在被遮蔽屏后"怪癖；输入面在 Trace 顶抑制，
-                # pop 回主屏即恢复完整输入面。
-                if isinstance(self.screen, TraceScreen):
-                    return
-                self._open_composer()
             elif key == "q":
                 self._quit_path()
             elif key == "t":
@@ -810,97 +945,34 @@ def _build_classes() -> None:
                 self._cockpit_show_context = not self._cockpit_show_context
                 self._refresh()
             elif key in ("l", "L"):
-                # R2 语言切换：仅 COMMAND 主屏。TraceScreen 未绑定键
-                # 会冒泡至 App——显式拦截（no-op、不刷新）；切换走
-                # 零推进渲染（动画 tick/揭示/回执寿命一概不动），
-                # 零外发、零事实触碰。注意先判态再判屏：composer/
-                # confirm 的 l 已在各自分支消费，永不至此。
-                if (self._cockpit_mode == MODE_COMMAND
-                        and not isinstance(self.screen, TraceScreen)):
-                    self._cockpit_locale = (
-                        "zh" if self._cockpit_locale == "en" else "en")
-                    self._refresh(advance_tick=False)
-            elif key in ("left", "right"):
-                # R1 选中移动：纯呈现态（clamp、空组合 no-op、零外发）
-                if self._cockpit_plan:
-                    delta = -1 if key == "left" else 1
-                    self._cockpit_selected_index = max(
-                        0, min(self._cockpit_selected_index + delta,
-                               len(self._cockpit_plan) - 1))
-                self._refresh()
-            elif key in ("enter", "space"):
-                # R1 展开/折叠选中 agent：绑定稳定 stage 身份（Enter
-                # 与 Space 同径）；切换即自动折叠前一个（至多一个展开）
-                if self._cockpit_plan:
-                    index = min(self._cockpit_selected_index,
-                                len(self._cockpit_plan) - 1)
-                    stage = self._cockpit_plan[index][0]
-                    self._cockpit_expanded_stage = (
-                        None if self._cockpit_expanded_stage == stage
-                        else stage)
-                self._refresh()
-            elif (character is not None and len(character) == 1
-                    and key not in _INGRESS_EXEMPT):
-                # CU-INPUT-2 W1（C2-R1）：COMMAND 态 auto-ingress——
-                # 非命令可打印字符直接开 composer 入缓冲（此前 no-op，
-                # CU-TUI-5 漏斗"q 仅空缓冲退出"同哲学的 RUNNING 推广）。
-                # 命令键集豁免（六键 + c/l/L；enter/space 已在上方分支
-                # 消费）逐字保持既有契约；COMMAND ⇒ 缓冲恒空（不变量），
-                # 故此处赋值即入。W6：Trace 在顶抑制——绝不向被遮蔽的
-                # dock 打字。
-                if isinstance(self.screen, TraceScreen):
-                    return
-                self._cockpit_revise_text = character
-                self._cockpit_mode = MODE_COMPOSER
-                self._refresh_dock()
-            # 其余（修饰组合/功能键）no-op（零副作用）
+                # 零推进渲染（动画 tick/揭示一概不动）、零外发、
+                # 零事实触碰（R2 冻结语义原样）
+                self._cockpit_locale = (
+                    "zh" if self._cockpit_locale == "en" else "en")
+                self._refresh(advance_tick=False)
 
-        def _open_composer(self) -> None:
-            # CU-INPUT-2 W7（C2-R1）：target session-sticky——不再经
-            # 此处重置（tab 轮换的唯一记忆；COMMAND ⇒ 缓冲恒空不变量
-            # 在此重申）。W4：mode 跃迁只动 dock 三行——局部渲染。
-            self._cockpit_revise_text = ""
-            self._cockpit_mode = MODE_COMPOSER
-            self._refresh_dock()
+        def _pipeline_nav_key(self, key: str) -> None:
+            """空缓冲导航/展开（R1 契约：←/→ 选中、space 展开；Enter
+            已归提交——空提交 no-op 既有语义）。纯呈现态：clamp、
+            空组合 no-op、零外发。"""
+            if not self._cockpit_plan:
+                return
+            if key in ("left", "right"):
+                delta = -1 if key == "left" else 1
+                self._cockpit_selected_index = max(
+                    0, min(self._cockpit_selected_index + delta,
+                           len(self._cockpit_plan) - 1))
+                self._refresh()
+            elif key == "space":
+                index = min(self._cockpit_selected_index,
+                            len(self._cockpit_plan) - 1)
+                stage = self._cockpit_plan[index][0]
+                self._cockpit_expanded_stage = (
+                    None if self._cockpit_expanded_stage == stage
+                    else stage)
+                self._refresh()
 
-        def _composer_key(self, key: str, character) -> None:
-            if key == "escape":
-                # CU-INPUT-2 W3（C2-R1）：ESC 阶梯——缓冲非空先清稿
-                # （留在 COMPOSER），空缓冲才返回 COMMAND；零意图外发、
-                # 零事实变化（漏斗/确认面同款单一退层隐喻）。
-                if self._cockpit_revise_text:
-                    self._cockpit_revise_text = ""
-                    self._refresh_dock()
-                    return
-                self._cockpit_mode = MODE_COMMAND
-                self._refresh_dock()
-                return
-            if key == "enter":
-                if (self._cockpit_control is not None
-                        and self._cockpit_revise_text.strip()):
-                    result = self._dispatch(
-                        "REVISE", text=self._cockpit_revise_text,
-                        target=self._cockpit_revise_target)
-                    if result is not None:
-                        # CU-INPUT-2 W2（C2-R1）：stay-open——提交清空
-                        # 缓冲、留在 COMPOSER（连续 A→Enter→B→Enter
-                        # 自然流；回 COMMAND 只经 ESC 阶梯）。回执由
-                        # _dispatch 同步落 TTL 行（accepted ≠ applied ≠
-                        # honored——applied 只在 Trace CTRL 事实面）。
-                        self._cockpit_revise_text = ""
-                self._refresh_dock()
-                return
-            if key == "backspace":
-                self._cockpit_revise_text = self._cockpit_revise_text[:-1]
-                self._refresh_dock()
-                return
-            if character is not None and len(character) == 1:
-                # 可打印字符本体（含标点/空格；修饰组合与非打印键为
-                # None，结构性排除——零猜测映射）。W4：键击级局部
-                # dock 渲染——零 build_projection（CU-PERF-1 延伸）。
-                self._cockpit_revise_text += character
-                self._refresh_dock()
-            # 其余（修饰组合/功能键）no-op
+        # ------------------------------------------------ 键位（状态机）
 
         def _confirm_key(self, key: str) -> None:
             if key == "y":
@@ -913,12 +985,15 @@ def _build_classes() -> None:
             # 其余按键 no-op（零外发、零状态变化）
 
         def action_cockpit_tab(self) -> None:
-            """composer 内 target 封闭二选一切换；其余态 no-op。"""
-            if self._cockpit_mode == MODE_COMPOSER:
-                other = [item for item in _TARGETS
-                         if item != self._cockpit_revise_target]
-                self._cockpit_revise_target = other[0]
-                self._refresh_dock()
+            """target 封闭二选一切换（hidden shortcut；仅 Start 后
+            主屏——漏斗态/Trace 在顶 no-op，hint 角标即时更新）。"""
+            if (self._funnel_pre_start()
+                    or isinstance(self.screen, TraceScreen)):
+                return
+            other = [item for item in _TARGETS
+                     if item != self._cockpit_revise_target]
+            self._cockpit_revise_target = other[0]
+            self._refresh_dock()
 
         def action_cockpit_quit(self) -> None:
             """Ctrl-C 与 q 同径（冻结决策）。"""

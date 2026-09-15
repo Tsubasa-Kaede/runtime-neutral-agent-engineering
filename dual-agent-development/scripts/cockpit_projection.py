@@ -155,25 +155,18 @@ _LABELS = {
     # dock 动词（TUI 消费；键字母恒 EN）
     "Pause": ("Pause", "暂停"),
     "Resume": ("Resume", "继续"),
-    "Edit": ("Edit", "编辑"),
     "Abort": ("Abort", "终止"),
     "Trace": ("Trace", "追踪"),
     "Quit": ("Quit", "退出"),
     "Context": ("Context", "上下文"),
-    "revise · enter submit · tab target · esc cancel": (
-        "revise · enter submit · tab target · esc cancel",
-        "修订 · enter 提交 · tab 目标 · esc 取消"),
     "abort? · y confirm · n/esc cancel": (
         "abort? · y confirm · n/esc cancel",
         "中止？· y 确认 · n/esc 取消"),
-    # CU-TUI-INPUT A3：COMMAND 模式标签（TUI 消费；单键命令面的
-    # 呈现标记，替代误导性的 shell 风格 ">" 提示符）
-    "command": ("command", "命令"),
-    # CU-INPUT-2 W8（C2-R1）：COMMAND 态转向提示——A3 [COMMAND] 标签的
-    # 前提反转（普通字符从 no-op 变为即输入）；enter 键字母恒 EN
-    # （既有 mandates：键字母不翻译）
-    "type to steer · enter submits": ("type to steer · enter submits",
-                                      "输入即可转向 · enter 提交"),
+    # UX2-R1：常驻 composer hint（提交力学——键字母恒 EN 既有
+    # mandates）与 Log echo 行词条（闭集纪律：Log 行全部经词表）
+    "enter send · ctrl+j newline": ("enter send · ctrl+j newline",
+                                    "回车发送 · ctrl+j 换行"),
+    "you · steer": ("you · steer", "你 · 转向"),
 }
 
 
@@ -1167,6 +1160,16 @@ def funnel_input_line(task_buffer, *, width=100, ascii_only=False):
     if ascii_only:
         line = _to_ascii(line)
     return line
+
+
+def funnel_prefill_text(task_buffer):
+    """漏斗 prefill 的缓冲装载形态（UX2-R1 F-R1）：内容安全门与
+    funnel_input_line 同律——unsafe 内容以占位符装载（秘密绝不
+    进入 TUI 呈现态/缓冲）。确定性纯函数。"""
+    buffer_text = str(task_buffer)
+    if contains_unsafe_content(buffer_text):
+        buffer_text = _FUNNEL_REDACTED
+    return buffer_text
 
 
 def funnel_keys_hint(*, ascii_only=False):

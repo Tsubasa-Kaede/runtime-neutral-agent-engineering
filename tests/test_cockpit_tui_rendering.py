@@ -342,11 +342,11 @@ class ControlModePilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app._cockpit_mode, "confirm")
             await pilot.press("y")
-            await pilot.press("y")   # C2-R1：第二次 y 已回 command →
-            await pilot.pause()      # auto-ingress 入 steering 缓冲
+            await pilot.press("y")   # UX2-R1：第二次 y 已非确认键 →
+            await pilot.pause()      # 落入常驻 composer 成文本
             self.assertEqual(recorded, [("ABORT", None, None)])
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "y")
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "y")
             gate.release.set()
 
     async def test_confirm_n_returns_without_dispatch(self):
@@ -387,9 +387,8 @@ class ControlModePilotTests(unittest.IsolatedAsyncioTestCase):
             gate.release.set()
 
     async def test_command_mode_ignores_modifier_combos(self):
-        # C2-R1：可打印字符不再 no-op（ingress 由
-        # PersistentComposerPilotTests 覆盖）——本测试收缩为修饰
-        # 组合仍 no-op（character None，结构性排除）。
+        # UX2-R1：普通可打印字符即文本（常驻 composer）；修饰组合
+        # （character None）结构性不产生文本。
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
@@ -398,7 +397,7 @@ class ControlModePilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(recorded, [])
             self.assertEqual(app._cockpit_mode, "command")
-            self.assertEqual(app._cockpit_revise_text, "")
+            self.assertEqual(app._composer_text(), "")
             gate.release.set()
 
     async def test_control_absent_keys_are_honest_noop(self):
@@ -417,21 +416,19 @@ class ControlModePilotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ComposerPilotTests(unittest.IsolatedAsyncioTestCase):
-    """C2 REVISION_COMPOSER：字符/退格/target/Enter/Esc 语义。"""
+    """UX2-R1 常驻 composer：字符/退格/target/Enter/Esc 语义（缓冲
+    真源 = #composer widget，三态词汇降级为内部概念）。"""
 
-    async def test_e_opens_composer_and_types_characters(self):
+    async def test_typing_accumulates_without_dispatch(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertIn("NEXT_INVOCATION", app._dock_input_line())
             for character in "fix":
                 await pilot.press(character)
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "fix")
+            self.assertEqual(app._composer_text(), "fix")
+            self.assertIs(app.focused, app.query_one("#composer"))
             self.assertEqual(recorded, [])
             gate.release.set()
 
@@ -439,19 +436,17 @@ class ComposerPilotTests(unittest.IsolatedAsyncioTestCase):
         gate = _Gate()
         app = make_app(driver=gate.driver, control=make_control([]))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
-            for character in "a b":
+            for character in "x b":
                 await pilot.press(character)
             await pilot.press("backspace")
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "a ")
+            self.assertEqual(app._composer_text(), "x ")
             gate.release.set()
 
     async def test_tab_toggles_target_both_ways(self):
         gate = _Gate()
         app = make_app(driver=gate.driver, control=make_control([]))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
             await pilot.press("tab")
             await pilot.pause()
             self.assertEqual(app._cockpit_revise_target, "SUBMISSION")
@@ -465,7 +460,6 @@ class ComposerPilotTests(unittest.IsolatedAsyncioTestCase):
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
             for character in "fix":
                 await pilot.press(character)
             await pilot.press("tab")
@@ -473,9 +467,9 @@ class ComposerPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 recorded, [("REVISE", "fix", "SUBMISSION")])
-            # C2-R1 W2：提交后留在 COMPOSER（stay-open）
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "")
+            # UX2-R1：提交后缓冲清空，composer 原地不动（AC1）
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "")
             gate.release.set()
 
     async def test_enter_with_empty_buffer_is_noop(self):
@@ -483,33 +477,31 @@ class ComposerPilotTests(unittest.IsolatedAsyncioTestCase):
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(recorded, [])
-            self.assertEqual(app._cockpit_mode, "composer")
+            self.assertEqual(app._composer_text(), "")
             gate.release.set()
 
-    async def test_escape_ladder_clears_then_exits(self):
+    async def test_escape_clears_draft_only(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
-            for character in "abc":
+            await pilot.press("x")   # 中性首字符（a 是空缓冲裸键）
+            for character in "bc":
                 await pilot.press(character)
             await pilot.press("escape")
             await pilot.pause()
             self.assertEqual(recorded, [])
-            # C2-R1 W3 阶梯首段：清稿、留在 COMPOSER
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "")
-            await pilot.press("escape")   # 阶梯末段：空缓冲回 COMMAND
-            await pilot.pause()
+            # UX2-R1 单级：ESC 只清稿——composer 常驻，无"退出"层级
+            self.assertEqual(app._composer_text(), "")
             self.assertEqual(app._cockpit_mode, "command")
-            await pilot.press("e")   # 重开：缓冲已清空
+            self.assertTrue(app.is_running)
+            await pilot.press("escape")   # 空缓冲 ESC = no-op
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "")
+            self.assertEqual(app._composer_text(), "")
+            self.assertEqual(app._cockpit_mode, "command")
             gate.release.set()
 
     async def test_command_letters_type_inside_composer(self):
@@ -517,29 +509,27 @@ class ComposerPilotTests(unittest.IsolatedAsyncioTestCase):
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
+            await pilot.press("x")   # 先入文本态（裸键仅空缓冲）
             for key in ("p", "r", "a", "q", "t", "c"):
                 await pilot.press(key)
             await pilot.pause()
             self.assertEqual(recorded, [])
-            self.assertEqual(app._cockpit_revise_text, "praqtc")
+            self.assertEqual(app._composer_text(), "xpraqtc")
             gate.release.set()
 
     async def test_modifier_keys_do_not_type(self):
         gate = _Gate()
         app = make_app(driver=gate.driver, control=make_control([]))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
             await pilot.press("ctrl+a")
             await pilot.press("up")
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "")
-            self.assertEqual(app._cockpit_mode, "composer")
+            self.assertEqual(app._composer_text(), "")
             gate.release.set()
 
 
 class ModeTransitionMatrixTests(unittest.IsolatedAsyncioTestCase):
-    """C2 三态转移表（有向序列走查）。"""
+    """UX2-R1 键语义走查：CONFIRM 确认条 + 常驻 composer 文本/提交。"""
 
     async def test_full_transition_walk(self):
         gate = _Gate()
@@ -551,21 +541,27 @@ class ModeTransitionMatrixTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._cockpit_mode, "confirm")
             await pilot.press("n")
             self.assertEqual(app._cockpit_mode, "command")
-            # command → composer → command（escape）
-            await pilot.press("e")
-            self.assertEqual(app._cockpit_mode, "composer")
+            # 文本入常驻 composer（无 mode 跃迁）
+            for character in "x":
+                await pilot.press(character)
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "x")
+            # enter 提交 → 缓冲清空、composer 原地不动
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "")
+            # 空缓冲 escape = no-op（无退出层级）
             await pilot.press("escape")
             self.assertEqual(app._cockpit_mode, "command")
-            # command → composer → enter 空缓冲（停留）
-            await pilot.press("e")
-            await pilot.press("enter")
-            self.assertEqual(app._cockpit_mode, "composer")
-            await pilot.press("escape")
-            # composer 内 escape 后 command 面恢复工作
+            # 空缓冲裸键照常派发
             await pilot.press("p")
             await pilot.pause()
             self.assertEqual(app._cockpit_mode, "command")
-            self.assertEqual(recorded, [("PAUSE", None, None)])
+            self.assertEqual(
+                recorded,
+                [("REVISE", "x", "NEXT_INVOCATION"),
+                 ("PAUSE", None, None)])
             gate.release.set()
 
 
@@ -605,16 +601,22 @@ class ReceiptDisplayTests(unittest.IsolatedAsyncioTestCase):
                              "⊘ NO_OP RESUME · ui-1 v1 · NOT_PAUSED")
             gate.release.set()
 
-    async def test_receipt_decays_after_bounded_refreshes(self):
+    async def test_receipt_persists_in_log_after_refreshes(self):
+        # UX2-R1 AC4：回执不再是 TTL 瞬态——入 Collaboration Log
+        # 持久可见；镜像（_cockpit_receipt）不随刷新衰减。
         gate = _Gate()
-        app = make_app(driver=gate.driver, control=make_control([]))
+        app = make_app(driver=gate.driver, control=make_control(
+            [], receipt_result("ACCEPTED", version=1, command_id="ui-1")))
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.press("p")
             await pilot.pause()
-            self.assertIsNotNone(app._cockpit_receipt)
-            for _ in range(cockpit_tui._RECEIPT_TICKS + 1):
+            expected = "✓ ACCEPTED PAUSE · ui-1 v1"
+            self.assertEqual(app._cockpit_receipt, expected)
+            self.assertIn(expected, app.log_text)
+            for _ in range(20):
                 app._refresh()
-            self.assertIsNone(app._cockpit_receipt)
+            self.assertEqual(app._cockpit_receipt, expected)
+            self.assertIn(expected, app.log_text)
             gate.release.set()
 
 
@@ -820,15 +822,14 @@ class UiOnlyIsolationTests(unittest.IsolatedAsyncioTestCase):
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
-            for character in "revise-me":
+            for character in "fix-me":
                 await pilot.press(character)
             await pilot.pause()
             self.assertEqual(recorded, [])
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
-                recorded, [("REVISE", "revise-me", "NEXT_INVOCATION")])
+                recorded, [("REVISE", "fix-me", "NEXT_INVOCATION")])
             gate.release.set()
 
 
@@ -945,8 +946,10 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
                              "architect  ← rt-a · prov-a",
                              "coder      ← rt-b · prov-b"):
                 self.assertIn(expected, text)
-            # 六要素之后两个（输入行/两键提示）迁入底部 dock
-            self.assertEqual(app._dock_input_line(), "> |")
+            # 六要素之后两个（输入行/两键提示）迁入底部 dock——
+            # UX2-R1 F-R1：输入面 = 常驻 composer（空草稿），两键
+            # 提示在 dock-controls
+            self.assertEqual(app._composer_text(), "")
             self.assertEqual(app._dock_controls_line(),
                              "Enter start · q quit")
             self.assertIsNone(app._cockpit_composed)
@@ -959,11 +962,10 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
                               task_token="fix the bug")
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.pause()
-            self.assertEqual(app._cockpit_funnel_buffer, "fix the bug")
+            self.assertEqual(app._composer_text(), "fix the bug")
             self.assertEqual(app._cockpit_stage,
                              cockpit_tui.STAGE_COMPOSING)
-            # CU-TUI-INPUT A1：回显在底部 dock，不在顶部 body
-            self.assertEqual(app._dock_input_line(), "> fix the bug|")
+            # F-R1：task 文本只在 composer，不在顶部 body
             self.assertNotIn("fix the bug", _funnel_text(app))
 
     async def test_typing_appends_and_backspace_empties(self):
@@ -973,13 +975,13 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("a")
             await pilot.press("b")
             await pilot.pause()
-            self.assertEqual(app._cockpit_funnel_buffer, "ab")
+            self.assertEqual(app._composer_text(), "ab")
             self.assertEqual(app._cockpit_stage,
                              cockpit_tui.STAGE_COMPOSING)
             await pilot.press("backspace")
             await pilot.press("backspace")
             await pilot.pause()
-            self.assertEqual(app._cockpit_funnel_buffer, "")
+            self.assertEqual(app._composer_text(), "")
             self.assertEqual(app._cockpit_stage,
                              cockpit_tui.STAGE_NOT_STARTED)
 
@@ -1029,6 +1031,8 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
             self.assertFalse(app.query_one("#funnel-screen").display)
             self.assertTrue(app.query_one("#header-zone").display)
+            # AC17：Task 固定于 Task zone，绝不进 Collaboration Log
+            self.assertEqual(app.log_text, "")
             gate.release.set()
             for _ in range(200):
                 if app.outcome is not None:
@@ -1100,7 +1104,7 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(app._cockpit_funnel_buffer, "")
+            self.assertEqual(app._composer_text(), "")
             self.assertEqual(app._cockpit_stage,
                              cockpit_tui.STAGE_NOT_STARTED)
             self.assertTrue(app.is_running)
@@ -1133,7 +1137,7 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.press("q")
             await pilot.pause()
-            self.assertEqual(app._cockpit_funnel_buffer, "starq")
+            self.assertEqual(app._composer_text(), "starq")
             self.assertTrue(app.is_running)
 
 
@@ -1332,10 +1336,14 @@ class PhasePDriveLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recorded, [("RESUME", None, None)])
             self.assertTrue(app.is_running)              # P-03：终态保留
             self.assertIn("ABORTED", app.last_state.badge)
-            # 终态键位：只剩 T/Q（R2 追加语言提示 [L]中文——approved
-            # R2 test synchronization，行为语义不变）
-            self.assertEqual(app._dock_controls_line(),
-                             "[T]race [L]中文 [Q]uit")
+            # 终态键位：Trace/语言/退出在场（UX2-R1 hint 恒含提交
+            # 力学 + target 角标；Pause/Abort 已退场）
+            terminal = app._dock_controls_line()
+            self.assertNotIn("[P]ause", terminal)
+            self.assertNotIn("[A]bort", terminal)
+            self.assertIn("[T]race", terminal)
+            self.assertIn("[L]中文", terminal)
+            self.assertIn("[Q]uit", terminal)
             await pilot.press("t")                       # 终态 Trace 可开
             await pilot.pause()
             self.assertIsInstance(app.screen, cockpit_tui.TraceScreen)
@@ -1446,15 +1454,22 @@ class PhasePDriveLoopTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PhasePEscapeTests(unittest.IsolatedAsyncioTestCase):
-    """P-06~P-09：ESC 阶梯——全部接入既有语义，零新模式。"""
+    """P-06~P-09（UX2-R1 修订）：确认条 escape 出层；常驻 composer
+    escape 只清稿（无退出层级）；Trace escape 弹回主屏。"""
 
-    async def test_escape_in_command_opens_abort_confirm(self):
+    async def test_escape_on_empty_composer_is_noop(self):
+        # UX2-R1：escape 不再开中止确认——确认唯一经 a/q；空缓冲
+        # escape 为纯 no-op（零 mode 跃迁、零外发）
         gate = _Gate()
-        app = make_app(driver=gate.driver)
+        recorded = []
+        app = make_app(driver=gate.driver,
+                       control=make_control(recorded))
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "confirm")
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(recorded, [])
+            self.assertTrue(app.is_running)
             gate.release.set()
 
     async def test_escape_in_confirm_returns_to_command(self):
@@ -1468,12 +1483,15 @@ class PhasePEscapeTests(unittest.IsolatedAsyncioTestCase):
             gate.release.set()
 
     async def test_escape_in_composer_returns_to_command(self):
+        # UX2-R1：composer 常驻无"退出"——escape 只清稿，mode 恒
+        # command（本测试保持键序列语义走查）
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.press("e")
+            await pilot.press("z")
             await pilot.press("escape")
             await pilot.pause()
+            self.assertEqual(app._composer_text(), "")
             self.assertEqual(app._cockpit_mode, "command")
             gate.release.set()
 
@@ -1491,7 +1509,8 @@ class PhasePEscapeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PhasePReceiptTests(unittest.IsolatedAsyncioTestCase):
-    """P-10：回执与键位提示分行独立在场。"""
+    """P-10（UX2-R1 AC4）：回执入 Collaboration Log；确认条与 hint
+    行分行独立在场。"""
 
     async def test_receipt_row_separate_from_controls(self):
         gate = _Gate()
@@ -1500,8 +1519,12 @@ class PhasePReceiptTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.press("p")
             await pilot.pause()
-            self.assertEqual(app._dock_receipt_line(),
+            # 回执镜像 + Log 在场；dock 确认条空（无确认）；hint 行
+            # 含 Pause 动词——三面各行其是
+            self.assertEqual(app._cockpit_receipt,
                              "✓ ACCEPTED PAUSE · ui-1 v1")
+            self.assertIn("✓ ACCEPTED PAUSE · ui-1 v1", app.log_text)
+            self.assertEqual(app._dock_receipt_line(), "")
             self.assertIn("[P]ause", app._dock_controls_line())
             gate.release.set()
 
@@ -1696,9 +1719,10 @@ class PhaseVDockHintTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             line = app._dock_controls_line()
+            self.assertIn("enter send", line)   # UX2-R1 提交力学恒在
             self.assertIn("[P]ause", line)
-            self.assertIn("[E]dit", line)
             self.assertIn("[A]bort", line)
+            self.assertNotIn("[E]dit", line)    # e 已归文本（R1）
             self.assertNotIn("[R]esume", line)
             gate.release.set()
 
@@ -1932,14 +1956,14 @@ class R1ExpansionPilotTests(unittest.IsolatedAsyncioTestCase):
     """R1 P6：Enter/Space 切换选中 agent 展开——至多一个展开、展开 B
     自动折叠 A、Detail 窗出现于管线正下方。"""
 
-    async def test_enter_expands_selected_agent(self):
+    async def test_space_expands_selected_agent(self):
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 36)) as pilot:
             await pilot.pause()
             self.assertIsNone(app._cockpit_expanded_stage)
             self.assertFalse(app.query_one("#detail-zone").display)
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
             self.assertEqual(app._cockpit_expanded_stage,
                              "step-0-architect")
@@ -1950,14 +1974,15 @@ class R1ExpansionPilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.query_one("#detail-zone").display)
             gate.release.set()
 
-    async def test_enter_again_collapses(self):
+    async def test_space_again_collapses(self):
+        # UX2-R1：Enter 已归提交——展开切换经 space（原 enter 语义）
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 36)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
             self.assertIsNone(app._cockpit_expanded_stage)
             self.assertEqual(app.detail_text, "")
@@ -1981,10 +2006,10 @@ class R1ExpansionPilotTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 36)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")            # 展开 architect
+            await pilot.press("space")           # 展开 architect
             await pilot.pause()
             await pilot.press("right")
-            await pilot.press("enter")            # 展开 coder → 折叠 architect
+            await pilot.press("space")           # 展开 coder → 折叠 architect
             await pilot.pause()
             self.assertEqual(app._cockpit_expanded_stage, "step-1-coder")
             self.assertEqual(app.agent_text.count("▼"), 1)  # 至多一个 ▼
@@ -2001,7 +2026,7 @@ class R1SelectionExpansionIndependenceTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 36)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")            # 展开 + 选中 architect
+            await pilot.press("space")            # 展开 + 选中 architect
             await pilot.pause()
             await pilot.press("right")            # 选中 coder，展开不跟随
             await pilot.pause()
@@ -2028,7 +2053,7 @@ class R1IdentityBindingTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver, plan=plan)
         async with app.run_test(size=(120, 36)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")            # 展开 architect
+            await pilot.press("space")            # 展开 architect
             await pilot.pause()
             self.assertEqual(app._cockpit_expanded_stage,
                              "step-0-architect")
@@ -2054,7 +2079,7 @@ class R1IdentityBindingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press("right")
             await pilot.press("right")            # 选中 reviewer（index 2）
-            await pilot.press("enter")            # 展开 reviewer
+            await pilot.press("space")            # 展开 reviewer
             await pilot.pause()
             self.assertEqual(app._cockpit_expanded_stage, "step-2-reviewer")
             app._cockpit_plan = plan[:2]          # 组合缩减
@@ -2074,7 +2099,7 @@ class R1DetailPilotTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 36)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
             collab = app.query_one("#collab-zone")
             detail = app.query_one("#detail-zone")
@@ -2087,7 +2112,7 @@ class R1DetailPilotTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 36)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
             prompt_lines = [line for line in app.detail_text.splitlines()
                             if "prompt" in line]
@@ -2100,7 +2125,7 @@ class R1DetailPilotTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 20)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
             self.assertEqual(app._cockpit_expanded_stage, "step-0-architect")
             self.assertFalse(app.query_one("#detail-zone").display)
@@ -2119,14 +2144,13 @@ class R1KeyIsolationTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")                 # 打开修订编辑
+            await pilot.press("x")                 # 先入文本态
             await pilot.pause()
             for key in ("a", "space", "b"):
                 await pilot.press(key)
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "a b")
+            self.assertEqual(app._composer_text(), "xa b")
             self.assertIsNone(app._cockpit_expanded_stage)  # 未误触发展开
-            self.assertEqual(app._dock_input_line(), "revise [NEXT_INVOCATION] a b|")
             await pilot.press("escape")
             gate.release.set()
 
@@ -2261,27 +2285,24 @@ class R2LocalePurityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class R2ComposerIsolationTests(unittest.IsolatedAsyncioTestCase):
-    """R2-5：composer 内 l/L 是文本字符，绝不切换 locale。"""
+    """R2-5（UX2-R1 修订）：composer 内 l/L 是文本字符，绝不切换
+    locale（裸键仅空缓冲）。"""
 
     async def test_l_is_plain_text_in_composer(self):
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode,
-                             cockpit_tui.MODE_COMPOSER)
-            for character in ("l", "o", "c", "a", "l"):
+            await pilot.press("x")   # 先入文本态（空缓冲 l = 切语言）
+            for character in "local":
                 await pilot.press(character)
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "local")
+            self.assertEqual(app._composer_text(), "xlocal")
             self.assertEqual(app._cockpit_locale, "en")
             await pilot.press("L")                     # 大写同为文本
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "localL")
+            self.assertEqual(app._composer_text(), "xlocalL")
             self.assertEqual(app._cockpit_locale, "en")
-            self.assertIn("localL", app._dock_input_line())
             gate.release.set()
 
 
@@ -2328,16 +2349,10 @@ class R2TraceIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app._cockpit_locale, "en")
             self.assertEqual(app.screen.observation_text, obs_before)
             self.assertIn("STAGE_STARTED", app.screen.observation_text)
-            # escape 弹回主屏——Phase P 语义下该 escape 亦落入
-            # ESC@COMMAND 进 confirm（既有冻结行为，与 R2 无关）；
-            # n 退出 confirm 后回 COMMAND 主屏
+            # escape 弹回主屏（UX2-R1：escape 不再落 confirm）
             await pilot.press("escape")
             await pilot.pause()
             self.assertNotIsInstance(app.screen, cockpit_tui.TraceScreen)
-            await pilot.press("n")
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode,
-                             cockpit_tui.MODE_COMMAND)
             await pilot.press("l")
             await pilot.pause()
             self.assertEqual(app._cockpit_locale, "zh")
@@ -2441,7 +2456,7 @@ class R2FunnelLocaleTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press("l")
             await pilot.pause()
-            self.assertEqual(app._cockpit_funnel_buffer, "l")
+            self.assertEqual(app._composer_text(), "l")
             self.assertEqual(app._cockpit_locale, "en")
             self.assertIn("Describe the collaboration task",
                           _funnel_text(app))
@@ -2502,7 +2517,7 @@ class CockpitInputDockBudgetTests(unittest.IsolatedAsyncioTestCase):
                            events=lambda: _EVENTS8)
             async with app.run_test(size=(120, height)) as pilot:
                 await pilot.pause()
-                await pilot.press("enter")   # 展开选中 architect
+                await pilot.press("space")   # 展开选中 architect
                 await pilot.pause()
                 self.assertEqual(app._cockpit_expanded_stage, "step-0")
                 self.assertTrue(app.query_one("#detail-zone").display)
@@ -2519,7 +2534,7 @@ class CockpitInputDockBudgetTests(unittest.IsolatedAsyncioTestCase):
                            events=lambda: _EVENTS8)
             async with app.run_test(size=(120, height)) as pilot:
                 await pilot.pause()
-                await pilot.press("enter")
+                await pilot.press("space")
                 await pilot.pause()
                 self.assertIs(app.query_one("#activity-zone").display,
                               shown, f"height={height}")
@@ -2534,7 +2549,7 @@ class CockpitInputDockBudgetTests(unittest.IsolatedAsyncioTestCase):
                        session=_terminal_session())
         async with app.run_test(size=(120, 24)) as pilot:
             await pilot.pause()
-            await pilot.press("enter")
+            await pilot.press("space")
             await pilot.pause()
             lines = app.detail_text.splitlines()
             self.assertEqual(len(lines), 6)
@@ -2594,7 +2609,7 @@ class FunnelInputDockTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.query_one("#header-zone").display)
             self.assertFalse(app.query_one("#collab-zone").display)
 
-    async def test_input_echo_lives_in_dock_not_body(self):
+    async def test_input_echo_lives_in_composer_not_body(self):
         start = _StartRecorder([])
         app = make_funnel_app(funnel_composition(), start)
         async with app.run_test(size=(100, 24)) as pilot:
@@ -2602,7 +2617,8 @@ class FunnelInputDockTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("a")
             await pilot.press("b")
             await pilot.pause()
-            self.assertEqual(app._dock_input_line(), "> ab|")
+            # UX2-R1 F-R1：输入真源/回显 = 常驻 composer，body 零输入行
+            self.assertEqual(app._composer_text(), "ab")
             body_lines = _funnel_text(app).splitlines()
             self.assertFalse(any(line.startswith("> ")
                                  for line in body_lines))
@@ -2624,24 +2640,26 @@ class FunnelInputDockTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app._dock_receipt_line(), "")
 
-    async def test_prefill_echoes_in_dock(self):
+    async def test_prefill_loads_into_composer(self):
         start = _StartRecorder([])
         app = make_funnel_app(funnel_composition(), start,
                               task_token="fix the bug")
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.pause()
-            self.assertEqual(app._dock_input_line(), "> fix the bug|")
+            self.assertEqual(app._composer_text(), "fix the bug")
 
-    async def test_unsafe_prefill_redacted_in_dock(self):
+    async def test_unsafe_prefill_redacted_in_composer(self):
         secret = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
         start = _StartRecorder([])
         app = make_funnel_app(funnel_composition(), start,
                               task_token=secret)
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.pause()
-            line = app._dock_input_line()
-            self.assertIn("[redacted: unsafe content]", line)
-            self.assertNotIn(secret, line)
+            # 内容安全门同律（funnel_input_line 先例）：秘密绝不进入
+            # TUI 呈现态——以占位符装载
+            self.assertEqual(app._composer_text(),
+                             "[redacted: unsafe content]")
+            self.assertNotIn(secret, app._composer_text())
             self.assertNotIn(secret, _funnel_text(app))
 
     async def test_funnel_to_running_input_position_never_jumps(self):
@@ -2670,50 +2688,52 @@ class FunnelInputDockTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CommandAffordanceTests(unittest.IsolatedAsyncioTestCase):
-    """CU-TUI-INPUT A3 → CU-INPUT-2 W8（C2-R1）：COMMAND 态输入行呈
-    转向提示（普通字符从 no-op 反转为即输入）；P/R/E/A contract
-    逐字不变。"""
+    """UX2-R1 affordance：hint 行 = 提交力学 + lifecycle 动词 + 语言/
+    退出 + target 角标；普通文字即文字（无 shell 提示符）；P/R/A
+    契约逐字不变。"""
 
-    async def test_command_input_line_is_steering_hint_not_prompt(self):
+    async def test_hint_line_leads_with_submit_mechanics(self):
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            self.assertEqual(app._dock_input_line(),
-                             "type to steer · enter submits")
-            self.assertNotEqual(app._dock_input_line(), ">")
+            line = app._dock_controls_line()
+            self.assertTrue(line.startswith("enter send · ctrl+j newline"))
+            self.assertNotIn(">", line.split("newline")[0])  # 无提示符
             gate.release.set()
 
-    async def test_command_affordance_bilingual_via_l(self):
+    async def test_hint_bilingual_via_l(self):
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             await pilot.press("l")
             await pilot.pause()
-            self.assertEqual(app._dock_input_line(),
-                             "输入即可转向 · enter 提交")
+            self.assertTrue(app._dock_controls_line().startswith(
+                "回车发送 · ctrl+j 换行"))
             await pilot.press("l")
             await pilot.pause()
-            self.assertEqual(app._dock_input_line(),
-                             "type to steer · enter submits")
+            self.assertTrue(app._dock_controls_line().startswith(
+                "enter send · ctrl+j newline"))
             gate.release.set()
 
-    async def test_composer_and_confirm_lines_unchanged(self):
+    async def test_confirm_bar_and_composer_lines(self):
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")
-            await pilot.pause()
-            self.assertEqual(app._dock_input_line(), "revise [NEXT_INVOCATION] |")
-            await pilot.press("escape")
+            self.assertEqual(app._composer_text(), "")
+            self.assertEqual(app._dock_receipt_line(), "")
             await pilot.press("a")
             await pilot.pause()
-            self.assertEqual(app._dock_input_line(), "abort? (y/n)")
+            self.assertEqual(app._dock_receipt_line(), "abort? (y/n)")
+            self.assertIn("abort?", app._dock_controls_line())
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertEqual(app._dock_receipt_line(), "")
             gate.release.set()
 
-    async def test_ordinary_text_ingresses_steering_composer(self):
+    async def test_ordinary_text_lands_in_composer(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver,
@@ -2723,11 +2743,9 @@ class CommandAffordanceTests(unittest.IsolatedAsyncioTestCase):
             for key in ("z", "x", "1", "!"):
                 await pilot.press(key)
             await pilot.pause()
-            # C2-R1 W1 语义反转（A3 witness 迁移）：普通字符即输入
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "zx1!")
-            self.assertEqual(
-                app._dock_input_line(), "revise [NEXT_INVOCATION] zx1!|")
+            # 普通字符即输入（composer 常驻——mode 恒 command）
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "zx1!")
             self.assertEqual(recorded, [])
             self.assertEqual(app._dock_receipt_line(), "")
             gate.release.set()
@@ -2745,9 +2763,10 @@ class CommandAffordanceTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("r")
             await pilot.pause()
             self.assertEqual(recorded, [("RESUME", None, None)])
-            receipt = app._dock_receipt_line()
+            receipt = app._cockpit_receipt
             self.assertIn("REJECTED", receipt)
             self.assertIn("ALREADY_TERMINAL", receipt)
+            self.assertIn("REJECTED", app.log_text)   # 回执入 Log
             self.assertEqual(app._cockpit_mode, "command")
             gate.release.set()
 
@@ -2889,11 +2908,7 @@ class MainTraceTransitionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await pilot.pause()
             self.assertNotIsInstance(app.screen, cockpit_tui.TraceScreen)
-            # escape 同时经 App on_key 进入 confirm（既有语义：先回
-            # command 再开 Trace——R2 坑清单同款）
-            await pilot.press("n")
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "command")
+            # UX2-R1：escape 弹回即主屏（无 confirm 中间层）
             # 往返后事实源变化 → 主屏如实更新（镜像无 stale）
             holder["events"] = (
                 _event(0, ExecutionEventType.STAGE_STARTED),)
@@ -2961,14 +2976,14 @@ class TraceOwnershipPilotTests(unittest.IsolatedAsyncioTestCase):
             gate.release.set()
 
 
-# ------------------- CU-INPUT-2 (C2-R1): persistent steering composer
+# ------------------- CU-INPUT-2 → UX2-R1: persistent composer
 
 
 class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
-    """T1/T3/T4/T5/T9/T10：COMMAND 态 auto-ingress、stay-open 提交、
-    命令键豁免、q/a 文本所有权、target 粘滞。"""
+    """UX2-R1：常驻 composer 文本/提交、命令键豁免、q/a 文本所有权、
+    target 粘滞（mode 三态已降级为内部概念）。"""
 
-    async def test_typing_in_command_ingresses_composer(self):
+    async def test_typing_lands_in_composer_without_dispatch(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
@@ -2976,14 +2991,12 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press("h")
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "h")
-            self.assertEqual(
-                app._dock_input_line(), "revise [NEXT_INVOCATION] h|")
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "h")
             self.assertEqual(recorded, [])
             gate.release.set()
 
-    async def test_ingress_then_enter_submits_and_stays_open(self):
+    async def test_enter_submits_and_composer_stays(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
@@ -2995,9 +3008,10 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(
                 recorded, [("REVISE", "hello", "NEXT_INVOCATION")])
-            self.assertIn("ACCEPTED", app._dock_receipt_line())  # T11
-            self.assertEqual(app._cockpit_revise_text, "")
-            self.assertEqual(app._cockpit_mode, "composer")  # W2 stay-open
+            self.assertIn("you · steer", app.log_text)   # echo 入 Log
+            self.assertIn("ACCEPTED", app.log_text)      # 回执入 Log
+            self.assertEqual(app._composer_text(), "")
+            self.assertEqual(app._cockpit_mode, "command")  # 原地不动
             gate.release.set()
 
     async def test_consecutive_submissions_dispatch_in_order(self):
@@ -3010,22 +3024,22 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press(word)
                 await pilot.press("enter")
                 await pilot.pause()
-                self.assertEqual(app._cockpit_revise_text, "")  # 每条间清零
-                self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(  # T5：派发序 = 提交序（队列 FIFO 属冻结面）
+                self.assertEqual(app._composer_text(), "")  # 每条间清零
+                self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(  # 派发序 = 提交序（队列 FIFO 属冻结面）
                 recorded,
                 [("REVISE", "A", "NEXT_INVOCATION"),
                  ("REVISE", "B", "NEXT_INVOCATION"),
                  ("REVISE", "C", "NEXT_INVOCATION")])
             gate.release.set()
 
-    async def test_command_keys_are_exempt_from_ingress(self):
+    async def test_command_keys_are_exempt_on_empty_buffer(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("p")       # PAUSE 派发，非 ingress
+            await pilot.press("p")       # PAUSE 派发，非文本
             await pilot.pause()
             self.assertEqual(recorded, [("PAUSE", None, None)])
             self.assertEqual(app._cockpit_mode, "command")
@@ -3049,10 +3063,10 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("n")
             await pilot.pause()
             self.assertEqual(app._cockpit_mode, "command")
-            self.assertEqual(app._cockpit_revise_text, "")  # 全程零入缓冲
+            self.assertEqual(app._composer_text(), "")  # 全程零入缓冲
             gate.release.set()
 
-    async def test_uppercase_command_letter_variant_ingresses(self):
+    async def test_uppercase_command_letter_variant_is_text(self):
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
@@ -3060,8 +3074,8 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press("P")   # 大写变体非命令键（漏斗 Q 先例）
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "P")
+            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "P")
             self.assertEqual(recorded, [])
             gate.release.set()
 
@@ -3071,12 +3085,12 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")
+            await pilot.press("x")   # 先入文本态（空缓冲 q = quit 阶梯）
             for character in "quick":
                 await pilot.press(character)
             await pilot.pause()
-            self.assertEqual(app._cockpit_revise_text, "quick")  # T10
-            self.assertEqual(app._cockpit_mode, "composer")
+            self.assertEqual(app._composer_text(), "xquick")
+            self.assertEqual(app._cockpit_mode, "command")
             self.assertTrue(app.is_running)   # 未退出、未入确认
             gate.release.set()
 
@@ -3086,35 +3100,40 @@ class PersistentComposerPilotTests(unittest.IsolatedAsyncioTestCase):
         app = make_app(driver=gate.driver, control=make_control(recorded))
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")
+            await pilot.press("x")   # 先入文本态（空缓冲 a = 确认条）
             for character in "abort it":
                 await pilot.press(character)
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")  # T9
+            self.assertEqual(app._cockpit_mode, "command")
             self.assertEqual(recorded, [])
             gate.release.set()
 
-    async def test_target_sticky_across_reopen(self):
+    async def test_target_sticky_across_submission(self):
         gate = _Gate()
-        app = make_app(driver=gate.driver)
+        recorded = []
+        app = make_app(driver=gate.driver,
+                       control=make_control(recorded))
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")
-            await pilot.press("tab")          # → SUBMISSION
+            await pilot.press("tab")         # → SUBMISSION（session-sticky）
             await pilot.pause()
             self.assertEqual(app._cockpit_revise_target, "SUBMISSION")
-            await pilot.press("escape")       # 空缓冲 → command（阶梯末段）
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "command")
-            await pilot.press("e")            # 重开：target 粘滞（W7）
+            for character in "fix":
+                await pilot.press(character)
+            await pilot.press("enter")       # 提交不清 target
             await pilot.pause()
             self.assertEqual(app._cockpit_revise_target, "SUBMISSION")
+            self.assertEqual(
+                recorded, [("REVISE", "fix", "SUBMISSION")])
+            await pilot.press("tab")         # 切回
+            await pilot.pause()
+            self.assertEqual(app._cockpit_revise_target, "NEXT_INVOCATION")
             gate.release.set()
 
 
 class TerminalCollapsePilotTests(unittest.IsolatedAsyncioTestCase):
-    """T1 终态迁移 + T7：终态塌缩清缓冲；终态后 E/Enter 诚实
-    REJECTED 回执（session 终态门语义，UI 零特判）。"""
+    """UX2-R1 终态：塌缩清 composer 草稿；终态后键入+Enter 仍走真实
+    dispatch → session 终态门诚实 REJECTED 回执入 Log（UI 零特判）。"""
 
     async def _await_condition(self, pilot, predicate, limit=400):
         for _ in range(limit):
@@ -3123,7 +3142,7 @@ class TerminalCollapsePilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
         return predicate()
 
-    async def test_terminal_collapses_composer_and_clears_buffer(self):
+    async def test_terminal_collapses_and_clears_draft(self):
         gate = _Gate()
         session = _LiveSession()
 
@@ -3140,15 +3159,16 @@ class TerminalCollapsePilotTests(unittest.IsolatedAsyncioTestCase):
             for character in "hel":
                 await pilot.press(character)
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
+            self.assertEqual(app._composer_text(), "hel")
             gate.release.set()
             ok = await self._await_condition(
-                pilot, lambda: app._cockpit_mode == "command")
+                pilot, lambda: app._composer_text() == "")
             self.assertTrue(ok, "terminal collapse never happened")
-            self.assertEqual(app._cockpit_revise_text, "")
-            self.assertEqual(app._dock_input_line(),
-                             "type to steer · enter submits")
-            gate.release.set()
+            # composer 常驻：终态后 hint 收敛（无 Pause/Abort 动词）
+            line = app._dock_controls_line()
+            self.assertIn("enter send", line)
+            self.assertNotIn("[P]ause", line)
+            self.assertNotIn("[A]bort", line)
 
     async def test_post_terminal_submit_is_honest_rejection(self):
         gate = _Gate()
@@ -3163,20 +3183,17 @@ class TerminalCollapsePilotTests(unittest.IsolatedAsyncioTestCase):
                 receipt_result("REJECTED", reason="ALREADY_TERMINAL")))
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")            # 终态后 E 仍可开
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
-            for character in "late":
+            for character in "fix":     # 终态后 composer 仍可输入
                 await pilot.press(character)
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
-                recorded, [("REVISE", "late", "NEXT_INVOCATION")])
-            receipt = app._dock_receipt_line()  # T11：REJECTED 含 reason
+                recorded, [("REVISE", "fix", "NEXT_INVOCATION")])
+            receipt = app._cockpit_receipt  # REJECTED 含 reason（入 Log）
             self.assertIn("REJECTED", receipt)
             self.assertIn("ALREADY_TERMINAL", receipt)
-            self.assertEqual(app._cockpit_revise_text, "")
-            self.assertEqual(app._cockpit_mode, "composer")  # uniform 规则
+            self.assertIn("ALREADY_TERMINAL", app.log_text)
+            self.assertEqual(app._composer_text(), "")
             gate.release.set()
 
 
@@ -3203,16 +3220,13 @@ class ParkedSteeringPilotTests(unittest.IsolatedAsyncioTestCase):
                 is RunStatus.PARKED)
             self.assertTrue(ok, "first segment never parked")
             self.assertEqual(app._cockpit_mode, "command")
-            for character in "fix":       # PARKED 下 auto-ingress 同构
+            for character in "fix":       # PARKED 下常驻 composer 同构
                 await pilot.press(character)
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(
                 recorded, [("REVISE", "fix", "NEXT_INVOCATION")])
-            self.assertEqual(app._cockpit_mode, "composer")
-            await pilot.press("escape")   # 空缓冲 → command（阶梯末段）
-            await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "command")
+            self.assertEqual(app._composer_text(), "")
             await pilot.press("r")        # R 直达恢复（缓冲空时）
             await pilot.pause()
             self.assertEqual(recorded[1], ("RESUME", None, None))
@@ -3222,8 +3236,8 @@ class ParkedSteeringPilotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TraceTopGuardPilotTests(unittest.IsolatedAsyncioTestCase):
-    """T8/T13：Trace 在顶输入抑制、e no-op（W6）、冒泡命令照旧、
-    composer 呈现态跨往返保持。"""
+    """UX2-R1：Trace 在顶输入隔离（绝不向被遮蔽的 composer 打字）、
+    冒泡命令照旧、pop 后输入面完整恢复。"""
 
     async def test_typing_suppressed_while_trace_on_top(self):
         gate = _Gate()
@@ -3237,22 +3251,20 @@ class TraceTopGuardPilotTests(unittest.IsolatedAsyncioTestCase):
             for key in ("z", "x", "1"):
                 await pilot.press(key)
             await pilot.pause()
-            # W6：绝不向被遮蔽的 dock 打字
+            # Trace 在顶：可打印键绝不落入被遮蔽的 composer
             self.assertEqual(app._cockpit_mode, "command")
-            self.assertEqual(app._cockpit_revise_text, "")
+            self.assertEqual(app._composer_text(), "")
             self.assertEqual(recorded, [])
-            # 既有 R2 陷阱：trace escape 同时被 App.on_key 消费落
-            # confirm——n 出（既有测试同款处理）
-            await pilot.press("escape")
-            await pilot.press("n")
+            await pilot.press("escape")   # pop 即回主屏（无 confirm 层）
             await pilot.pause()
             await pilot.press("z")        # pop 回主屏后输入面恢复
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "z")
+            self.assertEqual(app._composer_text(), "z")
             gate.release.set()
 
-    async def test_e_noop_while_trace_on_top(self):
+    async def test_typing_noop_while_trace_on_top(self):
+        # 任何可打印键（含旧命令字母 e）在 Trace 顶均不落入 composer；
+        # pop 后 e 即普通文本
         gate = _Gate()
         app = make_app(driver=gate.driver)
         async with app.run_test(size=(100, 30)) as pilot:
@@ -3261,13 +3273,12 @@ class TraceTopGuardPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.press("e")
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "command")  # 不开在屏后
+            self.assertEqual(app._composer_text(), "")
             await pilot.press("escape")
-            await pilot.press("n")      # R2 陷阱：escape 双消费落 confirm
             await pilot.pause()
             await pilot.press("e")
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
+            self.assertEqual(app._composer_text(), "e")
             gate.release.set()
 
     async def test_bubbled_p_still_dispatches_at_trace_top(self):
@@ -3285,9 +3296,7 @@ class TraceTopGuardPilotTests(unittest.IsolatedAsyncioTestCase):
             gate.release.set()
 
     async def test_input_face_intact_after_trace_roundtrip(self):
-        # T13（可达路径版）：COMMAND 开 Trace（composer 内 t 是文本、
-        # 结构性无法开屏）→ 往返 → 输入面完整恢复。composer 呈现态
-        # 的跨屏保持无键盘可达路径，不构成契约。
+        # 空缓冲 t 开 Trace → 往返 → 输入面完整恢复（文本/target/hint）
         gate = _Gate()
         recorded = []
         app = make_app(driver=gate.driver, control=make_control(recorded))
@@ -3297,26 +3306,24 @@ class TraceTopGuardPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertIsInstance(app.screen, cockpit_tui.TraceScreen)
             await pilot.press("escape")
-            await pilot.press("n")      # R2 陷阱：escape 双消费落 confirm
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "command")
-            # 往返后输入面完整：ingress + target 默认值 + dock 三行
+            self.assertNotIsInstance(app.screen, cockpit_tui.TraceScreen)
+            # 往返后输入面完整：文本可入 + target 默认值 + hint 角标
             await pilot.press("z")
             await pilot.pause()
-            self.assertEqual(app._cockpit_mode, "composer")
-            self.assertEqual(app._cockpit_revise_text, "z")
+            self.assertEqual(app._composer_text(), "z")
             self.assertEqual(app._cockpit_revise_target,
                              "NEXT_INVOCATION")
-            self.assertEqual(
-                app._dock_input_line(), "revise [NEXT_INVOCATION] z|")
+            self.assertIn("→ NEXT_INVOCATION", app._dock_controls_line())
             gate.release.set()
 
 
 class SteeringTruthIsolationTests(unittest.IsolatedAsyncioTestCase):
-    """T12/T17：六阶区分 + 零合成执行事实——真 ControlJournal +
-    真 ControlBoundary 见证：键击零事实零事件；Enter 恰 1 条
-    REVISE_REQUESTED；receipt 只呈现 accepted（无 applied 宣称；
-    applied/honored 只经事实面，本测试零 REVISION_APPLIED 落账）。"""
+    """UX2-R1 六阶区分 + 零合成执行事实 + Log ≠ truth——真
+    ControlJournal + 真 ControlBoundary 见证：键击零事实零事件；
+    Enter 恰 1 条 REVISE_REQUESTED（无重复）；Log 恰 echo+回执两行
+    （派生缓存，绝不反向成为事实源）；回执只呈现 accepted（无
+    applied 宣称；applied/honored 只经事实面）。"""
 
     async def test_typing_and_submit_never_fabricate_truth(self):
         from control_boundary import (
@@ -3350,20 +3357,27 @@ class SteeringTruthIsolationTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             base_facts = len(journal.snapshot())
-            for character in "hello":   # typed：零事实、零事件
+            self.assertEqual(app.log_text, "")   # Log 起点：零行
+            for character in "hello":   # typed：零事实、零事件、零 Log
                 await pilot.press(character)
             await pilot.pause()
             self.assertEqual(len(journal.snapshot()), base_facts)
             self.assertEqual(events_seen, [])
+            self.assertEqual(app.log_text, "")
             await pilot.press("enter")  # submitted + accepted
             await pilot.pause()
             facts = journal.snapshot()
-            self.assertEqual(len(facts), base_facts + 1)
+            self.assertEqual(len(facts), base_facts + 1)  # 恰 1 条
             kind = getattr(facts[-1].fact_type, "value",
                            facts[-1].fact_type)
             self.assertEqual(kind, "REVISE_REQUESTED")
-            self.assertEqual(events_seen, [])  # T17：零合成观察
-            receipt = app._dock_receipt_line()
+            self.assertEqual(events_seen, [])  # 零合成观察
+            # Log = 派生缓存：恰 echo + 回执两行，绝不与账本混源
+            log_lines = app.log_text.splitlines()
+            self.assertEqual(len(log_lines), 2)
+            self.assertIn("you · steer", log_lines[0])
+            self.assertIn("hello", log_lines[0])
+            receipt = app._cockpit_receipt
             self.assertIn("ACCEPTED", receipt)
             self.assertNotIn("APPLIED", receipt.upper())  # 主屏零 applied
             gate.release.set()
@@ -3400,23 +3414,81 @@ class TypingProjectionGuardTests(unittest.IsolatedAsyncioTestCase):
         gate.release.set()
 
 
-class ComposerTruncationPilotTests(unittest.IsolatedAsyncioTestCase):
-    """W9：composer 行超宽截断——尾标 ... 诚实溢出、尾随光标 |
-    恒在场、行宽恒 ≤ 终端宽（绝不横滚）。"""
+class ComposerMultilinePilotTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R1 多行语义：ctrl+j / shift+enter 换行、enter 恒提交、
+    多行文本作为单条 REVISE 载荷提交（换行保留在载荷内）。"""
 
-    async def test_long_buffer_truncates_to_width(self):
+    async def test_ctrl_j_and_shift_enter_insert_newline(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("f")
+            await pilot.press("ctrl+j")
+            await pilot.press("b")
+            await pilot.press("shift+enter")
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertEqual(app._composer_text(), "f\nb\nc")
+            self.assertEqual(recorded, [])
+            gate.release.set()
+
+    async def test_enter_submits_multiline_text_as_one_revision(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            for key in ("f", "i", "x", "ctrl+j", "t", "h", "i", "s"):
+                await pilot.press(key)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                recorded, [("REVISE", "fix\nthis", "NEXT_INVOCATION")])
+            self.assertEqual(app._composer_text(), "")
+            # echo 行入 Log（载荷原文含换行——Log 行与载荷一一对应）
+            self.assertIn("fix", app.log_text)
+            gate.release.set()
+
+    async def test_multiline_composer_height_stays_bounded(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(8):     # 8 个换行 → 9 行文本
+                await pilot.press("x")
+                await pilot.press("ctrl+j")
+            await pilot.pause()
+            composer = app.query_one("#composer")
+            self.assertLessEqual(
+                composer.region.height,
+                cockpit_tui._COMPOSER_MAX_ROWS)   # 内滚不外撑
+            # 缓冲完整（8 段文本 + 尾随换行 = 9 行光标位）
+            self.assertEqual(app._composer_text(), "x\n" * 8)
+            gate.release.set()
+
+
+class ComposerTruncationPilotTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R1：长文本由 TextArea 原生处理（缓冲完整、内滚不外撑、
+    高度有界）——W9 人工截断被原生滚动/包装取代（绝不横撑布局）。"""
+
+    async def test_long_buffer_stays_intact_and_bounded(self):
         gate = _Gate()
         app = make_app(driver=gate.driver, control=make_control([]))
         async with app.run_test(size=(40, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("e")
             for _ in range(60):
                 await pilot.press("x")
             await pilot.pause()
-            line = app._dock_input_line()
-            self.assertLessEqual(len(line), 40)
-            self.assertTrue(line.endswith("|"))
-            self.assertIn("...", line)
+            # 缓冲数据完整（截断/包装纯呈现，绝不动缓冲真源）
+            self.assertEqual(app._composer_text(), "x" * 60)
+            composer = app.query_one("#composer")
+            self.assertLessEqual(composer.region.height,
+                                 cockpit_tui._COMPOSER_MAX_ROWS)
+            # dock 恒钉底：预留高度有界（1..5 + hint 1）
+            self.assertLessEqual(app._dock_reserved_rows(),
+                                 cockpit_tui._COMPOSER_MAX_ROWS + 1)
             gate.release.set()
 
 
