@@ -1161,7 +1161,7 @@ class FunnelFirstScreenTests(unittest.TestCase):
             "Collaboration plan (default)",
             "  architect  ← codex-cli · openai",
             "  coder      ← claude-cli · anthropic",
-            "Enter start · q quit"))
+            "Enter start · c compose · q quit"))
 
     def test_prefilled_buffer_in_input_line(self):
         lines = projection.funnel_first_screen("2.5.0", self.OK,
@@ -1184,7 +1184,7 @@ class FunnelFirstScreenTests(unittest.TestCase):
             "> ",
             "default collaboration needs at least 2 VERIFIED runtimes "
             "(found 1)",
-            "Enter start · q quit"))
+            "Enter start · c compose · q quit"))
 
     def test_no_id_class_debug_metadata(self):
         for lines in (projection.funnel_first_screen("2.5.0", self.OK, "t"),
@@ -2466,8 +2466,9 @@ class FunnelKeysHintTests(unittest.TestCase):
     （漏斗呈现 EN 冻结，R2 ERRATA 同律）。"""
 
     def test_hint_line(self):
+        # CU-COCKPIT-1：漏斗键面受控解冻——c 进入 COMPOSE 选择屏
         self.assertEqual(projection.funnel_keys_hint(),
-                         "Enter start · q quit")
+                         "Enter start · c compose · q quit")
 
     def test_ascii_keeps_middle_dot(self):
         # · 不在 ASCII 降级表（既有行为保持）——ascii 变体逐字节相同
@@ -2492,7 +2493,7 @@ class FunnelFirstScreenDockTests(unittest.TestCase):
              "Collaboration plan (default)",
              "  architect  ← codex-cli · openai",
              "  coder      ← claude-cli · anthropic",
-             "Enter start · q quit"))
+             "Enter start · c compose · q quit"))
 
     def test_dock_shape_omits_input_and_keys_hint(self):
         lines = projection.funnel_first_screen(

@@ -43,6 +43,9 @@ __all__ = (
     "funnel_preview_lines", "funnel_blocked_line", "funnel_enter_lines",
     "funnel_changed_lines", "funnel_error_lines", "funnel_first_screen",
     "funnel_input_line", "funnel_keys_hint",
+    "COMPOSITION_ROLES", "compose_pool_lines",
+    "compose_participant_lines", "compose_screen_lines",
+    "compose_keys_hint",
 )
 
 # 呈现层 lifecycle 词表（P4 的 IDLE 仅为投影层视觉态，绝不进入
@@ -66,6 +69,14 @@ _TEMPLATES = {
 }
 DEFAULT_ROLE_TEMPLATES = _TEMPLATES
 
+# CU-COCKPIT-1：Role 呈现环（COMPOSE r 键循环面）。与 composition_
+# core.ROLE_VOCABULARY 同源同式派生（同一张 DEFAULT_ROLE_TEMPLATES
+# 冻结表）——本层不可反向 import core（core 顶层已 import 本层取
+# 模板表），故以同式派生保持单一真源，零第二套 Role 词表。
+COMPOSITION_ROLES = tuple(sorted(
+    {role for template in DEFAULT_ROLE_TEMPLATES.values()
+     for role in template}))
+
 _SYMBOLS = {
     "COMPLETED": "✓", "FAILED": "✗", "ABORTED": "⊘",
     "PAUSED": "❚❚", "PARKED": "▫", "RUNNING": "●", "IDLE": "○",
@@ -77,6 +88,8 @@ _ASCII_SYMBOLS = {
     # R1 管线符号（新增字符，零现存输出碰撞；· 的既有行为保持不变）
     "─": "-", "┄": ".", "↓": "|", "┆": ":", "↳": "\\",
     "▲": "^", "▶": ">", "▼": "v",
+    # CU-COCKPIT-1：COMPOSE 键提示的 ↑（零现存输出碰撞）
+    "↑": "^",
 }
 
 # Phase V §九：header 状态符号表（ASCII 降级不失可读）。
@@ -180,6 +193,22 @@ _LABELS = {
     "/target <agent> is not implemented": (
         "/target <agent> is not implemented",
         "/target <agent> 尚未实现"),
+    # CU-COCKPIT-1：COMPOSE 选择屏闭集词条（键字母恒 EN 既有惯例；
+    # role/runtime 为 domain 词绝不入表）
+    "compose collaboration": ("compose collaboration", "组合协作"),
+    "runtimes": ("runtimes", "运行时"),
+    "participants": ("participants", "参与者"),
+    "collaboration plan": ("collaboration plan", "协作计划"),
+    "no VERIFIED runtimes": ("no VERIFIED runtimes", "无已验证运行时"),
+    "2-4 runtimes": ("2-4 runtimes", "需选择 2-4 个运行时"),
+    "describe the task first": (
+        "describe the task first", "先描述任务（esc 返回漏斗输入）"),
+    "↑↓ move · space select · ←→ member · r role · "
+    "enter preview/start · esc back · l lang · q quit": (
+        "↑↓ move · space select · ←→ member · r role · "
+        "enter preview/start · esc back · l lang · q quit",
+        "↑↓ 移动 · space 勾选 · ←→ 成员 · r 角色 · "
+        "enter 预览/启动 · esc 返回 · l 语言 · q 退出"),
 }
 
 
@@ -1090,25 +1119,27 @@ def event_detail_line(event):
 
 _FUNNEL_PREVIEW_HEADER = "Collaboration plan (default)"
 _FUNNEL_INSTRUCTION = "Describe the collaboration task"
-_FUNNEL_KEYS_HINT = "Enter start · q quit"
+_FUNNEL_KEYS_HINT = "Enter start · c compose · q quit"
 _FUNNEL_CHANGED_BANNER = "collaboration plan changed:"
 _FUNNEL_BLANK_TASK_HINT = "describe the task first"
 _FUNNEL_REDACTED = "[redacted: unsafe content]"
 
 
-def funnel_preview_lines(composition, *, ascii_only=False):
+def funnel_preview_lines(composition, *, ascii_only=False, header=None):
     """默认组合披露行（§十三预览块）：标题 + 逐槽位一行
     "role ← runtime · provider"（角色列对齐至最长角色名）。
 
     blocked 组合零绑定 → 预览块整块缺席（诚实原因行独立渲染，
-    见 funnel_blocked_line）。确定性纯函数。"""
+    见 funnel_blocked_line）。确定性纯函数。header 缺省 = 既有
+    常量（CU-COCKPIT-1：COMPOSE 屏复用本格式器换标题，漏斗面
+    逐字节不变）。"""
     if getattr(composition, "blocked_reason", None) is not None:
         return ()
     bindings = tuple(getattr(composition, "bindings", ()) or ())
     if not bindings:
         return ()
     width = max(len(bound.role) for bound in bindings)
-    lines = [_FUNNEL_PREVIEW_HEADER]
+    lines = [_FUNNEL_PREVIEW_HEADER if header is None else header]
     lines.extend(
         f"  {bound.role:<{width}}  ← {bound.runtime_id} · "
         f"{bound.provider_id}"
@@ -1216,6 +1247,96 @@ def funnel_first_screen(version_text, composition, task_buffer, *,
         lines.append(blocked_reason)
     if include_input:
         lines.append(_FUNNEL_KEYS_HINT)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
+
+
+# --------------------------------------- CU-COCKPIT-1 COMPOSE 选择屏投影
+# （确定性纯函数：entries = Verified 池清单 duck（runtime_id/
+# provider_id 二属性协议，cockpit_entry.listing 注入）；selected/
+# roles/cursor 均为 TUI 呈现态快照。零 IO、零事件、零引擎词。）
+
+def compose_pool_lines(entries, *, selected_ids=(), cursor_index=0,
+                       locale="en", ascii_only=False):
+    """池清单行：光标行 ▶ 前缀 + [x]/[ ] 勾选 + runtime_id · provider。
+
+    只列 Verified 池成员（listing 已过滤——Installed≠Verified 的
+    层次不绕行）；空池 = 恰一行诚实提示（词表闭集）。"""
+    selected = frozenset(selected_ids)
+    lines = []
+    for index, entry in enumerate(entries):
+        marker = "▶ " if index == cursor_index else "  "
+        box = "[x]" if entry.runtime_id in selected else "[ ]"
+        lines.append(
+            f"{marker}{box} {entry.runtime_id} · {entry.provider_id}")
+    if not lines:
+        lines = [ui_label("no VERIFIED runtimes", locale)]
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
+
+
+def compose_participant_lines(selected_ids, roles, *,
+                              participant_index=0):
+    """participant 行（声明序 = sorted runtime_id）：
+    member-N  ROLE ← runtime_id。roles 值缺席（尚未指派/未预览）
+    = 诚实 "—"（缺席呈现既有惯例）；duplicate Role 合法（按声明
+    原样呈现）；零选择 = 零行（区块标题由组装器管理）。"""
+    lines = []
+    for index, runtime_id in enumerate(sorted(selected_ids)):
+        marker = "▶ " if index == participant_index else "  "
+        role = roles.get(runtime_id)
+        role_text = role.upper() if role else "—"
+        lines.append(f"{marker}member-{index + 1}  {role_text} "
+                     f"← {runtime_id}")
+    return tuple(lines)
+
+
+def compose_keys_hint(*, locale="en", ascii_only=False):
+    """COMPOSE 键提示（唯一提示面；键字母恒 EN 既有惯例，动词经
+    闭集词表）。"""
+    line = ui_label(
+        "↑↓ move · space select · ←→ member · r role · "
+        "enter preview/start · esc back · l lang · q quit", locale)
+    if ascii_only:
+        line = _to_ascii(line)
+    return line
+
+
+def compose_screen_lines(version_text, task_text, entries, *,
+                         selected_ids=(), cursor_index=0, roles=None,
+                         participant_index=0, preview_composition=None,
+                         message_lines=(), width=100, ascii_only=False,
+                         locale="en"):
+    """COMPOSE 屏组装（漏斗首屏同型）：header / task 回显 / 池清单 /
+    participants / 计划块（preview 成功时）/ 瞬态反馈 / 键提示末行。
+
+    preview_composition 带 reason（CompositionError duck）或零绑定时
+    计划块缺席——错误词经 message_lines 原样呈现（本层零推断）。
+    逐行宽度截断（不溢出铁律）。"""
+    roles = roles or {}
+    header = (f"dual-agent cockpit · {version_text}"
+              if version_text else "dual-agent cockpit")
+    lines = [f"{header} · {ui_label('compose collaboration', locale)}",
+             f"{ui_label('TASK', locale)}: "
+             f"{truncate_to_width(str(task_text), max(1, width - 8))}"]
+    lines.append(f"── {ui_label('runtimes', locale)}")
+    lines.extend(compose_pool_lines(
+        entries, selected_ids=selected_ids, cursor_index=cursor_index,
+        locale=locale))
+    lines.append(f"── {ui_label('participants', locale)}")
+    lines.extend(compose_participant_lines(
+        selected_ids, roles, participant_index=participant_index))
+    bindings = tuple(getattr(preview_composition, "bindings", ())
+                     or ()) if preview_composition is not None else ()
+    if bindings:
+        lines.extend(funnel_preview_lines(
+            preview_composition, header=ui_label(
+                "collaboration plan", locale)))
+    lines.extend(message_lines)
+    lines.append(compose_keys_hint(locale=locale))
+    lines = [truncate_to_width(line, width) for line in lines]
     if ascii_only:
         lines = [_to_ascii(line) for line in lines]
     return tuple(lines)

@@ -790,6 +790,11 @@ class ComposedRun(NamedTuple):
     events: object
     facts: object
     usage: object
+    # run-local 组合分组元数据（M3）：user composition 路径经
+    # _replace 注入 live.groups；legacy/default 路径不传恒 ()。
+    # 纯呈现载荷——装配层（ExecutionSlot/plan/RunState/pipeline）
+    # 零感知（M0 Group 六不等式）。
+    groups: tuple = ()
 
 
 def _assemble_execution(resolved, task, steps, timeout_seconds, *,
@@ -979,6 +984,160 @@ def _funnel_composition_closures(registry, skipped, evidence, *,
                            composed_runs=composed_runs)
 
 
+class UserCompositionSurface(NamedTuple):
+    """M3 用户组合面（与 _FunnelSurfaces 同注入范式）。
+
+    start = start_user_composition 闭包；装配仍归 _assemble_
+    execution——本面零第二执行路径。CU-COCKPIT-1 P1 增两个只读
+    闭包：listing（Verified 池清单）/ preview（selection →
+    (intent, resolve 结果) 纯装配+解析，零副作用）。"""
+
+    start: object
+    composed_runs: list
+    listing: object
+    preview: object
+
+
+def _user_composition_surface(registry, skipped, evidence, *,
+                              timeout_seconds, boundary_hook=None,
+                              observation_sink=None, event_index=None):
+    """M3 用户组合入口工厂（READ/DISPATCH 注入范式，
+    _funnel_composition_closures 同型）。
+
+    start = 唯一启动出口，七步与 default start_composition 同律、
+    同一装配真相：INVALID_TASK → 活读池 → core resolve（结构+池门，
+    truthful REJECT）→ 披露全等门（CompositionChanged：零装配零
+    回退零 reroute）→ _resolve_runtimes 既有第二道 → _assemble_
+    execution → groups 透传。组合差异仅在 intent 来源（用户点名 vs
+    默认模板）；intent 全程零改写（无回退/替换/重绑）。"""
+
+    composed_runs = []
+
+    def verified_listing():
+        """CU-COCKPIT-1：Verified 池只读清单（UI 唯一选择数据源）。
+
+        registry.list() 自带 canonical sorted(runtime_id) 序——
+        确定性、零注册、零写入；UI 绝不直接触 registry/evidence。"""
+        return _verified_pool(registry, evidence)
+
+    def _selection_to_intent(selection):
+        """P1 selection → CompositionIntent（纯装配，零 IO）。
+
+        selection = ((runtime_id, role), ...) 声明序（P1：一勾选
+        runtime = 一 participant）；member_id 按声明序稳定生成
+        member-1..N；groups 恒空（P1 平面协作）。合法性门归
+        validate_composition（UI 结构上只产闭集 role + 2-4 勾选，
+        非法形状由 core 诚实拒）。"""
+        from composition_core import (
+            AgentSpec,
+            CompositionIntent,
+            RuntimeBindingRequest,
+        )
+        members = []
+        requests = {}
+        for index, (runtime_id, role) in enumerate(selection, start=1):
+            member_id = f"member-{index}"
+            members.append(AgentSpec(member_id, role))
+            requests[member_id] = RuntimeBindingRequest(runtime_id)
+        return CompositionIntent(
+            members=tuple(members),
+            binding_requests=requests,
+            groups=())
+
+    def _prefill_default_roles(selection):
+        """role=None 成员的默认角色回填——复用唯一默认指派真源：
+        选中成员的子集池过 resolve_default_composition（同 sorted
+        序 + 同模板位次，语义 = "这 N 个 runtime 的默认指派"）。
+        子集不足 2（blocked）或 runtime 不在池 = 保持 None（后续
+        core validate 首错即停，诚实拒）。零第二套指派逻辑。"""
+        if all(role is not None for _, role in selection):
+            return selection
+        wanted = {runtime_id for runtime_id, _ in selection}
+        subset = tuple(entry for entry in _verified_pool(
+            registry, evidence) if entry.runtime_id in wanted)
+        defaults = resolve_default_composition(subset)
+        if getattr(defaults, "blocked_reason", None) is not None:
+            return selection
+        by_runtime = {binding.runtime_id: binding.role
+                      for binding in defaults.bindings}
+        return tuple(
+            (runtime_id,
+             role if role is not None else by_runtime.get(runtime_id))
+            for runtime_id, role in selection)
+
+    def preview_selection(selection):
+        """CU-COCKPIT-1：只读预览（零副作用零执行）。
+
+        活读 Verified 池 → role=None 回填默认（唯一指派真源复用）
+        → core resolve（结构门+池门）；成功 = ResolvedComposition
+        （调用方经 expected_resolved 传入 start 作披露全等门基准）；
+        失败 = CompositionError 原词（intent 恒 None）。与 start 各自
+        活读池——两次读池间池可变正是 start 第 4 步全等门的存在
+        意义（CompositionChanged，零静默重绑）。"""
+        from composition_core import resolve_composition
+        selection = _prefill_default_roles(selection)
+        intent = _selection_to_intent(selection)
+        result = resolve_composition(intent,
+                                     _verified_pool(registry, evidence))
+        if isinstance(result, CompositionError):
+            return None, result
+        return intent, result
+
+    def start_user_composition(task_text, intent,
+                               expected_resolved=None):
+        # 惰性接线（_host_entry 同型先例）：composition_core 顶层
+        # import 本模块（值对象复用），顶层反向 import 会成环；到
+        # 运行时本模块必已初始化，此处直取缓存。
+        from composition_core import resolve_composition
+
+        # STEP 1 INVALID_TASK（与 default 逐字同律）
+        if not isinstance(task_text, str) or not task_text.strip():
+            return CompositionError("INVALID_TASK",
+                                    "task must be a non-empty string",
+                                    None)
+        # STEP 2 一次活读；STEP 3 消费同一池快照
+        pool = _verified_pool(registry, evidence)
+        # STEP 3 core 池门（validate+resolve；失败立即返回——零
+        # slots/session/journal/usage/drive/重试/回退）
+        live = resolve_composition(intent, pool)
+        if isinstance(live, CompositionError):
+            return live
+        # STEP 4 披露全等门：expected_resolved=None = 无披露跳过；
+        # 比较恰 bindings 四字段值等（含 canonical_runtime_identity
+        # ——三字段相等绝不掩盖 identity 变化）。groups/member_ids
+        # 非权威面不参与；mismatch = re-selection required（刷新
+        # 披露重确认），绝不自动修复/替换/重新解析/重试。
+        if (expected_resolved is not None
+                and live.bindings != expected_resolved.bindings):
+            return CompositionChanged(
+                _composition_change_reasons(expected_resolved, live,
+                                            registry), live)
+        # STEP 5 既有第二道（registry 活验证；零复制）
+        resolved_or_error = _resolve_runtimes(registry, skipped,
+                                              evidence, live.steps)
+        if not isinstance(resolved_or_error, dict):
+            reason, detail, hint = resolved_or_error
+            return CompositionError(
+                reason, detail,
+                _host_entry()._HINT_QUALIFY if hint else None)
+        # STEP 6 唯一装配真相（零新增 slot/plan/session/pipeline）
+        composed = _assemble_execution(
+            resolved_or_error, task_text, live.steps, timeout_seconds,
+            observation_sink=observation_sink, event_index=event_index,
+            boundary_hook=boundary_hook)
+        # STEP 7 groups = run-local 呈现元数据（装配零感知，NamedTuple
+        # 官方 _replace 注入；不经 ExecutionSlot/CockpitSession/
+        # RunState/pipeline）
+        composed = composed._replace(groups=live.groups)
+        composed_runs.append(composed)
+        return composed
+
+    return UserCompositionSurface(start=start_user_composition,
+                                  composed_runs=composed_runs,
+                                  listing=verified_listing,
+                                  preview=preview_selection)
+
+
 def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
                           timeout_seconds, boundary_hook,
                           observation_sink, event_index):
@@ -1009,11 +1168,18 @@ def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
         registry, skipped, evidence, timeout_seconds=effective_timeout,
         boundary_hook=boundary_hook, observation_sink=observation_sink,
         event_index=event_index)
+    # CU-COCKPIT-1：user 面（listing/preview/start）与漏斗面共享同一
+    # registry/evidence/timeout 现场件——单一池真源、同一装配真相。
+    user_surface = _user_composition_surface(
+        registry, skipped, evidence, timeout_seconds=effective_timeout,
+        boundary_hook=boundary_hook, observation_sink=observation_sink,
+        event_index=event_index)
     outcome = tui.run_cockpit_funnel(
         composition_preview=surfaces.preview,
         start_composition=surfaces.start,
         task_token=intent.task_token,
-        timeout_seconds=intent.timeout_seconds)
+        timeout_seconds=intent.timeout_seconds,
+        user_composition_surface=user_surface)
     if outcome is None:
         return 0
     composed = surfaces.composed_runs[-1]

@@ -58,6 +58,9 @@ from cockpit_projection import (
     agent_detail,
     apply_budget_narrowing,
     build_projection,
+    COMPOSITION_ROLES,
+    compose_keys_hint,
+    compose_screen_lines,
     control_receipt_line,
     derive_lifecycle,
     event_detail_line,
@@ -216,6 +219,17 @@ def _build_classes() -> None:
             key = getattr(event, "key", "")
             app = self.app
             if app._funnel_pre_start():
+                if app._cockpit_compose_active:
+                    await self._compose_key(event, key)
+                    return
+                if key == "c":
+                    # CU-COCKPIT-1：c 进入 COMPOSE（导航键、可逆——
+                    # 与 q 的空缓冲门不同恒生效；残余=task 裸小写 c
+                    # 需大写 C/粘贴/prefill，q 先例同类已接受）
+                    event.prevent_default()
+                    event.stop()
+                    app._compose_enter_screen()
+                    return
                 await self._funnel_key(event, key)
                 return
             if app._cockpit_mode == MODE_CONFIRM:
@@ -298,6 +312,19 @@ def _build_classes() -> None:
                 return
             await super()._on_key(event)
 
+        async def _compose_key(self, event, key: str) -> None:
+            """CU-COCKPIT-1：COMPOSE 键路由（授权 §十二）。授权键集
+            外的可打印键 no-op 消费（task 编辑回漏斗完成——compose 态
+            绝不隐式编辑被遮蔽的草稿）；ctrl+c 放行框架既有路径。"""
+            if key == "ctrl+c":
+                await super()._on_key(event)
+                return
+            event.prevent_default()
+            event.stop()
+            if key in ("up", "down", "left", "right", "space", "enter",
+                       "escape", "q", "r", "l", "L"):
+                self.app._compose_dispatch(key)
+
     class CockpitApp(App):  # type: ignore[misc]
         """主界面：五层结构 Header / Task / Pipeline / Collaboration
         Log / Persistent Composer（UX2-R1）+ （≥140 列）Context 面板
@@ -305,6 +332,7 @@ def _build_classes() -> None:
 
         CSS = f"""
         #funnel-screen {{ display: none; }}
+        #compose-screen {{ display: none; }}
         #input-dock {{ dock: bottom; height: auto; }}
         #dock-receipt {{ height: 1; }}
         #dock-controls {{ height: 1; }}
@@ -329,7 +357,8 @@ def _build_classes() -> None:
                      facts=None, usage=None, session=None, control=None,
                      revision_pending=None, composition_preview=None,
                      start_composition=None, task_token=None,
-                     timeout_seconds=None):
+                     timeout_seconds=None,
+                     user_composition_surface=None):
             super().__init__()
             self._cockpit_drive = driver
             self._cockpit_task = task
@@ -403,6 +432,25 @@ def _build_classes() -> None:
             self._cockpit_stage = (
                 STAGE_COMPOSING if self._cockpit_funnel_prefill.strip()
                 else STAGE_NOT_STARTED)
+            # CU-COCKPIT-1：COMPOSE 选择屏（pre-run funnel 阶段——绝不
+            # 触碰 C2 RUNNING 三态/六键契约）。user 面注入闭包 =
+            # 组合真相唯一通道（listing/preview/start）；全部选择/
+            # 角色/光标均为呈现态快照，绝不写回任何事实源。intent/
+            # expected 为 preview 闭包产物（entry 组装真相）——本层
+            # 零 composition_core import、零引擎词汇。
+            self._cockpit_user_surface = user_composition_surface
+            self._cockpit_compose_active = False
+            self._cockpit_compose_entries = ()
+            self._cockpit_compose_cursor = 0
+            self._cockpit_compose_selected = []
+            self._cockpit_compose_roles = {}
+            self._cockpit_compose_known = {}
+            self._cockpit_compose_pcursor = 0
+            self._cockpit_compose_intent = None
+            self._cockpit_compose_expected = None
+            self._cockpit_compose_fp = None
+            self._cockpit_compose_message = ()
+            self.compose_text = ""
             # UX2-R1 Collaboration Log（D 裁决：有损派生缓存）——
             # R1 骨架恰两源：echo（用户提交原文）+ 回执（控制面
             # 同步投影）；ring 上限仅淘汰显示行，log_text 为测试镜像
@@ -422,6 +470,7 @@ def _build_classes() -> None:
             # Log（弹性 1fr）/ Persistent Composer dock（确认条 +
             # composer + hint）+ ≥140 Context
             yield Static("", id="funnel-screen")
+            yield Static("", id="compose-screen")
             yield Static("", id="header-zone")
             yield Static("", id="task-zone")
             yield Static("", id="collab-zone")
@@ -465,6 +514,7 @@ def _build_classes() -> None:
         def _running_mount(self) -> None:
             """RUNNING 呈现（legacy 直达与漏斗 Start 后共用同一面）。"""
             self.query_one("#funnel-screen").display = False
+            self.query_one("#compose-screen").display = False
             for selector in _MAIN_ZONE_SELECTORS:
                 self.query_one(selector).display = True
             self._focus_composer()
@@ -743,6 +793,11 @@ def _build_classes() -> None:
             性后本行收敛。键字母恒 EN，动词经投影层闭集词表（单一
             词表真源；语言提示键字母恒 EN mandates——[L]中文 而非
             [L]Chinese，旧惯例保持）。"""
+            if self._cockpit_compose_active:
+                # CU-COCKPIT-1：COMPOSE 键提示（闭集词表，l 可切换）
+                return compose_keys_hint(
+                    locale=self._cockpit_locale,
+                    ascii_only=self._cockpit_ascii)
             if self._funnel_pre_start():
                 return funnel_keys_hint(
                     ascii_only=self._cockpit_ascii)
@@ -1051,6 +1106,240 @@ def _build_classes() -> None:
             if composer:
                 composer[0].text = ""
             self._running_mount()
+
+        # ------------------------------------ CU-COCKPIT-1 COMPOSE 选择屏
+
+        def _compose_enter_screen(self) -> None:
+            """c 进入 COMPOSE：listing 快照 + 状态重置 + 换屏（task 草稿
+            原样保留在常驻 composer——esc 返回即继续编辑）。"""
+            if self._cockpit_user_surface is None:
+                return
+            self._cockpit_compose_active = True
+            self._cockpit_compose_entries = (
+                self._cockpit_user_surface.listing())
+            self._cockpit_compose_cursor = 0
+            self._cockpit_compose_selected = []
+            self._cockpit_compose_roles = {}
+            self._cockpit_compose_known = {}
+            self._cockpit_compose_pcursor = 0
+            self._compose_invalidate_preview()
+            self._cockpit_compose_message = ()
+            self.query_one("#funnel-screen").display = False
+            self.query_one("#compose-screen").display = True
+            self._compose_refresh()
+
+        def _compose_exit_screen(self) -> None:
+            """esc 返回漏斗（草稿/选择阶段零产出——选择态随之丢弃，
+            task 草稿保留在 composer）。"""
+            self._cockpit_compose_active = False
+            self.query_one("#compose-screen").display = False
+            self.query_one("#funnel-screen").display = True
+            self._funnel_refresh()
+
+        def _compose_invalidate_preview(self) -> None:
+            """披露失效（选择/角色变更、start 诚实拒绝）：intent/
+            expected/指纹清空——再 Enter 先重 preview，绝不带旧
+            expected 启动。已知角色镜像（_cockpit_compose_known）
+            保留：仅呈现便利（最近一次披露的默认角色投影），不参与
+            启动判定（stamp 门强制重 preview）。"""
+            self._cockpit_compose_intent = None
+            self._cockpit_compose_expected = None
+            self._cockpit_compose_fp = None
+
+        def _compose_display_roles(self):
+            """呈现用角色解析（纯呈现派生，零事实写回）：显式 override
+            （r 键产物）> 已知默认（最近一次 preview 披露的 steps
+            镜像——entry 唯一默认指派真源的产物）> 诚实缺席
+            （None → "—"）。"""
+            merged = dict(self._cockpit_compose_known)
+            merged.update(self._cockpit_compose_roles)
+            return merged
+
+        def _compose_refresh(self) -> None:
+            """COMPOSE 屏渲染（纯呈现态投影；compose_text = 测试镜像，
+            funnel_text 先例）。"""
+            lines = compose_screen_lines(
+                self._cockpit_version_text, self._composer_text(),
+                self._cockpit_compose_entries,
+                selected_ids=tuple(self._cockpit_compose_selected),
+                cursor_index=self._cockpit_compose_cursor,
+                roles=self._compose_display_roles(),
+                participant_index=self._cockpit_compose_pcursor,
+                preview_composition=self._cockpit_compose_expected,
+                message_lines=tuple(self._cockpit_compose_message),
+                width=self.size.width or 100,
+                ascii_only=self._cockpit_ascii,
+                locale=self._cockpit_locale)
+            self.compose_text = "\n".join(lines)
+            self._zone_update("#compose-screen", self.compose_text)
+            self._refresh_dock()
+
+        def _compose_dispatch(self, key: str) -> None:
+            """COMPOSE 键语义（唯一入口；呈现态快照，零 dispatch 零
+            事实写回）。"""
+            if key == "q":
+                self.exit()
+                return
+            if key == "escape":
+                self._compose_exit_screen()
+                return
+            if key in ("l", "L"):
+                self._cockpit_locale = (
+                    "zh" if self._cockpit_locale == "en" else "en")
+                self._compose_refresh()
+                return
+            if key == "up":
+                if self._cockpit_compose_entries:
+                    self._cockpit_compose_cursor = max(
+                        0, self._cockpit_compose_cursor - 1)
+                self._compose_refresh()
+                return
+            if key == "down":
+                if self._cockpit_compose_entries:
+                    self._cockpit_compose_cursor = min(
+                        len(self._cockpit_compose_entries) - 1,
+                        self._cockpit_compose_cursor + 1)
+                self._compose_refresh()
+                return
+            if key == "space":
+                self._compose_toggle()
+                return
+            if key == "left":
+                if self._cockpit_compose_selected:
+                    self._cockpit_compose_pcursor = max(
+                        0, self._cockpit_compose_pcursor - 1)
+                    self._compose_refresh()
+                return
+            if key == "right":
+                if self._cockpit_compose_selected:
+                    self._cockpit_compose_pcursor = min(
+                        len(self._cockpit_compose_selected) - 1,
+                        self._cockpit_compose_pcursor + 1)
+                    self._compose_refresh()
+                return
+            if key == "r":
+                self._compose_cycle_role()
+                return
+            if key == "enter":
+                self._compose_enter()
+                return
+
+        def _compose_toggle(self) -> None:
+            """space 勾选/取消（2-4 门：第 5 个诚实阻断；0/1 由 core
+            在 preview 诚实拒——UI 结构上只产闭集 role + 唯一 runtime
+            勾选）。"""
+            entries = self._cockpit_compose_entries
+            if not entries or self._cockpit_compose_cursor >= len(entries):
+                return
+            runtime_id = entries[self._cockpit_compose_cursor].runtime_id
+            selected = self._cockpit_compose_selected
+            if runtime_id in selected:
+                selected.remove(runtime_id)
+                self._cockpit_compose_roles.pop(runtime_id, None)
+                self._cockpit_compose_known.pop(runtime_id, None)
+                if self._cockpit_compose_pcursor >= len(selected):
+                    self._cockpit_compose_pcursor = max(
+                        0, len(selected) - 1)
+                self._compose_invalidate_preview()
+                self._cockpit_compose_message = ()
+                self._compose_refresh()
+                return
+            if len(selected) >= 4:
+                self._cockpit_compose_message = (
+                    ui_label("2-4 runtimes", self._cockpit_locale),)
+                self._compose_refresh()
+                return
+            selected.append(runtime_id)
+            selected.sort()  # 声明序 = sorted runtime_id（default 同律）
+            self._compose_invalidate_preview()
+            self._cockpit_compose_message = ()
+            self._compose_refresh()
+
+        def _compose_cycle_role(self) -> None:
+            """r 循环当前 participant 的 Role（COMPOSITION_ROLES 闭集
+            环；duplicate Role 合法——M0 ERRATA-2）。起点 = 当前呈现
+            角色（override > 披露默认；缺席从环首起）。"""
+            selected = self._cockpit_compose_selected
+            if not selected:
+                return
+            pcursor = min(self._cockpit_compose_pcursor,
+                          len(selected) - 1)
+            runtime_id = selected[pcursor]
+            role = self._compose_display_roles().get(runtime_id)
+            index = (COMPOSITION_ROLES.index(role)
+                     if role in COMPOSITION_ROLES else -1)
+            self._cockpit_compose_roles[runtime_id] = COMPOSITION_ROLES[
+                (index + 1) % len(COMPOSITION_ROLES)]
+            self._compose_invalidate_preview()
+            self._cockpit_compose_message = ()
+            self._compose_refresh()
+
+        def _compose_enter(self) -> None:
+            """Enter 两段（授权 §七/§九）：无有效披露 → preview（只读
+            零执行）；有有效披露且指纹未变 → start（既有 start_user_
+            composition 全链——同一 intent/expected，绝不重建）。"""
+            task_text = self._composer_text()
+            if not task_text.strip():
+                self._cockpit_compose_message = (
+                    ui_label("describe the task first",
+                             self._cockpit_locale),)
+                self._compose_refresh()
+                return
+            selection = tuple(
+                (runtime_id, self._cockpit_compose_roles.get(runtime_id))
+                for runtime_id in self._cockpit_compose_selected)
+            stamp = (
+                tuple(self._cockpit_compose_selected),
+                tuple(sorted(self._cockpit_compose_roles.items())))
+            if (self._cockpit_compose_expected is None
+                    or self._cockpit_compose_fp != stamp):
+                intent, result = self._cockpit_user_surface.preview(
+                    selection)
+                if hasattr(result, "reason"):
+                    # CompositionError：原词红行，停留（无披露可启动）
+                    self._compose_invalidate_preview()
+                    self._cockpit_compose_message = funnel_error_lines(
+                        result)
+                    self._compose_refresh()
+                    return
+                self._cockpit_compose_intent = intent
+                self._cockpit_compose_expected = result
+                self._cockpit_compose_fp = stamp
+                self._cockpit_compose_known = {
+                    runtime_id: role
+                    for role, runtime_id in getattr(result, "steps", ())}
+                self._cockpit_compose_message = ()
+                self._compose_refresh()
+                return
+            result = self._cockpit_user_surface.start(
+                task_text, self._cockpit_compose_intent,
+                self._cockpit_compose_expected)
+            if hasattr(result, "drive"):
+                self._compose_start_success(result)
+                return
+            if hasattr(result, "reasons"):
+                # CompositionChanged：诚实横幅 + listing 刷新 + 披露
+                # 失效（re-selection required——零静默重绑/重试）
+                self._cockpit_compose_entries = (
+                    self._cockpit_user_surface.listing())
+                self._compose_invalidate_preview()
+                self._cockpit_compose_message = funnel_changed_lines(
+                    result.reasons)
+                self._compose_refresh()
+                return
+            # CompositionError：原词红行 + listing 刷新 + 披露失效
+            self._cockpit_compose_entries = (
+                self._cockpit_user_surface.listing())
+            self._compose_invalidate_preview()
+            self._cockpit_compose_message = funnel_error_lines(result)
+            self._compose_refresh()
+
+        def _compose_start_success(self, composed) -> None:
+            """COMPOSE 启动成功 → 同一换屏路径（_funnel_start_success
+            复用——零第二 RUNNING 实现）。"""
+            self._cockpit_compose_active = False
+            self.query_one("#compose-screen").display = False
+            self._funnel_start_success(composed)
 
         # ------------------------------------------------ 键位（常驻 composer）
 
@@ -1452,18 +1741,21 @@ def run_cockpit_tui(*, driver, task, plan, events, facts, usage,
 
 
 def run_cockpit_funnel(*, composition_preview, start_composition,
-                       task_token=None, timeout_seconds=None):
+                       task_token=None, timeout_seconds=None,
+                       user_composition_surface=None):
     """漏斗同步外壳（CU-TUI-5 §十六）：单一 App、单次 run()——
     漏斗为初始呈现阶段，Start 后同一 App 换屏 RUNNING。
 
     前置退出（q/Ctrl-C，未 Start）→ outcome None（零执行零交付）；
     timeout 真值已由入口闭包捕获，本参数仅路由对齐。组合真相只经
-    注入的 preview/start 两闭包进出。"""
+    注入的 preview/start 两闭包进出；CU-COCKPIT-1 增 user 面
+    （listing/preview/start）——c 键 COMPOSE 选择屏的唯一数据源。"""
     _build_classes()
     app = CockpitApp(composition_preview=composition_preview,
                      start_composition=start_composition,
                      task_token=task_token,
-                     timeout_seconds=timeout_seconds)
+                     timeout_seconds=timeout_seconds,
+                     user_composition_surface=user_composition_surface)
     app.run()
     app.wait_for_driver()
     if app.failure is not None:

@@ -951,7 +951,7 @@ class FunnelScreenPilotTests(unittest.IsolatedAsyncioTestCase):
             # 提示在 dock-controls
             self.assertEqual(app._composer_text(), "")
             self.assertEqual(app._dock_controls_line(),
-                             "Enter start · q quit")
+                             "Enter start · c compose · q quit")
             self.assertIsNone(app._cockpit_composed)
             self.assertIsNone(app._cockpit_thread)
             self.assertEqual(start.calls, [])
@@ -1243,9 +1243,10 @@ class RunCockpitFunnelWrapperTests(unittest.TestCase):
         self.assertEqual(
             sorted(holder),
             ["composition_preview", "start_composition", "task_token",
-             "timeout_seconds"])
+             "timeout_seconds", "user_composition_surface"])
         self.assertEqual(holder["task_token"], "t")
         self.assertEqual(holder["timeout_seconds"], 45)
+        self.assertIsNone(holder["user_composition_surface"])
 
     def test_wrapper_returns_none_on_pre_start_quit(self):
         fake = self._fake_app_class(outcome=None)
@@ -2629,8 +2630,9 @@ class FunnelInputDockTests(unittest.IsolatedAsyncioTestCase):
         app = make_funnel_app(funnel_composition(), start)
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.pause()
+            # CU-COCKPIT-1：漏斗键面受控解冻——c 进入 COMPOSE 选择屏
             self.assertEqual(app._dock_controls_line(),
-                             "Enter start · q quit")
+                             "Enter start · c compose · q quit")
             self.assertNotIn("Enter start", _funnel_text(app))
 
     async def test_receipt_row_empty_during_funnel(self):
