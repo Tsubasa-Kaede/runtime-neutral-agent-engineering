@@ -15,6 +15,7 @@ from types import SimpleNamespace
 SCRIPTS = Path(__file__).resolve().parents[1] / "dual-agent-development" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import cockpit_projection  # noqa: E402
 from cockpit_projection import (  # noqa: E402
     COMPOSITION_ROLES,
     DEFAULT_ROLE_TEMPLATES,
@@ -26,8 +27,11 @@ from cockpit_projection import (  # noqa: E402
 )
 
 
-def _entry(runtime_id, provider_id):
-    return SimpleNamespace(runtime_id=runtime_id, provider_id=provider_id)
+def _entry(runtime_id, provider_id, display_name=None):
+    values = dict(runtime_id=runtime_id, provider_id=provider_id)
+    if display_name is not None:
+        values["display_name"] = display_name
+    return SimpleNamespace(**values)
 
 
 def _pool():
@@ -85,6 +89,22 @@ class ComposePoolLinesTests(unittest.TestCase):
             (_entry("rt-a", "prov-a"),), cursor_index=0, ascii_only=True)
         self.assertEqual(lines[0], "> [ ] rt-a · prov-a")
 
+    def test_display_name_is_standard_width_only(self):
+        entry = _entry("rt-a", "prov-a", "Claude Code CLI")
+        self.assertEqual(compose_pool_lines((entry,), width=119),
+                         ("▶ [ ] rt-a · prov-a",))
+        self.assertEqual(compose_pool_lines((entry,), width=120),
+                         ("▶ [ ] rt-a · prov-a · Claude Code CLI",))
+        self.assertEqual(compose_pool_lines((entry,), width=160),
+                         ("▶ [ ] rt-a · prov-a · Claude Code CLI",))
+
+    def test_display_name_absent_or_runtime_id_is_omitted(self):
+        entries = (_entry("rt-a", "prov-a"),
+                   _entry("rt-b", "prov-b", "rt-b"))
+        self.assertEqual(compose_pool_lines(entries, width=120),
+                         ("▶ [ ] rt-a · prov-a",
+                          "  [ ] rt-b · prov-b"))
+
 
 class ComposeParticipantLinesTests(unittest.TestCase):
     def test_member_rows_with_role_and_cursor(self):
@@ -128,16 +148,20 @@ class ComposeScreenLinesTests(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("dual-agent cockpit · 2.7.0", lines[0])
         self.assertIn("TASK: demo task", text)
-        self.assertLess(lines.index("── runtimes"),
+        self.assertLess(lines.index("── runtimes · selected 2/4"),
                         lines.index("▶ [x] rt-a · prov-a"))
         self.assertLess(lines.index("── participants"),
                         lines.index("▶ member-1  ARCHITECT ← rt-a"))
+        self.assertIn(
+            "roles (r): architect · coder · reviewer · tester", lines)
+        self.assertIn("press enter to preview", lines)
         # 键提示恒末行
         self.assertEqual(lines[-1], compose_keys_hint(locale="en"))
 
     def test_preview_block_rendered_only_when_composition_given(self):
         without = self._screen()
-        self.assertNotIn("architect", "\n".join(without))
+        self.assertNotIn("collaboration plan", "\n".join(without))
+        self.assertNotIn("architect  ← rt-a · prov-a", "\n".join(without))
         with_preview = self._screen(
             preview_composition=_resolved_composition(
                 (("architect", "rt-a", "prov-a"),
@@ -145,6 +169,8 @@ class ComposeScreenLinesTests(unittest.TestCase):
         text = "\n".join(with_preview)
         self.assertIn("collaboration plan", text)
         self.assertIn("architect  ← rt-a · prov-a", text)
+        self.assertIn("plan ready — enter to start", with_preview)
+        self.assertNotIn("press enter to preview", with_preview)
 
     def test_message_lines_rendered_before_hint(self):
         lines = self._screen(message_lines=("INVALID_MEMBER_COUNT: boom",))
@@ -153,11 +179,63 @@ class ComposeScreenLinesTests(unittest.TestCase):
 
     def test_locale_switches_labels_not_domain_words(self):
         text = "\n".join(self._screen(locale="zh"))
-        self.assertIn("运行时", text)
+        self.assertIn("运行时 · 已选择 2/4", text)
         self.assertIn("参与者", text)
+        self.assertIn("角色 (r): architect · coder · reviewer · tester", text)
+        self.assertIn("按 enter 预览", text)
         # role/runtime 为 domain 词，绝不翻译
         self.assertIn("ARCHITECT", text)
         self.assertIn("rt-a", text)
+
+    def test_insufficient_pool_guidance_zero_and_one(self):
+        for entries in ((), (_entry("rt-a", "prov-a"),)):
+            text = "\n".join(self._screen(
+                entries=entries, selected_ids=(), roles={}))
+            self.assertIn(
+                "need ≥2 VERIFIED runtimes — qualify first", text)
+        zh = "\n".join(self._screen(
+            entries=(), selected_ids=(), roles={}, locale="zh"))
+        self.assertIn("至少需要 2 个 VERIFIED runtime — 请先 qualify", zh)
+
+    def test_height_none_keeps_all_pool_rows(self):
+        entries = tuple(_entry(f"rt-{index}", "prov")
+                        for index in range(8))
+        text = "\n".join(self._screen(
+            entries=entries, selected_ids=(), roles={}, height=None))
+        for index in range(8):
+            self.assertIn(f"rt-{index}", text)
+        self.assertNotIn("more lines", text)
+
+    def test_height_window_keeps_cursor_and_reports_overflow(self):
+        entries = tuple(_entry(f"rt-{index}", "prov")
+                        for index in range(8))
+        near_top = self._screen(
+            entries=entries, selected_ids=(), roles={}, cursor_index=1,
+            height=10)
+        self.assertIn("▶ [ ] rt-1 · prov", near_top)
+        self.assertTrue(any("more lines" in line for line in near_top))
+        near_bottom = self._screen(
+            entries=entries, selected_ids=(), roles={}, cursor_index=7,
+            height=10)
+        self.assertIn("▶ [ ] rt-7 · prov", near_bottom)
+        self.assertTrue(any("more lines" in line for line in near_bottom))
+
+    def test_minimum_pool_window_is_three(self):
+        entries = tuple(_entry(f"rt-{index}", "prov")
+                        for index in range(8))
+        lines = self._screen(
+            entries=entries, selected_ids=(), roles={}, cursor_index=4,
+            height=1)
+        pool_rows = [line for line in lines if "[ ] rt-" in line]
+        self.assertEqual(len(pool_rows), 3)
+        self.assertTrue(any("rt-4" in line for line in pool_rows))
+
+    def test_cjk_display_name_is_display_width_truncated(self):
+        entry = _entry("rt-a", "prov-a", "超长中文运行时名称")
+        lines = self._screen(
+            entries=(entry,), selected_ids=(), roles={}, width=120)
+        self.assertTrue(all(cockpit_projection.display_width(line) <= 120
+                            for line in lines))
 
     def test_narrow_width_truncates_every_line(self):
         for width in (60, 80, 120, 160):

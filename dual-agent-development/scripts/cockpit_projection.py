@@ -200,9 +200,23 @@ _LABELS = {
     "participants": ("participants", "参与者"),
     "collaboration plan": ("collaboration plan", "协作计划"),
     "no VERIFIED runtimes": ("no VERIFIED runtimes", "无已验证运行时"),
+    "selected {n}/4": ("selected {n}/4", "已选择 {n}/4"),
+    "roles (r): {roles}": ("roles (r): {roles}", "角色 (r): {roles}"),
+    "press enter to preview": ("press enter to preview", "按 enter 预览"),
+    "plan ready — enter to start": (
+        "plan ready — enter to start", "计划已就绪 — 按 enter 启动"),
+    "need ≥2 VERIFIED runtimes — qualify first": (
+        "need ≥2 VERIFIED runtimes — qualify first",
+        "至少需要 2 个 VERIFIED runtime — 请先 qualify"),
     "2-4 runtimes": ("2-4 runtimes", "需选择 2-4 个运行时"),
     "describe the task first": (
         "describe the task first", "先描述任务（esc 返回漏斗输入）"),
+    # P2 W6/W7：重入失效披露 + q 两段守卫横幅（runtime id 为
+    # domain 词经 {ids} 注入，绝不翻译）
+    "removed from selection: {ids}": (
+        "removed from selection: {ids}", "已从选择移除：{ids}"),
+    "q again to quit · esc back": (
+        "q again to quit · esc back", "再按 q 退出 · esc 返回"),
     "↑↓ move · space select · ←→ member · r role · "
     "enter preview/start · esc back · l lang · q quit": (
         "↑↓ move · space select · ←→ member · r role · "
@@ -1258,18 +1272,23 @@ def funnel_first_screen(version_text, composition, task_buffer, *,
 # roles/cursor 均为 TUI 呈现态快照。零 IO、零事件、零引擎词。）
 
 def compose_pool_lines(entries, *, selected_ids=(), cursor_index=0,
-                       locale="en", ascii_only=False):
+                       locale="en", ascii_only=False, width=100):
     """池清单行：光标行 ▶ 前缀 + [x]/[ ] 勾选 + runtime_id · provider。
 
     只列 Verified 池成员（listing 已过滤——Installed≠Verified 的
-    层次不绕行）；空池 = 恰一行诚实提示（词表闭集）。"""
+    层次不绕行）；空池 = 恰一行诚实提示（词表闭集）。标准宽度
+    （>=120）附加非重复 display_name；紧凑宽度保持既有字节面。"""
     selected = frozenset(selected_ids)
     lines = []
     for index, entry in enumerate(entries):
         marker = "▶ " if index == cursor_index else "  "
         box = "[x]" if entry.runtime_id in selected else "[ ]"
-        lines.append(
-            f"{marker}{box} {entry.runtime_id} · {entry.provider_id}")
+        line = f"{marker}{box} {entry.runtime_id} · {entry.provider_id}"
+        display_name = getattr(entry, "display_name", None)
+        if (width >= 120 and display_name
+                and display_name != entry.runtime_id):
+            line += f" · {display_name}"
+        lines.append(line)
     if not lines:
         lines = [ui_label("no VERIFIED runtimes", locale)]
     if ascii_only:
@@ -1307,33 +1326,67 @@ def compose_keys_hint(*, locale="en", ascii_only=False):
 def compose_screen_lines(version_text, task_text, entries, *,
                          selected_ids=(), cursor_index=0, roles=None,
                          participant_index=0, preview_composition=None,
-                         message_lines=(), width=100, ascii_only=False,
-                         locale="en"):
+                         message_lines=(), width=100, height=None,
+                         ascii_only=False, locale="en"):
     """COMPOSE 屏组装（漏斗首屏同型）：header / task 回显 / 池清单 /
     participants / 计划块（preview 成功时）/ 瞬态反馈 / 键提示末行。
 
     preview_composition 带 reason（CompositionError duck）或零绑定时
     计划块缺席——错误词经 message_lines 原样呈现（本层零推断）。
-    逐行宽度截断（不溢出铁律）。"""
+    height 只约束池窗口且始终保留光标与至少三条真实池行；逐行宽度
+    截断（不溢出铁律）。"""
     roles = roles or {}
+    entries = tuple(entries)
+    selected_ids = tuple(selected_ids)
     header = (f"dual-agent cockpit · {version_text}"
               if version_text else "dual-agent cockpit")
     lines = [f"{header} · {ui_label('compose collaboration', locale)}",
              f"{ui_label('TASK', locale)}: "
              f"{truncate_to_width(str(task_text), max(1, width - 8))}"]
-    lines.append(f"── {ui_label('runtimes', locale)}")
+    selected_label = ui_label("selected {n}/4", locale).format(
+        n=len(selected_ids))
+    lines.append(f"── {ui_label('runtimes', locale)} · {selected_label}")
+
+    pool_entries = entries
+    pool_cursor = cursor_index
+    hidden = 0
+    if height is not None and len(entries) > 3:
+        fixed_count = (7 + len(selected_ids) + len(message_lines)
+                       + (1 if len(entries) < 2 else 0))
+        pool_limit = max(3, height - fixed_count)
+        if pool_limit < len(entries):
+            pool_limit = min(pool_limit, len(entries))
+            cursor = min(max(0, cursor_index), len(entries) - 1)
+            start = min(max(0, cursor - pool_limit // 2),
+                        len(entries) - pool_limit)
+            pool_entries = entries[start:start + pool_limit]
+            pool_cursor = cursor - start
+            hidden = len(entries) - pool_limit
     lines.extend(compose_pool_lines(
-        entries, selected_ids=selected_ids, cursor_index=cursor_index,
-        locale=locale))
+        pool_entries, selected_ids=selected_ids, cursor_index=pool_cursor,
+        locale=locale, width=width))
+    if hidden:
+        lines.append(ui_label("(+{n} more lines)", locale).format(n=hidden))
+
     lines.append(f"── {ui_label('participants', locale)}")
     lines.extend(compose_participant_lines(
         selected_ids, roles, participant_index=participant_index))
+    role_text = " · ".join(COMPOSITION_ROLES)
+    lines.append(ui_label("roles (r): {roles}", locale).format(
+        roles=role_text))
+    if len(entries) < 2:
+        lines.append(ui_label(
+            "need ≥2 VERIFIED runtimes — qualify first", locale))
+
     bindings = tuple(getattr(preview_composition, "bindings", ())
                      or ()) if preview_composition is not None else ()
     if bindings:
         lines.extend(funnel_preview_lines(
             preview_composition, header=ui_label(
                 "collaboration plan", locale)))
+        lines.append(ui_label("plan ready — enter to start", locale))
+    else:
+        lines.append(ui_label("press enter to preview", locale))
     lines.extend(message_lines)
     lines.append(compose_keys_hint(locale=locale))
     lines = [truncate_to_width(line, width) for line in lines]

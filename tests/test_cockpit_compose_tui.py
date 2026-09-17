@@ -1,9 +1,11 @@
 """CU-COCKPIT-1 P1: COMPOSE TUI stage — pre-run funnel stage Pilot tests.
 
-键契约（授权 §十二）：↑↓ 池导航 · space 勾选 · ←→ participant ·
-r Role 循环 · Enter 两段（preview → start）· esc 返回漏斗 ·
-q 退出 · l EN⇄ZH。COMPOSE 是 pre-run funnel 阶段——绝不触碰 C2
-RUNNING 三态。全部离线 doubles；REAL=0。
+键契约（授权 §十二 + P2 W6/W7）：↑↓ 池导航 · space 勾选 ·
+←→ participant · r Role 循环 · Enter 两段（preview → start）·
+esc 返回漏斗（selection/override/已知角色保留，W6）· q 无可失
+状态单键退出、有可失状态两段守卫（W7）· l EN⇄ZH。COMPOSE 是
+pre-run funnel 阶段——绝不触碰 C2 RUNNING 三态。全部离线
+doubles；REAL=0。
 """
 import sys
 import threading
@@ -372,9 +374,10 @@ class ComposeStagePilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(user.preview_calls), 2)
 
     async def test_q_quits_from_compose(self):
+        """W7 空态（零 selection + 零草稿）：单 q 即退（既有路径）。"""
         user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
         app = make_compose_app(funnel_composition(), _StartRecorder([]),
-                               user, task_token="do work")
+                               user)
         async with app.run_test(size=(100, 24)) as pilot:
             await pilot.press("c")
             await pilot.press("q")
@@ -432,6 +435,273 @@ class ComposeStagePilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(user.preview_calls, [])
             self.assertEqual(user.start_calls, [])
             self.assertFalse(app.query_one("#compose-screen").display)
+
+
+class ComposeP2ReentryTests(unittest.IsolatedAsyncioTestCase):
+    """W6：esc 保留 + 重入 listing 重取/失效过滤/光标 clamp/披露。"""
+
+    async def test_esc_preserves_selection_and_reentry_restores(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(app.query_one("#compose-screen").display)
+            # 重入：listing 重取，selection/已知角色呈现保留
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertEqual(user.listing_calls, 2)
+            text = _compose_text(app)
+            self.assertIn("[x] rt-a", text)
+            self.assertIn("[x] rt-b", text)
+            self.assertIn("member-1", text)
+            # esc 已使披露失效：重入 phase 回 preview（W3 经 TUI）
+            self.assertIn("press enter to preview", text)
+            self.assertEqual(user.preview_calls, [])
+
+    async def test_reentry_filters_disappeared_and_discloses(self):
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b", "rt-c"),
+            preview_results=[(SimpleNamespace(members=()),
+                              resolved_double())])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("escape")
+            # 池漂移：rt-a 消失
+            user.entries = _entries("rt-b", "rt-c")
+            await pilot.press("c")
+            await pilot.pause()
+            text = _compose_text(app)
+            self.assertEqual(user.listing_calls, 2)
+            # 失效 runtime 从 selection 丢弃 + 诚实披露（零静默修复）
+            self.assertNotIn("[x] rt-a", text)
+            self.assertNotIn("[ ] rt-a", text)
+            self.assertIn("removed from selection: rt-a", text)
+            self.assertIn("[x] rt-b", text)
+            # 披露失效：Enter 重 preview，绝不带旧 expected start
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(len(user.preview_calls), 1)
+            self.assertEqual(user.start_calls, [])
+
+    async def test_reentry_clamps_cursor(self):
+        user = _UserSurfaceRecorder(
+            _entries(*[f"rt-{index}" for index in range(8)]))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            for _ in range(7):
+                await pilot.press("down")
+            await pilot.pause()
+            self.assertIn("▶ [ ] rt-7", _compose_text(app))
+            await pilot.press("escape")
+            # 池收缩 8 → 3：cursor 7 必须钳到 2
+            user.entries = _entries("rt-a", "rt-b", "rt-c")
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertIn("▶ [ ] rt-c", _compose_text(app))
+
+
+class ComposeP2GuardedQuitTests(unittest.IsolatedAsyncioTestCase):
+    """W7：有可失状态（selection 或草稿）时 q 两段守卫 + disarm。"""
+
+    async def test_q_guarded_by_draft_requires_second_press(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app.is_running)
+            self.assertIn("q again to quit", _compose_text(app))
+            await pilot.press("q")
+            for _ in range(20):
+                if not app.is_running:
+                    break
+                await pilot.pause()
+            self.assertFalse(app.is_running)
+
+    async def test_q_guarded_by_selection_alone(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app.is_running)
+            self.assertIn("q again to quit", _compose_text(app))
+
+    async def test_q_guard_disarmed_by_other_key(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_compose_q_armed)
+            # 任意其它键 disarm + 守卫横幅撤下
+            await pilot.press("down")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_compose_q_armed)
+            self.assertNotIn("q again to quit", _compose_text(app))
+            self.assertTrue(app.is_running)
+            # disarm 后单 q 重新武装而非退出
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app.is_running)
+            self.assertTrue(app._cockpit_compose_q_armed)
+
+    async def test_q_guard_disarmed_by_escape(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("q")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            # 换屏 disarm：回漏斗
+            self.assertTrue(app.query_one("#funnel-screen").display)
+            self.assertFalse(app._cockpit_compose_q_armed)
+            await pilot.press("c")
+            await pilot.press("q")
+            await pilot.pause()
+            # 重入后单 q 仍守卫（armed 已被 esc 清零）
+            self.assertTrue(app.is_running)
+            self.assertIn("q again to quit", _compose_text(app))
+
+
+class ComposeP2WiringTests(unittest.IsolatedAsyncioTestCase):
+    """W8/W4 接线：TUI 向 projection 供 width/height（纯呈现参数）。"""
+
+    async def test_height_wiring_windows_pool(self):
+        user = _UserSurfaceRecorder(
+            _entries(*[f"rt-{index}" for index in range(8)]))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 12)) as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            text = _compose_text(app)
+            # 高度预算收紧：池被窗口化，cursor 行恒可见 + 溢出行
+            self.assertIn("▶ [ ] rt-0", text)
+            self.assertIn("(+3 more lines)", text)
+            for _ in range(7):
+                await pilot.press("down")
+            await pilot.pause()
+            self.assertIn("▶ [ ] rt-7", _compose_text(app))
+
+    async def test_width_wiring_display_name(self):
+        entry = SimpleNamespace(runtime_id="rt-a", provider_id="prov-a",
+                                display_name="Extra Name")
+        user = _UserSurfaceRecorder((entry,))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(120, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertIn("Extra Name", _compose_text(app))
+        user = _UserSurfaceRecorder((entry,))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertNotIn("Extra Name", _compose_text(app))
+
+
+class ComposeP2JourneyTests(unittest.IsolatedAsyncioTestCase):
+    """North Star 冷启动旅程（授权 §五）：EN 与 ZH 双语各一条。"""
+
+    async def test_cold_start_journey_en(self):
+        gate = _Gate()
+        intent_double = SimpleNamespace(members=())
+        resolved = resolved_double()
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b"),
+            preview_results=[(intent_double, resolved)],
+            start_results=[composed_run_double(gate=gate)])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="compose task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            self.assertIn("press enter to preview", _compose_text(app))
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIn("plan ready — enter to start",
+                          _compose_text(app))
+            await pilot.press("enter")
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
+            self.assertFalse(app.query_one("#compose-screen").display)
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
+        self.assertEqual(app.outcome, "compose-outcome")
+        task_text, intent, expected = user.start_calls[0]
+        self.assertEqual(task_text, "compose task")
+        self.assertIs(intent, intent_double)
+        self.assertIs(expected, resolved)
+
+    async def test_cold_start_journey_zh(self):
+        gate = _Gate()
+        intent_double = SimpleNamespace(members=())
+        resolved = resolved_double()
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b"),
+            preview_results=[(intent_double, resolved)],
+            start_results=[composed_run_double(gate=gate)])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="compose task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("l")
+            await pilot.pause()
+            self.assertIn("按 enter 预览", _compose_text(app))
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIn("计划已就绪 — 按 enter 启动", _compose_text(app))
+            await pilot.press("enter")
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
+        self.assertEqual(app.outcome, "compose-outcome")
+        self.assertIs(user.start_calls[0][2], resolved)
 
 
 if __name__ == "__main__":

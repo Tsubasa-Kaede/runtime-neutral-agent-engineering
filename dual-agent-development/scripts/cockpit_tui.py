@@ -450,6 +450,9 @@ def _build_classes() -> None:
             self._cockpit_compose_expected = None
             self._cockpit_compose_fp = None
             self._cockpit_compose_message = ()
+            # P2 W7：q 两段守卫（TUI ephemeral 交互态——绝不入
+            # RunState/ControlBoundary/EventIndex/UsageLog/引擎真相）
+            self._cockpit_compose_q_armed = False
             self.compose_text = ""
             # UX2-R1 Collaboration Log（D 裁决：有损派生缓存）——
             # R1 骨架恰两源：echo（用户提交原文）+ 回执（控制面
@@ -1110,28 +1113,49 @@ def _build_classes() -> None:
         # ------------------------------------ CU-COCKPIT-1 COMPOSE 选择屏
 
         def _compose_enter_screen(self) -> None:
-            """c 进入 COMPOSE：listing 快照 + 状态重置 + 换屏（task 草稿
-            原样保留在常驻 composer——esc 返回即继续编辑）。"""
+            """c 进入 COMPOSE（P2 W6 重入语义）：listing 重取快照 +
+            selection 过滤失效 runtime（诚实披露，零静默修复）+
+            光标 clamp + 披露失效。selection/role override/已知角色
+            呈现跨 esc 保留；task 草稿原样在常驻 composer。"""
             if self._cockpit_user_surface is None:
                 return
+            entries = tuple(self._cockpit_user_surface.listing())
+            live = {entry.runtime_id for entry in entries}
+            removed = tuple(runtime_id
+                            for runtime_id
+                            in self._cockpit_compose_selected
+                            if runtime_id not in live)
+            if removed:
+                self._cockpit_compose_selected = [
+                    runtime_id for runtime_id
+                    in self._cockpit_compose_selected
+                    if runtime_id in live]
+                for runtime_id in removed:
+                    self._cockpit_compose_roles.pop(runtime_id, None)
+                    self._cockpit_compose_known.pop(runtime_id, None)
+                self._cockpit_compose_pcursor = min(
+                    self._cockpit_compose_pcursor,
+                    max(0, len(self._cockpit_compose_selected) - 1))
             self._cockpit_compose_active = True
-            self._cockpit_compose_entries = (
-                self._cockpit_user_surface.listing())
-            self._cockpit_compose_cursor = 0
-            self._cockpit_compose_selected = []
-            self._cockpit_compose_roles = {}
-            self._cockpit_compose_known = {}
-            self._cockpit_compose_pcursor = 0
+            self._cockpit_compose_entries = entries
+            self._cockpit_compose_cursor = min(
+                self._cockpit_compose_cursor, max(0, len(entries) - 1))
             self._compose_invalidate_preview()
-            self._cockpit_compose_message = ()
+            self._cockpit_compose_message = (
+                (ui_label("removed from selection: {ids}",
+                          self._cockpit_locale).format(
+                    ids=", ".join(removed)),)
+                if removed else ())
             self.query_one("#funnel-screen").display = False
             self.query_one("#compose-screen").display = True
             self._compose_refresh()
 
         def _compose_exit_screen(self) -> None:
-            """esc 返回漏斗（草稿/选择阶段零产出——选择态随之丢弃，
-            task 草稿保留在 composer）。"""
+            """esc 返回漏斗（P2 W6）：selection/override/已知角色呈现
+            保留，披露失效（再入先重 preview）；q 守卫随换屏解除。"""
+            self._cockpit_compose_q_armed = False
             self._cockpit_compose_active = False
+            self._compose_invalidate_preview()
             self.query_one("#compose-screen").display = False
             self.query_one("#funnel-screen").display = True
             self._funnel_refresh()
@@ -1168,6 +1192,9 @@ def _build_classes() -> None:
                 preview_composition=self._cockpit_compose_expected,
                 message_lines=tuple(self._cockpit_compose_message),
                 width=self.size.width or 100,
+                # P2 W8：TUI 供应可用高度（纯呈现参数；projection 只做
+                # 纯算术窗口化，零新滚动子系统）
+                height=self.size.height or None,
                 ascii_only=self._cockpit_ascii,
                 locale=self._cockpit_locale)
             self.compose_text = "\n".join(lines)
@@ -1176,8 +1203,26 @@ def _build_classes() -> None:
 
         def _compose_dispatch(self, key: str) -> None:
             """COMPOSE 键语义（唯一入口；呈现态快照，零 dispatch 零
-            事实写回）。"""
+            事实写回）。P2 W7：q 有可失状态（selection 或 task 草稿）
+            时两段守卫——首 q 只武装 + 横幅，任意其它键/esc/换屏
+            解除；仅 armed 态 q 走既有 self.exit()。"""
+            if self._cockpit_compose_q_armed and key != "q":
+                # disarm + 撤守卫横幅（armed 期间仅本路由可改横幅）
+                self._cockpit_compose_q_armed = False
+                if self._cockpit_compose_message == (
+                        ui_label("q again to quit · esc back",
+                                 self._cockpit_locale),):
+                    self._cockpit_compose_message = ()
             if key == "q":
+                losable = (self._cockpit_compose_selected
+                           or self._composer_text().strip())
+                if losable and not self._cockpit_compose_q_armed:
+                    self._cockpit_compose_q_armed = True
+                    self._cockpit_compose_message = (
+                        ui_label("q again to quit · esc back",
+                                 self._cockpit_locale),)
+                    self._compose_refresh()
+                    return
                 self.exit()
                 return
             if key == "escape":
@@ -1336,7 +1381,8 @@ def _build_classes() -> None:
 
         def _compose_start_success(self, composed) -> None:
             """COMPOSE 启动成功 → 同一换屏路径（_funnel_start_success
-            复用——零第二 RUNNING 实现）。"""
+            复用——零第二 RUNNING 实现）；q 守卫随换屏解除。"""
+            self._cockpit_compose_q_armed = False
             self._cockpit_compose_active = False
             self.query_one("#compose-screen").display = False
             self._funnel_start_success(composed)
