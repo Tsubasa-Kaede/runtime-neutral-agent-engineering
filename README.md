@@ -139,6 +139,24 @@ keeps its exact semantics and never merges with the funnel: piped or
 redirected output, `--json`, or a missing Textual install all keep the
 pre-2.6.0 behavior and byte-identical errors.
 
+**Live Collaboration Cockpit (2.7.0)** — the TUI cockpit is now a live
+control surface for a running collaboration: a horizontal pipeline renders
+every agent slot with true connection semantics (`──→` observed HANDOFF vs
+`┄┄→` planned adjacency), arrow keys select, Enter expands one agent's
+bounded detail window, and `L` switches the whole display between English
+and Chinese. While the run is live you can steer it directly: typing any
+text opens the persistent steering composer (no prefix key), `tab` toggles
+the revision target (next invocation vs submission prompt), Enter submits
+the revision through the same control plane (`p` pause / `r` resume /
+`a` abort / `t` trace / `q` quit), and the composer stays open for
+back-to-back revisions — every submission answers with an honest receipt
+(accepted ≠ applied: applied facts land in the trace view, never claimed
+on the main screen). `t` opens the read-only observation trace: the
+control journal, revision queue, and per-invocation events of the whole
+run. Rendering performance kept pace with the richer surface — projection
+is change-detected and zone-scoped, and typing touches only the dock line
+(zero full projections per keypress).
+
 ## Why not CrewAI / AutoGen / LangGraph?
 
 They are strong tools for building LLM-chaining applications. This project
