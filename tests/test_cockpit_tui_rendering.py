@@ -3882,5 +3882,223 @@ class UX2R2FunnelSlashFrozenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(start.calls[0][0], "/pause")
 
 
+class UX2R3AcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    """UX2-R3 Layer 1 自动化验收（DESIGN §5；授权裁决 1：CJK commit
+    不得触发完整 projection/额外 dispatch/额外事实——局部 zone 更新
+    允许；paste/resize/连续/终态/help 一致性为当前实现的真实记录）。"""
+
+    async def _type(self, pilot, text):
+        for character in text:
+            await pilot.press(character)
+
+    async def test_cjk_commit_no_projection_no_dispatch(self):
+        # R3-1：IME commit 到达形态=一次性整段 CJK 入缓冲（非逐键）
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        counter = []
+        original = cockpit_tui.build_projection
+
+        def counting(values):
+            counter.append(len(counter))
+            return original(values)
+
+        with mock.patch.object(cockpit_tui.CockpitApp, "set_interval",
+                               lambda self, *args, **kwargs: None):
+            async with app.run_test(size=(100, 30)) as pilot:
+                with mock.patch.object(cockpit_tui, "build_projection",
+                                       counting):
+                    await pilot.pause()
+                    app._refresh()
+                    settled = len(counter)
+                    composer = app.query_one("#composer")
+                    composer.text = "修复接口并补充测试用例"   # commit
+                    await pilot.pause()
+                    # 完整 projection 零触发；dispatch 零外发
+                    self.assertEqual(len(counter), settled)
+                    self.assertEqual(recorded, [])
+                    self.assertEqual(app._composer_text(),
+                                     "修复接口并补充测试用例")
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    # CJK 载荷原文完整（不转义/不截断）
+                    self.assertEqual(
+                        recorded,
+                        [("REVISE", "修复接口并补充测试用例",
+                          "NEXT_INVOCATION")])
+        gate.release.set()
+
+    async def test_multiline_paste_bounds_and_single_payload(self):
+        # R3-2：粘贴到达形态=多行 text 一次性入缓冲；高度 clamp 有界、
+        # 一次 Enter=单条载荷（换行保留）
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver, control=make_control(recorded))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one("#composer").text = "line1\nline2\nline3"
+            await pilot.pause()
+            self.assertLessEqual(
+                app._dock_reserved_rows(),
+                cockpit_tui._COMPOSER_MAX_ROWS + 2)
+            composer = app.query_one("#composer")
+            self.assertLessEqual(composer.region.height,
+                                 cockpit_tui._COMPOSER_MAX_ROWS)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                recorded,
+                [("REVISE", "line1\nline2\nline3",
+                  "NEXT_INVOCATION")])
+            self.assertEqual(app._composer_text(), "")
+            gate.release.set()
+
+    async def test_continuous_steer_fifo_with_real_journal(self):
+        # R3-3：三连 STEER + 真 ControlJournal——FIFO 序=提交序、恰 3
+        # 条 REVISE_REQUESTED、command_id 单调、Log=echo×3+回执×3
+        from control_boundary import (
+            ControlBoundary, ControlCommand, ControlCommandType,
+            RevisionPayload, RevisionTarget)
+        from control_journal import ControlJournal
+
+        gate = _Gate()
+        journal = ControlJournal()
+        boundary = ControlBoundary(journal, "exec-r3a")
+        counter = [0]
+
+        def control(kind, text=None, target=None):
+            counter[0] += 1
+            payload = None
+            expected = None
+            if kind == "REVISE":
+                payload = RevisionPayload(
+                    target=RevisionTarget.NEXT_INVOCATION, text=text)
+                expected = boundary.execution_version
+            return boundary.submit(ControlCommand(
+                command_id=f"ui-{counter[0]}", execution_id="exec-r3a",
+                command=ControlCommandType(kind), payload=payload,
+                expected_version=expected))
+
+        app = make_app(driver=gate.driver,
+                       events=lambda: (), facts=journal.snapshot,
+                       control=control)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            base_facts = len(journal.snapshot())
+            for word in ("xray", "yak", "zebra"):
+                await self._type(pilot, word)
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(app._composer_text(), "")
+            facts = journal.snapshot()
+            self.assertEqual(len(facts), base_facts + 3)
+            tail = facts[-3:]
+            kinds = [getattr(entry.fact_type, "value", entry.fact_type)
+                     for entry in tail]
+            self.assertEqual(kinds,
+                             ["REVISE_REQUESTED"] * 3)
+            ids = [entry.command_id for entry in tail]
+            self.assertEqual(ids, ["ui-1", "ui-2", "ui-3"])  # FIFO
+            log_lines = app.log_text.splitlines()
+            self.assertEqual(len(log_lines), 6)   # echo×3 + 回执×3
+            for i, word in enumerate(("xray", "yak", "zebra")):
+                self.assertIn(word, log_lines[i * 2])
+            # queue count 呈现：Trace CTRL 事实面 pending 3
+            from cockpit_projection import revision_status_lines
+            status_lines = revision_status_lines(facts, 3)
+            self.assertTrue(any("pending 3" in line
+                                for line in status_lines))
+        gate.release.set()
+
+    async def test_terminal_submit_preserves_prior_run_truth(self):
+        # R3-4：终态提交=诚实拒绝（session 门语义经注入面投影）——
+        # 真 journal 既有事实逐条不变、零新增；Log 只增 echo+回执两行
+        from control_journal import ControlJournal
+
+        gate = _Gate()
+        journal = ControlJournal()
+        session = _LiveSession()
+        session.terminal = RunStatus.COMPLETED
+        session.last_outcome = _outcome(RunStatus.COMPLETED)
+        recorded = []
+
+        def control(kind, text=None, target=None):
+            # 入口闭包 session 终态门的诚实投影：拒、零落账
+            recorded.append((kind, text, target))
+            return receipt_result("REJECTED",
+                                  reason="ALREADY_TERMINAL")
+
+        app = make_app(driver=gate.driver, session=session,
+                       events=lambda: (), facts=journal.snapshot,
+                       control=control)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            before = journal.snapshot()
+            log_before = len(app.log_text.splitlines())
+            await self._type(pilot, "done")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(recorded, [("REVISE", "done",
+                                         "NEXT_INVOCATION")])  # 恰一次
+            after = journal.snapshot()
+            self.assertEqual(after, before)     # 零新增、零改写
+            log_lines = app.log_text.splitlines()
+            self.assertEqual(len(log_lines), log_before + 2)
+            self.assertIn("ALREADY_TERMINAL", log_lines[-1])
+        gate.release.set()
+
+    async def test_resize_cycle_single_projection_per_refresh(self):
+        # R3-5：resize 无自有处理通道（布局归 Textual、内容归 tick 单
+        # 通道——on_resize 不存在）；宽度变化后的每次投影恰一次
+        gate = _Gate()
+        app = make_app(driver=gate.driver, control=make_control([]))
+        counter = []
+        original = cockpit_tui.build_projection
+
+        def counting(values):
+            counter.append(len(counter))
+            return original(values)
+
+        self.assertFalse(hasattr(cockpit_tui.CockpitApp, "on_resize"))
+        with mock.patch.object(cockpit_tui.CockpitApp, "set_interval",
+                               lambda self, *args, **kwargs: None):
+            async with app.run_test(size=(100, 30)) as pilot:
+                with mock.patch.object(cockpit_tui, "build_projection",
+                                       counting):
+                    await pilot.pause()
+                    app._refresh()
+                    settled = len(counter)
+                    for width, height in ((40, 30), (160, 40),
+                                          (40, 30), (160, 40),
+                                          (100, 30)):
+                        with mock.patch.object(
+                                type(app), "size",
+                                new_callable=mock.PropertyMock) as size:
+                            size.return_value = SimpleNamespace(
+                                width=width, height=height)
+                            app._refresh()
+                    self.assertEqual(len(counter), settled + 5)
+        gate.release.set()
+
+    async def test_help_lines_match_registry_and_shared_words(self):
+        # R3-6：/help 九行 ↔ 注册表封闭集一致；unknown 反馈词与 hint
+        # 行同源（单一词表真源）；行为面路由由 R2 23P 见证
+        lines = cockpit_tui.slash_help_lines()
+        self.assertEqual(len(lines),
+                         len(cockpit_tui.SLASH_REGISTRY))
+        for line in lines:
+            name = line[1:].split(" — ")[0]
+            self.assertIn(name, cockpit_tui.SLASH_REGISTRY)
+        from cockpit_projection import ui_label
+        for locale in ("en", "zh"):
+            unknown = ui_label(
+                "unknown command · /help lists commands", locale)
+            self.assertTrue(unknown.strip())
+            self.assertIn("/help", unknown)
+        self.assertEqual(
+            ui_label("unknown command · /help lists commands", "zz"),
+            "unknown command · /help lists commands")   # 未知 locale 回退
+
+
 if __name__ == "__main__":
     unittest.main()
