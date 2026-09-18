@@ -727,7 +727,8 @@ class ExitCodeTests(unittest.TestCase):
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
     "candidate_validation", "cockpit_projection", "cockpit_session",
-    "cockpit_tui", "content_safety", "control_boundary",
+    "cockpit_tui", "composition_core", "content_safety",
+    "control_boundary",
     "control_journal", "execution_observation", "execution_slots",
     "external_runtime", "host_entry", "sequential_pipeline",
     "usage_log",
