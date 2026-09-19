@@ -797,9 +797,76 @@ class ComposedRun(NamedTuple):
     groups: tuple = ()
 
 
+def _task_id_mint():
+    """2.8-A 会话级 task_id 铸造器（entry 组装层私有）。
+
+    _opaque_task_id 对同文本任务确定性相同——同会话内重跑同任务
+    （轮间再提交/改写再跑）若复用同 task_id，EventIndex 按 task_id
+    分组会把两次执行并入一组，且两执行各自 0 起的 execution-scoped
+    sequence 会撞号。铸造器在会话作用域内保唯一：首次调用 = 原值
+    （单轮路径与既有行为逐字节一致），冲突时计数式追加 -2/-3/…
+    序标。execution_id 由 task_id 派生（既有 f-string），随之天然
+    唯一。碰撞消解为有界 for（鸽笼保证 len(taken)+1 次内命中，
+    绝不空转）——与 ArchitectureGuard 源级「零 while」钉定相容
+    （entry 层永不出现第二编排循环）。"""
+    counts = {}
+    taken = set()
+
+    def mint(task):
+        base = _host_entry()._opaque_task_id(task)
+        index = counts.get(base, 0) + 1
+        candidate = base if index == 1 else f"{base}-{index}"
+        # 防御：后缀形态与他任务真基名撞车时逐级让位（结构性极少
+        # 发生；index 单调递增保证有界探测内必命中）
+        for _ in range(len(taken) + 1):
+            if candidate not in taken:
+                break
+            index += 1
+            candidate = f"{base}-{index}"
+        counts[base] = index
+        taken.add(candidate)
+        return candidate
+
+    return mint
+
+
+def _emit_run_terminal(composed, status_value):
+    """单 run TERMINAL 观察发射（2.8-A 抽出的既有发射面）。
+
+    与 2.7.0 post-App 发射逐字节同形（stage=SEQUENTIAL、
+    runtime_id=None、status=reason=status 词）；零新词汇——仅复用
+    既有 ExecutionEventType.TERMINAL 通道。status 缺席 = 零发射
+    （绝不伪造终态词）。"""
+    if composed.emit is not None and status_value is not None:
+        composed.emit(ExecutionEventType.TERMINAL,
+                      stage="SEQUENTIAL", runtime_id=None,
+                      status=status_value, reason=status_value)
+
+
+def _flush_prior_run_terminals(composed_runs, emitted):
+    """2.8-A 轮次推进时的前轮 TERMINAL 补发（调用点恰在新 run
+    append 之前——此时列表仅含已完成前轮）。
+
+    发射时机裁决：run N 的 TERMINAL 在「run N+1 装配成功时」或
+    「App 退出时」二者较早者补发——单轮路径永不经过本函数（无
+    run 2），post-App 发射与 2.7.0 逐字节一致；多轮路径在下一轮
+    启动前补齐上一轮观察（EventIndex 每 run 完整）。status 取该
+    run session 的 last_outcome 投影（真实 RunOutcome，零合成）；
+    emitted 集合防重（幂等）。"""
+    for composed in composed_runs:
+        if composed.execution_id in emitted:
+            continue
+        outcome = getattr(composed.session, "last_outcome", None)
+        status = getattr(outcome, "status", None)
+        value = getattr(status, "value", status)
+        _emit_run_terminal(composed, value)
+        if value is not None:
+            emitted.add(composed.execution_id)
+
+
 def _assemble_execution(resolved, task, steps, timeout_seconds, *,
                         observation_sink=None, event_index=None,
-                        boundary_hook=None):
+                        boundary_hook=None, task_id=None):
     """组合段装配（legacy 与漏斗的共同唯一装配真相）。
 
     输入为已 VERIFIED 解析的 runtimes + 任务文本 + 角色计划；产出
@@ -807,7 +874,8 @@ def _assemble_execution(resolved, task, steps, timeout_seconds, *,
     读 argv、不产生 CLI 输出——错误呈现归调用方（_fail 或
     CompositionError）。"""
     host = _host_entry()
-    task_id = host._opaque_task_id(task)
+    task_id = (task_id if task_id is not None
+               else host._opaque_task_id(task))
     execution_id = f"cockpit-{task_id}"
     journal = ControlJournal()
     usage_log = UsageLog()
@@ -932,7 +1000,8 @@ class _FunnelSurfaces(NamedTuple):
 def _funnel_composition_closures(registry, skipped, evidence, *,
                                  timeout_seconds, boundary_hook=None,
                                  observation_sink=None,
-                                 event_index=None):
+                                 event_index=None, task_id_mint=None,
+                                 terminal_emitted=None):
     """CU-TUI-5 组合面（READ/DISPATCH 注入范式，C1 先例同构）。
 
     preview = 只读默认组合预览（零引擎对象、零副作用、零事件）；
@@ -940,7 +1009,13 @@ def _funnel_composition_closures(registry, skipped, evidence, *,
     组合四字段全等比较 → 相等才经 _assemble_execution 装配；任何
     变化如实返回 CompositionChanged（零装配、零回退、零
     reroute、零二次尝试），调用方刷新披露后再次 Enter 才可启动。
-    composed_runs 记录成功启动（至多一次：RUNNING 后不再调用）。"""
+    composed_runs 记录成功启动（2.8-A 起会话内可多次——每 run 一次）。
+    2.8-A 会话注入件：task_id_mint（会话级唯一 task_id）与
+    terminal_emitted（前轮 TERMINAL 补发防重集）由调用方共享供给
+    两面；缺席时本面局部默认（单 run 语义与既有逐字节一致）。"""
+
+    if terminal_emitted is None:
+        terminal_emitted = set()
 
     def composition_preview():
         return resolve_default_composition(
@@ -975,7 +1050,10 @@ def _funnel_composition_closures(registry, skipped, evidence, *,
         composed = _assemble_execution(
             resolved_or_error, task_text, steps, timeout_seconds,
             observation_sink=observation_sink, event_index=event_index,
-            boundary_hook=boundary_hook)
+            boundary_hook=boundary_hook,
+            task_id=(task_id_mint(task_text)
+                     if task_id_mint is not None else None))
+        _flush_prior_run_terminals(composed_runs, terminal_emitted)
         composed_runs.append(composed)
         return composed
 
@@ -1000,9 +1078,11 @@ class UserCompositionSurface(NamedTuple):
 
 def _user_composition_surface(registry, skipped, evidence, *,
                               timeout_seconds, boundary_hook=None,
-                              observation_sink=None, event_index=None):
+                              observation_sink=None, event_index=None,
+                              task_id_mint=None, terminal_emitted=None):
     """M3 用户组合入口工厂（READ/DISPATCH 注入范式，
-    _funnel_composition_closures 同型）。
+    _funnel_composition_closures 同型；2.8-A 会话注入件同彼——
+    task_id_mint/terminal_emitted 由调用方跨面共享供给）。
 
     start = 唯一启动出口，七步与 default start_composition 同律、
     同一装配真相：INVALID_TASK → 活读池 → core resolve（结构+池门，
@@ -1011,6 +1091,8 @@ def _user_composition_surface(registry, skipped, evidence, *,
     execution → groups 透传。组合差异仅在 intent 来源（用户点名 vs
     默认模板）；intent 全程零改写（无回退/替换/重绑）。"""
 
+    if terminal_emitted is None:
+        terminal_emitted = set()
     composed_runs = []
 
     def verified_listing():
@@ -1120,11 +1202,17 @@ def _user_composition_surface(registry, skipped, evidence, *,
             return CompositionError(
                 reason, detail,
                 _host_entry()._HINT_QUALIFY if hint else None)
-        # STEP 6 唯一装配真相（零新增 slot/plan/session/pipeline）
+        # STEP 6 唯一装配真相（零新增 slot/plan/session/pipeline；
+        # 2.8-A 会话内 task_id 经注入铸造器保唯一）
         composed = _assemble_execution(
             resolved_or_error, task_text, live.steps, timeout_seconds,
             observation_sink=observation_sink, event_index=event_index,
-            boundary_hook=boundary_hook)
+            boundary_hook=boundary_hook,
+            task_id=(task_id_mint(task_text)
+                     if task_id_mint is not None else None))
+        # STEP 6b 2.8-A 前轮 TERMINAL 补发（恰在 append 前——列表
+        # 此刻仅含已完成前轮；单 run 路径列表空 = 零行为差）
+        _flush_prior_run_terminals(composed_runs, terminal_emitted)
         # STEP 7 groups = run-local 呈现元数据（装配零感知，NamedTuple
         # 官方 _replace 注入；不经 ExecutionSlot/CockpitSession/
         # RunState/pipeline）
@@ -1164,16 +1252,24 @@ def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
         intent.timeout_seconds if intent.timeout_seconds is not None
         else (timeout_seconds if timeout_seconds is not None
               else host.DEFAULT_TIMEOUT_SECONDS))
+    # 2.8-A 会话级共享件：task_id 铸造器与前轮 TERMINAL 防重集
+    # 跨两面（漏斗/default 面与 user COMPOSE 面）共享——同一会话
+    # 内无论从哪面启动 run，task_id 唯一性与 TERMINAL 补发防重
+    # 全程一致。
+    task_id_mint = _task_id_mint()
+    terminal_emitted = set()
     surfaces = _funnel_composition_closures(
         registry, skipped, evidence, timeout_seconds=effective_timeout,
         boundary_hook=boundary_hook, observation_sink=observation_sink,
-        event_index=event_index)
+        event_index=event_index, task_id_mint=task_id_mint,
+        terminal_emitted=terminal_emitted)
     # CU-COCKPIT-1：user 面（listing/preview/start）与漏斗面共享同一
     # registry/evidence/timeout 现场件——单一池真源、同一装配真相。
     user_surface = _user_composition_surface(
         registry, skipped, evidence, timeout_seconds=effective_timeout,
         boundary_hook=boundary_hook, observation_sink=observation_sink,
-        event_index=event_index)
+        event_index=event_index, task_id_mint=task_id_mint,
+        terminal_emitted=terminal_emitted)
     outcome = tui.run_cockpit_funnel(
         composition_preview=surfaces.preview,
         start_composition=surfaces.start,
@@ -1183,11 +1279,12 @@ def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
     if outcome is None:
         return 0
     composed = surfaces.composed_runs[-1]
-    if composed.emit is not None:
-        composed.emit(ExecutionEventType.TERMINAL,
-                      stage="SEQUENTIAL", runtime_id=None,
-                      status=outcome.status.value,
-                      reason=outcome.status.value)
+    if composed.execution_id not in terminal_emitted:
+        # 末轮 TERMINAL 兜底发射（既有 2.7.0 位置；防重集跳过已在前
+        # 轮补发中发射过的 run——含 PARKED-at-quit 边沿原样保持：
+        # 以 App 外壳 outcome（真实 RunOutcome 投影）为准）
+        _emit_run_terminal(composed, outcome.status.value)
+        terminal_emitted.add(composed.execution_id)
     for line in _human_lines(composed.task, composed.steps, outcome):
         print(line)
     return _EXIT_CODE_BY_STATUS[outcome.status]

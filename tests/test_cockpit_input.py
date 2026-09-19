@@ -76,13 +76,15 @@ class ClassifySubmitTests(unittest.TestCase):
 
 
 class SlashRegistryTests(unittest.TestCase):
-    """封闭注册表恰九条；kind 四值；数据纯度（无 callable）。"""
+    """封闭注册表恰十三条（2.8-A 会话四命令并入）；kind 四值；
+    数据纯度（无 callable）；九既有命令语义零变。"""
 
-    def test_registry_is_closed_set_of_nine(self):
+    def test_registry_is_closed_set_of_thirteen(self):
         self.assertEqual(
             set(cockpit_input.SLASH_REGISTRY),
             {"pause", "resume", "abort", "trace", "help",
-             "lang", "context", "clear", "target"})
+             "lang", "context", "clear", "target",
+             "again", "compose", "new", "runs"})
 
     def test_kinds_are_closed_set(self):
         kinds = {spec["kind"] for spec in
@@ -135,7 +137,7 @@ class SlashCandidatesTests(unittest.TestCase):
 
     def test_empty_prefix_is_full_set(self):
         self.assertEqual(
-            len(cockpit_input.slash_candidates("")), 9)
+            len(cockpit_input.slash_candidates("")), 13)
 
     def test_no_match_is_empty_tuple(self):
         self.assertEqual(cockpit_input.slash_candidates("zz"), ())
@@ -147,9 +149,9 @@ class SlashCandidatesTests(unittest.TestCase):
 
 class SlashHelpTests(unittest.TestCase):
 
-    def test_help_lines_cover_all_nine(self):
+    def test_help_lines_cover_all_thirteen(self):
         lines = cockpit_input.slash_help_lines()
-        self.assertEqual(len(lines), 9)
+        self.assertEqual(len(lines), 13)
         for name in cockpit_input.SLASH_REGISTRY:
             self.assertTrue(
                 any(line.startswith(f"/{name} — ") for line in lines),
@@ -183,17 +185,89 @@ class IntentBoundaryGuardTests(unittest.TestCase):
                                  f"cockpit_input must not import {name!r}")
 
     def test_module_namespace_holds_only_vocabulary(self):
-        # 只暴露意图词 + 注册表 + 纯函数；无类、无状态、无副作用。
+        # 只暴露意图词 + 相位词 + 注册表 + 纯函数；无类、无状态、
+        # 无副作用。（2.8-A：相位三值入表——仍是纯词汇，非状态机。）
         exported = set(cockpit_input.__all__)
         self.assertEqual(
             exported,
             {"INTENT_TASK", "INTENT_STEER", "INTENT_REVISION",
-             "INTENT_COMMAND", "SLASH_REGISTRY", "classify_submit",
+             "INTENT_COMMAND", "PHASE_PRE_START", "PHASE_RUNNING",
+             "PHASE_BETWEEN_RUNS", "SLASH_REGISTRY", "classify_submit",
              "parse_slash", "slash_candidates", "slash_help_lines"})
         self.assertTrue(callable(cockpit_input.classify_submit))
         self.assertTrue(callable(cockpit_input.parse_slash))
         self.assertTrue(callable(cockpit_input.slash_candidates))
         self.assertTrue(callable(cockpit_input.slash_help_lines))
+
+
+class PhaseClassifyTests(unittest.TestCase):
+    """2.8-A 相位推广矩阵：phase 三值 × 前缀 × recall 的封闭全集。
+
+    兼容律：phase 缺省时由 funnel_pre_start 布尔派生（旧调用路径
+    逐字节同径）；显式 phase 覆盖布尔。BETWEEN_RUNS：斜杠=COMMAND、
+    其余文本（含召回改写）=TASK——下一轮经漏斗再入装配全新 run。"""
+
+    def test_phase_set_is_locked_three(self):
+        self.assertEqual(
+            {cockpit_input.PHASE_PRE_START, cockpit_input.PHASE_RUNNING,
+             cockpit_input.PHASE_BETWEEN_RUNS},
+            {"PRE_START", "RUNNING", "BETWEEN_RUNS"})
+
+    def test_default_phase_derives_from_boolean(self):
+        # 缺省派生：True→PRE_START、False→RUNNING（旧签名同径）。
+        for boolean, expected in ((True, cockpit_input.INTENT_TASK),
+                                  (False, cockpit_input.INTENT_STEER)):
+            self.assertEqual(
+                cockpit_input.classify_submit(
+                    funnel_pre_start=boolean, text="write tests"),
+                expected)
+
+    def test_between_runs_slash_is_command(self):
+        for text in ("/pause", "/help", "/again", "/"):
+            self.assertEqual(
+                cockpit_input.classify_submit(
+                    funnel_pre_start=False, text=text,
+                    phase=cockpit_input.PHASE_BETWEEN_RUNS),
+                cockpit_input.INTENT_COMMAND, text)
+
+    def test_between_runs_text_is_next_task(self):
+        # 轮间普通文本 = 下一轮 TASK（经漏斗再入装配新 run）。
+        self.assertEqual(
+            cockpit_input.classify_submit(
+                funnel_pre_start=False, text="refine the output",
+                phase=cockpit_input.PHASE_BETWEEN_RUNS),
+            cockpit_input.INTENT_TASK)
+
+    def test_between_runs_recall_is_task_not_revision(self):
+        # 召回改写后仍提交新任务（轮间无 REVISE 通道——死 run 边界
+        # 保持拒绝，延续=新 run）。
+        self.assertEqual(
+            cockpit_input.classify_submit(
+                funnel_pre_start=False, text="rewrite of prior task",
+                revision_recall=True,
+                phase=cockpit_input.PHASE_BETWEEN_RUNS),
+            cockpit_input.INTENT_TASK)
+
+    def test_explicit_running_phase_matches_legacy(self):
+        # 显式 RUNNING 与缺省派生逐字节同径（斜杠/召回/普通三支）。
+        for text, recall, expected in (
+                ("/pause", False, cockpit_input.INTENT_COMMAND),
+                ("fix api", True, cockpit_input.INTENT_REVISION),
+                ("fix api", False, cockpit_input.INTENT_STEER)):
+            self.assertEqual(
+                cockpit_input.classify_submit(
+                    funnel_pre_start=False, text=text,
+                    revision_recall=recall,
+                    phase=cockpit_input.PHASE_RUNNING),
+                expected)
+
+    def test_pre_start_slash_stays_task_under_explicit_phase(self):
+        # 首跑漏斗斜杠=任务文本冻结律在显式相位下同样成立。
+        self.assertEqual(
+            cockpit_input.classify_submit(
+                funnel_pre_start=False, text="/pause",
+                phase=cockpit_input.PHASE_PRE_START),
+            cockpit_input.INTENT_TASK)
 
 
 if __name__ == "__main__":

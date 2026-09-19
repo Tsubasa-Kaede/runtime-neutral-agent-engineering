@@ -3614,7 +3614,7 @@ class UX2R2SlashPilotTests(unittest.IsolatedAsyncioTestCase):
                                 show_context_before)
             gate.release.set()
 
-    async def test_slash_help_lists_all_nine_en_frozen(self):
+    async def test_slash_help_lists_all_thirteen_en_frozen(self):
         gate = _Gate()
         app = make_app(driver=gate.driver, control=make_control([]))
         async with app.run_test(size=(100, 30)) as pilot:
@@ -3623,9 +3623,10 @@ class UX2R2SlashPilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause()
             lines = app.log_text.splitlines()
-            self.assertEqual(len(lines), 9)          # 恰九行、零 echo
+            self.assertEqual(len(lines), 13)         # 恰十三行、零 echo
             for name in ("pause", "resume", "abort", "trace", "help",
-                         "lang", "context", "clear", "target"):
+                         "lang", "context", "clear", "target",
+                         "again", "compose", "new", "runs"):
                 self.assertTrue(
                     any(line.startswith(f"/{name} — ") for line in lines),
                     name)

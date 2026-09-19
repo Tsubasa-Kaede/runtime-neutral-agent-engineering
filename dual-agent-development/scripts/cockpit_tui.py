@@ -46,6 +46,7 @@ import threading
 from cockpit_input import (
     INTENT_COMMAND,
     INTENT_REVISION,
+    PHASE_BETWEEN_RUNS,
     SLASH_REGISTRY,
     classify_submit,
     parse_slash,
@@ -71,6 +72,8 @@ from cockpit_projection import (
     funnel_keys_hint,
     funnel_prefill_text,
     revision_status_lines,
+    run_divider_line,
+    runs_summary_lines,
     trace_control_lines,
     trace_observation_lines,
     trace_status_line,
@@ -219,6 +222,17 @@ def _build_classes() -> None:
             key = getattr(event, "key", "")
             app = self.app
             if app._funnel_pre_start():
+                if app._cockpit_mode == MODE_CONFIRM:
+                    # 2.8-A 轮间域 slash（如 /abort）的确认条消费——
+                    # y/n/escape 归确认条，其余归 composer（首跑漏斗
+                    # 无 slash 面此分支结构性不可达 = 零首跑行为差）
+                    if key in ("y", "n", "escape"):
+                        event.prevent_default()
+                        event.stop()
+                        app._confirm_key(key)
+                        return
+                    await super()._on_key(event)
+                    return
                 if app._cockpit_compose_active:
                     await self._compose_key(event, key)
                     return
@@ -305,6 +319,15 @@ def _build_classes() -> None:
                 event.stop()
                 app.exit()
                 return
+            if (key == "e" and not self.text
+                    and app._cockpit_last_task):
+                # 2.8-A 轮间 E 召回：上一轮任务文本镜像入 composer
+                # 供改写（首跑 last_task 空 = e 仍为文字本体，漏斗
+                # F-R1 键律逐字不变）
+                event.prevent_default()
+                event.stop()
+                app._between_runs_recall()
+                return
             if key in ("ctrl+j", "shift+enter"):
                 event.prevent_default()
                 event.stop()
@@ -375,6 +398,7 @@ def _build_classes() -> None:
             # 移入 #composer widget（单一真相），此处只余 mode
             # （CONFIRM 确认条）与 target（session-sticky）。
             self._cockpit_mode = MODE_COMMAND
+            self._cockpit_confirm_action = None
             self._cockpit_revise_target = _TARGETS[0]
             self._cockpit_receipt = None
             self.outcome = None
@@ -432,6 +456,17 @@ def _build_classes() -> None:
             self._cockpit_stage = (
                 STAGE_COMPOSING if self._cockpit_funnel_prefill.strip()
                 else STAGE_NOT_STARTED)
+            # 2.8-A 会话呈现镜像（呈现层私有，绝不入投影输入/事实源）：
+            # runs = [(task, steps, status|None), ...]（Conversation-
+            # Record 呈现原料；status None = 在飞诚实缺席）；last_task
+            # = 轮间 E 召回源（任务文本 UI 镜像）；interval = RUNNING
+            # 刷新计时器句柄（轮间收止、再 RUNNING 重建——单活跃律）；
+            # reentry_pending = 轮间换屏延迟旗标（渲染尾执行，见
+            # _refresh 尾注）。
+            self._cockpit_runs = []
+            self._cockpit_last_task = ""
+            self._cockpit_interval = None
+            self._cockpit_funnel_reentry_pending = False
             # CU-COCKPIT-1：COMPOSE 选择屏（pre-run funnel 阶段——绝不
             # 触碰 C2 RUNNING 三态/六键契约）。user 面注入闭包 =
             # 组合真相唯一通道（listing/preview/start）；全部选择/
@@ -522,8 +557,13 @@ def _build_classes() -> None:
                 self.query_one(selector).display = True
             self._focus_composer()
             self._refresh()
-            # 数据驱动重投影：仅当事实源变化时内容才变化（零动画）
-            self.set_interval(0.5, self._refresh)
+            # 数据驱动重投影：仅当事实源变化时内容才变化（零动画）。
+            # 2.8-A 单活跃计时器律：句柄缺席才建（轮间已收止则此处
+            # 重建；RUNNING 期内恰一个 interval——run 2 绝不叠加
+            # 第二个 0.5s 计时器）。
+            if self._cockpit_interval is None:
+                self._cockpit_interval = self.set_interval(
+                    0.5, self._refresh)
             self._cockpit_thread = threading.Thread(
                 target=self._drive_loop, daemon=True)
             self._cockpit_thread.start()
@@ -650,6 +690,15 @@ def _build_classes() -> None:
                     composer = self.query("#composer")
                     if composer and composer[0].text:
                         composer[0].text = ""
+                    # 2.8-A 轮间再入（漏斗路径且已有 run 完结）：
+                    # 镜像收录终态 + composed 置空再武装漏斗键路由 +
+                    # 披露活取。PARKED 结构性不入此径（derive_
+                    # lifecycle 仅真实终态词可跃迁至此）。换屏延迟至
+                    # 渲染尾（本函数后段的 display 赋值会覆盖提前
+                    # 的隐藏——_funnel_reentry_swap 尾注）。
+                    if (self._cockpit_composition_preview is not None
+                            and self._cockpit_runs):
+                        self._between_runs_record(lifecycle)
                 self._cockpit_prev_lifecycle = lifecycle
             if advance_tick and self._cockpit_result_reveal_ticks > 0:
                 self._cockpit_result_reveal_ticks -= 1
@@ -715,6 +764,11 @@ def _build_classes() -> None:
                 panel.display = True
             else:
                 panel.display = False
+            # 2.8-A 轮间换屏（延迟至此：上面各 zone 的 display 赋值
+            # 已全部落地，隐藏不再被回卷）
+            if self._cockpit_funnel_reentry_pending:
+                self._cockpit_funnel_reentry_pending = False
+                self._funnel_reentry_swap()
 
         # ------------------------------------------------ 高度预算（A4）
 
@@ -979,6 +1033,18 @@ def _build_classes() -> None:
                 self._dispatch(spec["dispatch_kind"])
                 self._refresh()
             elif kind == "confirm":
+                # 2.8-A：确认动作随命令名携带——abort→既有 ABORT 外发
+                # （注入 dispatcher 唯一裁决）；new→会话呈现史清空（轮间域
+                # 限定，RUNNING 中诚实拒绝——绝不在执行中丢显示史）
+                if name == "new":
+                    if not self._funnel_pre_start():
+                        self._log_append(ui_label(
+                            "only between runs · /new resets the "
+                            "session display", self._cockpit_locale))
+                        return
+                    self._cockpit_confirm_action = "new"
+                else:
+                    self._cockpit_confirm_action = "abort"
                 self._cockpit_mode = MODE_CONFIRM
                 self._refresh()
             elif kind == "screen":
@@ -1014,6 +1080,55 @@ def _build_classes() -> None:
                     self._log_append(
                         f'{ui_label("→", self._cockpit_locale)} '
                         f'{self._cockpit_revise_target}')
+            elif name == "again":
+                # 2.8-A local：上一轮任务文本载入 composer（与轮间 E
+                # 召回同源同径）——重跑须再经 Enter 两段律（池门+
+                # 指纹在 start 闭包活读重估，绝不免检复活旧 run）
+                if (self._funnel_pre_start() and self._cockpit_runs
+                        and self._cockpit_last_task):
+                    composer = self.query("#composer")
+                    if composer:
+                        composer[0].text = self._cockpit_last_task
+                        composer[0].move_cursor(
+                            composer[0].document.end)
+                    self._funnel_after_edit()
+                else:
+                    self._log_append(ui_label(
+                        "only between runs · /again reloads the "
+                        "last task", self._cockpit_locale))
+            elif name == "compose":
+                # 2.8-A local：漏斗域进 COMPOSE 选择屏（c 键同径；
+                # RUNNING 域诚实拒绝——单工作者律，执行中绝不重选）
+                if (self._funnel_pre_start()
+                        and self._cockpit_user_surface is not None):
+                    self._compose_enter_screen()
+                else:
+                    self._log_append(ui_label(
+                        "only between runs · /compose opens "
+                        "selection", self._cockpit_locale))
+            elif name == "runs":
+                # 2.8-A local：会话 run 摘要（ConversationRecord 呈现
+                # 视图；任何相位可用——纯呈现镜像，零事实触碰）
+                for line in runs_summary_lines(
+                        self._cockpit_runs,
+                        width=self.size.width or 100,
+                        locale=self._cockpit_locale,
+                        ascii_only=self._cockpit_ascii):
+                    self._log_append(line)
+
+        def _new_session_clear(self) -> None:
+            """/new 兑现（y 确认后）：会话呈现史清空——runs 镜像、
+            轮间召回源、Log 显示缓存归零（分节计数随之重起）。
+            纯呈现遗忘：引擎三源（EventIndex/journal/usage）与
+            TraceScreen 全量事实不触碰（真相在引擎，显示史在 UI）。"""
+            self._cockpit_runs = []
+            self._cockpit_last_task = ""
+            self.query_one("#collab-log").clear()
+            self._cockpit_log_lines = []
+            self.log_text = ""
+            self._log_append(ui_label(
+                "session display cleared · run counter reset",
+                self._cockpit_locale))
 
         # ------------------------------------------------ 首跑漏斗（CU-TUI-5）
 
@@ -1064,8 +1179,22 @@ def _build_classes() -> None:
         def _funnel_enter(self) -> None:
             """Enter 判定（§十二顺序，F-R1 缓冲真源改 composer）：
             空白 no-op 提示 → 预览 BLOCKED 原因+hint → 就绪才经注入
-            闭包 Start（真相零进本层；判定逻辑零改动）。"""
+            闭包 Start（真相零进本层；判定逻辑零改动）。2.8-A：轮间
+            再入（runs 非空）时斜杠前缀先经 classify_submit（唯一
+            分类真源）路由 COMMAND——首跑漏斗斜杠=任务文本冻结律
+            由 runs 空守卫逐字保持。"""
             buffer = self._composer_text()
+            if (self._cockpit_runs
+                    and classify_submit(
+                        funnel_pre_start=False, text=buffer,
+                        phase=PHASE_BETWEEN_RUNS) == INTENT_COMMAND):
+                name, arg = parse_slash(buffer)
+                self._slash_execute(name, arg)
+                composer = self.query("#composer")
+                if composer:
+                    composer[0].text = ""
+                self._funnel_after_edit()
+                return
             feedback = funnel_enter_lines(self._cockpit_disclosure, buffer)
             if feedback:
                 self._cockpit_funnel_message = feedback
@@ -1105,10 +1234,85 @@ def _build_classes() -> None:
             self._cockpit_session = composed.session
             self._cockpit_control = composed.dispatch_control
             self._cockpit_revision_pending = composed.revision_pending
+            # 2.8-A run 镜像收录 + 轮间召回源 + 分节线（run N ≥ 2
+            # 启动时入 Log——呈现层纯数据连接线，事实面零触碰）
+            self._cockpit_last_task = composed.task
+            if self._cockpit_runs:
+                self._log_append(run_divider_line(
+                    len(self._cockpit_runs) + 1, composed.steps,
+                    width=self.size.width or 100,
+                    locale=self._cockpit_locale,
+                    ascii_only=self._cockpit_ascii))
+            self._cockpit_runs.append(
+                (composed.task, tuple(composed.steps), None))
             composer = self.query("#composer")
             if composer:
                 composer[0].text = ""
             self._running_mount()
+
+        # ------------------------------------ 2.8-A 轮间态（BETWEEN_RUNS）
+
+        def _between_runs_record(self, lifecycle: str) -> None:
+            """终态时点的轮间记录（_refresh 生命周期跃迁块内调用，
+            恒 UI 线程）：run 镜像收录终态（App outcome 权威、非终态
+            词一律回落投影 lifecycle 词——interval 先于 worker 落
+            outcome 观察到 terminal 的窄竞态下不误录 PARKED）、
+            composed 置空（_funnel_pre_start 复真——漏斗键路由/直退
+            阶梯/漏斗刷新全套既有机制原样再武装）、披露活取（池可能
+            已变——两段 enter 门在新披露上重估）、interval 收止
+            （漏斗态键驱动刷新律）。换屏旗标置位，真正换屏在渲染尾
+            （_refresh 后段 display 赋值不回卷）。PARKED ≠ terminal：
+            本函数只能经 _TERMINAL_LIFECYCLE_HINTS 跃迁到达——停驻
+            唤醒续驱仍在原 run 内，绝不进入轮间态。"""
+            if self._cockpit_runs:
+                task, steps, _ = self._cockpit_runs[-1]
+                status = getattr(
+                    getattr(self.outcome, "status", None), "value", None)
+                if status not in _TERMINAL_LIFECYCLE_HINTS:
+                    status = lifecycle
+                self._cockpit_runs[-1] = (task, steps, status)
+            self._cockpit_composed = None
+            # stage 直落 NOT_STARTED（而非 TERMINAL）：漏斗再入的
+            # 输入前相位。mount 清 composer 排队的 Changed 消息可能
+            # 在本函数之后才处理——彼时 pre_start 已复真，_funnel_
+            # after_edit 以 composer 空白算出 NOT_STARTED；若此处
+            # 留 TERMINAL，那次迟到同步将产生一次 stage 迁移并清空
+            # 轮间横幅（消息序竞态）。直落同值 = 迟到同步成 no-op，
+            # 横幅确定性保留；首个键入字才如常迁 COMPOSING 并让位。
+            self._cockpit_stage = STAGE_NOT_STARTED
+            if self._cockpit_composition_preview is not None:
+                self._cockpit_disclosure = (
+                    self._cockpit_composition_preview())
+            status_word = (self._cockpit_runs[-1][2]
+                           if self._cockpit_runs else lifecycle)
+            self._cockpit_funnel_message = (
+                ui_label("next collaboration · run {n} {status}",
+                         self._cockpit_locale).format(
+                    n=len(self._cockpit_runs), status=status_word),)
+            if self._cockpit_interval is not None:
+                self._cockpit_interval.stop()
+                self._cockpit_interval = None
+            self._cockpit_funnel_reentry_pending = True
+
+        def _funnel_reentry_swap(self) -> None:
+            """轮间换屏（渲染尾执行）：主屏观察区隐藏、漏斗屏在场
+            （composer 恒钉底不动——输入位置零跳变；呈现层纯迁移，
+            零引擎触碰、零事件构造）。"""
+            for selector in _MAIN_ZONE_SELECTORS:
+                self.query_one(selector).display = False
+            self.query_one("#compose-screen").display = False
+            self.query_one("#funnel-screen").display = True
+            self._funnel_refresh()
+
+        def _between_runs_recall(self) -> None:
+            """轮间 E 召回：上一轮任务文本镜像载入 composer 供改写
+            （手动 /again 前奏）。召回源是 UI 自有镜像（非事实读回）；
+            改写后 Enter 经漏斗两段门装配全新 run——绝不复活旧 run。"""
+            composer = self.query("#composer")
+            if composer and self._cockpit_last_task:
+                composer[0].text = self._cockpit_last_task
+                composer[0].move_cursor(composer[0].document.end)
+            self._funnel_after_edit()
 
         # ------------------------------------ CU-COCKPIT-1 COMPOSE 选择屏
 
@@ -1415,6 +1619,7 @@ def _build_classes() -> None:
                 self._dispatch("RESUME")
                 self._refresh()
             elif key == "a":
+                self._cockpit_confirm_action = "abort"
                 self._cockpit_mode = MODE_CONFIRM
                 self._refresh()
             elif key == "q":
@@ -1456,11 +1661,18 @@ def _build_classes() -> None:
 
         def _confirm_key(self, key: str) -> None:
             if key == "y":
-                self._dispatch("ABORT")
+                # 2.8-A：确认动作随命令名携带（abort=既有 ABORT 外发
+                # ——注入 dispatcher 唯一裁决；new=会话呈现史清空——纯呈现）
+                if self._cockpit_confirm_action == "new":
+                    self._new_session_clear()
+                else:
+                    self._dispatch("ABORT")
                 self._cockpit_mode = MODE_COMMAND
+                self._cockpit_confirm_action = None
                 self._refresh()
             elif key in ("n", "escape"):
                 self._cockpit_mode = MODE_COMMAND
+                self._cockpit_confirm_action = None
                 self._refresh()
             # 其余按键 no-op（零外发、零状态变化）
 

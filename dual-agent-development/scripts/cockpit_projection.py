@@ -46,6 +46,7 @@ __all__ = (
     "COMPOSITION_ROLES", "compose_pool_lines",
     "compose_participant_lines", "compose_screen_lines",
     "compose_keys_hint",
+    "run_divider_line", "runs_summary_lines",
 )
 
 # 呈现层 lifecycle 词表（P4 的 IDLE 仅为投影层视觉态，绝不进入
@@ -223,6 +224,34 @@ _LABELS = {
         "enter preview/start · esc back · l lang · q quit",
         "↑↓ 移动 · space 勾选 · ←→ 成员 · r 角色 · "
         "enter 预览/启动 · esc 返回 · l 语言 · q 退出"),
+    # 2.8-A 会话轮次面（Log 分节线/轮间横幅//runs 摘要——闭集
+    # 纪律：Log 行全部经词表；{n}/{k}/{status}/{roles}/{task} 为
+    # 事实面 domain 词 format 注入，绝不翻译）
+    "── run {n} · {k} agents · {roles} ──": (
+        "── run {n} · {k} agents · {roles} ──",
+        "── 第 {n} 轮 · {k} 个成员 · {roles} ──"),
+    "next collaboration · run {n} {status}": (
+        "next collaboration · run {n} {status}",
+        "下一轮协作 · 第 {n} 轮 {status}"),
+    "runs": ("runs", "轮次"),
+    "run {n} · {status} · {task}": (
+        "run {n} · {status} · {task}",
+        "第 {n} 轮 · {status} · {task}"),
+    "no collaborations yet": ("no collaborations yet", "尚无协作轮次"),
+    # 2.8-A 会话 slash 反馈词（轮间域限定提示与 /new 兑现回执——
+    # 闭集纪律：Log 行全部经词表；命令名/键字母恒 EN）
+    "only between runs · /again reloads the last task": (
+        "only between runs · /again reloads the last task",
+        "仅轮间可用 · /again 载入上轮任务"),
+    "only between runs · /compose opens selection": (
+        "only between runs · /compose opens selection",
+        "仅轮间可用 · /compose 打开选择屏"),
+    "only between runs · /new resets the session display": (
+        "only between runs · /new resets the session display",
+        "仅轮间可用 · /new 重置会话呈现史"),
+    "session display cleared · run counter reset": (
+        "session display cleared · run counter reset",
+        "会话呈现史已清空 · 轮次计数已重置"),
 }
 
 
@@ -1261,6 +1290,51 @@ def funnel_first_screen(version_text, composition, task_buffer, *,
         lines.append(blocked_reason)
     if include_input:
         lines.append(_FUNNEL_KEYS_HINT)
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
+
+
+# ------------------------------------ 2.8-A 会话轮次呈现（Conversation 层）
+# （确定性纯函数：runs 镜像 = TUI 自有呈现态快照（task 原文/steps
+# 交付序/status 词），非引擎真相读回；status 缺席 = 在飞，绝不推断。
+# 零 IO、零事件、零引擎词；Log 闭集纪律——行词全经 _LABELS，task/
+# roles/status 为事实面 domain 词经 format 注入，绝不翻译。）
+
+def run_divider_line(run_number, steps, *, width=100, locale="en",
+                     ascii_only=False):
+    """会话 Log 分节线（run N ≥ 2 启动时入 Log，§九）：呈现层连接
+    线——只消费 TUI 传入的 run 序号与 steps 镜像，宽度经
+    truncate_to_width、符号经 _to_ascii（CJK/降级铁律同全局）。"""
+    roles = "→".join(str(role) for role, _ in steps)
+    line = ui_label("── run {n} · {k} agents · {roles} ──",
+                    locale).format(n=run_number, k=len(steps), roles=roles)
+    line = truncate_to_width(line, width)
+    if ascii_only:
+        line = _to_ascii(line)
+    return line
+
+
+def runs_summary_lines(runs, *, width=100, locale="en",
+                       ascii_only=False):
+    """/runs 会话摘要（ConversationRecord 呈现视图原料，§十七）：
+    每轮一行 run N · status · task 摘要；status None = 在飞
+    （呈现 RUNNING 词，绝不伪造终态）。runs 空 = 恰一行诚实提示。"""
+    if not runs:
+        line = ui_label("no collaborations yet", locale)
+        return ((line,) if not ascii_only
+                else (_to_ascii(line),))
+    lines = [ui_label("runs", locale)]
+    for index, (task, steps, status) in enumerate(runs, start=1):
+        status_word = (str(status) if status is not None
+                       else ui_label("RUNNING", locale))
+        task_text = str(task) if task is not None else ""
+        if not task_text:
+            task_text = ui_label("(no text output)", locale)
+        line = ui_label("run {n} · {status} · {task}",
+                        locale).format(n=index, status=status_word,
+                                       task=task_text)
+        lines.append(truncate_to_width(line, width))
     if ascii_only:
         lines = [_to_ascii(line) for line in lines]
     return tuple(lines)

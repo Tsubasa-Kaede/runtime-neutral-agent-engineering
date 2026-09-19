@@ -21,11 +21,25 @@ INTENT_STEER = "STEER"
 INTENT_REVISION = "REVISION"
 INTENT_COMMAND = "COMMAND"
 
-# Slash 命令注册表（R2 封闭集，恰九条；扩充须修订 DESIGN LOCK）。
+# 2.8-A 会话相位（分类参数三值——呈现层路由用，非引擎状态、非
+# 第二真源；推广自 funnel_pre_start 布尔，旧签名逐字兼容）：
+# - PRE_START：首跑漏斗前置态（= funnel_pre_start=True；判定逻辑
+#   冻结——斜杠亦是任务文本域）；
+# - RUNNING：run 执行中（既有 Start 后语义）；
+# - BETWEEN_RUNS：会话轮间态（终态后再入漏斗："/"=COMMAND、
+#   其余文本=下一轮 TASK——分类只决定呈现层走哪条既有通道，
+#   引擎语义零变化）。
+PHASE_PRE_START = "PRE_START"
+PHASE_RUNNING = "RUNNING"
+PHASE_BETWEEN_RUNS = "BETWEEN_RUNS"
+
+# Slash 命令注册表（R2 封闭集；2.8-A 会话四命令扩充恰十三条——
+# DESIGN LOCK v1.1 → 2.8 修订面，九命令语义零变）。
 # kind 语义（呈现层路由，非引擎词汇）：
 # - "dispatch"：经既有 _dispatch 外发（dispatch_kind = 既有注入回调
 #   协议词），boundary 唯一裁决、回执行 Log；
-# - "confirm"：走既有 y/n 确认条路径（abort 恒在确认后）；
+# - "confirm"：走既有 y/n 确认条路径（abort/new 恒在确认后——
+#   确认动作随命令名携带，TUI 侧分支兑现）；
 # - "screen"：走既有只读观察推屏；
 # - "local"：纯呈现层切换（零外发、零事实触碰）。
 # help 为 /help 输出原文（EN 冻结——漏斗 R2 ERRATA 同律）。
@@ -49,25 +63,45 @@ SLASH_REGISTRY = {
     "target": {"kind": "local", "dispatch_kind": None,
                "help": "toggle revision target: queue vs prompt "
                        "(<agent> not implemented)"},
+    # 2.8-A 会话四命令（轮间域为主场；语义全为呈现层——/again 载
+    # 入上轮任务文本须再过 Enter 两段律，绝不免检复活）
+    "again": {"kind": "local", "dispatch_kind": None,
+              "help": "reload the last task to run it again"},
+    "compose": {"kind": "local", "dispatch_kind": None,
+                "help": "open the runtime selection screen"},
+    "new": {"kind": "confirm", "dispatch_kind": None,
+            "help": "reset the session display behind the y/n bar"},
+    "runs": {"kind": "local", "dispatch_kind": None,
+             "help": "list the collaborations of this session"},
 }
 
 __all__ = ("INTENT_TASK", "INTENT_STEER", "INTENT_REVISION",
-           "INTENT_COMMAND", "SLASH_REGISTRY", "classify_submit",
+           "INTENT_COMMAND", "PHASE_PRE_START", "PHASE_RUNNING",
+           "PHASE_BETWEEN_RUNS", "SLASH_REGISTRY", "classify_submit",
            "parse_slash", "slash_candidates", "slash_help_lines")
 
 
 def classify_submit(*, funnel_pre_start: bool, text: str,
-                    revision_recall: bool = False) -> str:
+                    revision_recall: bool = False,
+                    phase: str = "") -> str:
     """提交意图分类（纯函数）。
 
     漏斗前置态恒 TASK（漏斗判定冻结，斜杠亦是任务文本域）；Start
     后：斜杠=COMMAND；E 召回态=REVISION；其余=STEER。空白 no-op 由
     调用方处理，本函数不做空白特判。
+    2.8-A 相位推广：phase 显式给出时覆盖 funnel_pre_start 布尔
+    （未给出时由布尔派生——旧调用路径逐字节同径）。BETWEEN_RUNS：
+    斜杠=COMMAND（轮间域命令面）；召回/普通文本=下一轮 TASK（经
+    漏斗再入装配全新 run——绝不复活旧 run，零上下文携带）。
     """
-    if funnel_pre_start:
+    if not phase:
+        phase = PHASE_PRE_START if funnel_pre_start else PHASE_RUNNING
+    if phase == PHASE_PRE_START:
         return INTENT_TASK
     if str(text).startswith("/"):
         return INTENT_COMMAND
+    if phase == PHASE_BETWEEN_RUNS:
+        return INTENT_TASK
     if revision_recall:
         return INTENT_REVISION
     return INTENT_STEER
@@ -87,7 +121,7 @@ def parse_slash(text: str):
 
 
 def slash_candidates(prefix: str):
-    """注册表前缀匹配（注册序稳定；空前缀=全量九条——
+    """注册表前缀匹配（注册序稳定；空前缀=全量十三条——
     autocomplete 最小实现：hint 行呈现候选，无补全键）。"""
     return tuple(name for name in SLASH_REGISTRY
                  if name.startswith(prefix))
