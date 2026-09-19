@@ -64,6 +64,7 @@ from cockpit_projection import (
     compose_keys_hint,
     compose_screen_lines,
     control_receipt_line,
+    conversation_record_lines,
     derive_lifecycle,
     event_detail_line,
     funnel_changed_lines,
@@ -433,7 +434,8 @@ def _build_classes() -> None:
                      revision_pending=None, composition_preview=None,
                      start_composition=None, task_token=None,
                      timeout_seconds=None,
-                     user_composition_surface=None):
+                     user_composition_surface=None,
+                     record_builder=None):
             super().__init__()
             self._cockpit_drive = driver
             self._cockpit_task = task
@@ -540,6 +542,14 @@ def _build_classes() -> None:
             self._cockpit_last_task = ""
             self._cockpit_interval = None
             self._cockpit_funnel_reentry_pending = False
+            # 2.8-E：ConversationRecord 双镜像（与 runs 镜像同站点
+            # 同步——init//new 清/终态收录三站；record 只在真实终态
+            # 铸，在飞/停驻轮结构性缺席=诚实无详情）。构建器经 entry
+            # 注入（本层零 entry import——单向依赖律；None=不收录，
+            # legacy/直构测试路径不受影响）。纯呈现收录：引擎三源
+            # 零触碰、绝不回写、绝不入投影输入。
+            self._cockpit_record_builder = record_builder
+            self._cockpit_run_records = []
             # CU-COCKPIT-1：COMPOSE 选择屏（pre-run funnel 阶段——绝不
             # 触碰 C2 RUNNING 三态/六键契约）。user 面注入闭包 =
             # 组合真相唯一通道（listing/preview/start）；全部选择/
@@ -1267,13 +1277,24 @@ def _build_classes() -> None:
                         "selection", self._cockpit_locale))
             elif name == "runs":
                 # 2.8-A local：会话 run 摘要（ConversationRecord 呈现
-                # 视图；任何相位可用——纯呈现镜像，零事实触碰）
+                # 视图；任何相位可用——纯呈现镜像，零事实触碰）。
+                # 2.8-E：摘要行之后逐已终态轮尾接详情块（additive——
+                # 摘要行集逐字节零变化，既有 golden 零迁移；在飞轮
+                # 只有摘要行，绝不预呈未定 final/usage）
                 for line in runs_summary_lines(
                         self._cockpit_runs,
                         width=self.size.width or 100,
                         locale=self._cockpit_locale,
                         ascii_only=self._cockpit_ascii):
                     self._log_append(line)
+                for record_index, record in enumerate(
+                        self._cockpit_run_records, start=1):
+                    for line in conversation_record_lines(
+                            record, index=record_index,
+                            width=self.size.width or 100,
+                            locale=self._cockpit_locale,
+                            ascii_only=self._cockpit_ascii):
+                        self._log_append(line)
 
         def _new_session_clear(self) -> None:
             """/new 兑现（y 确认后）：会话呈现史清空——runs 镜像、
@@ -1281,6 +1302,9 @@ def _build_classes() -> None:
             纯呈现遗忘：引擎三源（EventIndex/journal/usage）与
             TraceScreen 全量事实不触碰（真相在引擎，显示史在 UI）。"""
             self._cockpit_runs = []
+            # 2.8-E：record 双镜像同批清空（会话呈现史整体遗忘——
+            # runs 与 records 永不同步漂移；引擎三源照旧零触碰）
+            self._cockpit_run_records = []
             self._cockpit_last_task = ""
             # 2.8-B：组快照缓存与横滚态一并归零（纯呈现遗忘——
             # 事实源零触碰同律）；2.8-D：detail 侧栏开关一并归零
@@ -1455,6 +1479,17 @@ def _build_classes() -> None:
                 if status not in _TERMINAL_LIFECYCLE_HINTS:
                     status = lifecycle
                 self._cockpit_runs[-1] = (task, steps, status)
+            # 2.8-E：终态收录 ConversationRecord（双镜像第二站点；
+            # 须在 composed 置空前快照——usage() 终值即此 run 的
+            # 全部 invocation usage）。构建器注入在场且 composed
+            # 在场才铸；status 定律与上方镜像回填同律同刻（同读
+            # self.outcome——两镜像永不同词）。PARKED 结构性不达
+            # 本函数（停驻续驱仍在原 run），故 record 恒真实终态。
+            if (self._cockpit_record_builder is not None
+                    and self._cockpit_composed is not None):
+                self._cockpit_run_records.append(
+                    self._cockpit_record_builder(
+                        self._cockpit_composed, self.outcome, lifecycle))
             self._cockpit_composed = None
             # 2.8-B：run-local 组快照与横滚态随 run 归零（下一轮
             # 组合可能完全不同——快照真相在下一 Start 时重取）
@@ -2528,20 +2563,24 @@ def run_cockpit_tui(*, driver, task, plan, events, facts, usage,
 
 def run_cockpit_funnel(*, composition_preview, start_composition,
                        task_token=None, timeout_seconds=None,
-                       user_composition_surface=None):
+                       user_composition_surface=None,
+                       record_builder=None):
     """漏斗同步外壳（CU-TUI-5 §十六）：单一 App、单次 run()——
     漏斗为初始呈现阶段，Start 后同一 App 换屏 RUNNING。
 
     前置退出（q/Ctrl-C，未 Start）→ outcome None（零执行零交付）；
     timeout 真值已由入口闭包捕获，本参数仅路由对齐。组合真相只经
     注入的 preview/start 两闭包进出；CU-COCKPIT-1 增 user 面
-    （listing/preview/start）——c 键 COMPOSE 选择屏的唯一数据源。"""
+    （listing/preview/start）——c 键 COMPOSE 选择屏的唯一数据源。
+    2.8-E 增 record_builder（ConversationRecord 纯构建器注入——
+    entry 组装层铸造呈现视图，本层零 entry import）。"""
     _build_classes()
     app = CockpitApp(composition_preview=composition_preview,
                      start_composition=start_composition,
                      task_token=task_token,
                      timeout_seconds=timeout_seconds,
-                     user_composition_surface=user_composition_surface)
+                     user_composition_surface=user_composition_surface,
+                     record_builder=record_builder)
     app.run()
     app.wait_for_driver()
     if app.failure is not None:

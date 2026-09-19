@@ -1242,11 +1242,15 @@ class RunCockpitFunnelWrapperTests(unittest.TestCase):
                 task_token="t", timeout_seconds=45)
         self.assertEqual(
             sorted(holder),
-            ["composition_preview", "start_composition", "task_token",
+            ["composition_preview", "record_builder",
+             "start_composition", "task_token",
              "timeout_seconds", "user_composition_surface"])
         self.assertEqual(holder["task_token"], "t")
         self.assertEqual(holder["timeout_seconds"], 45)
         self.assertIsNone(holder["user_composition_surface"])
+        # 2.8-E：ConversationRecord 构建器注入位（缺省 None=不收录，
+        # legacy/直构路径零影响；entry 漏斗调用点注入真构建器）
+        self.assertIsNone(holder["record_builder"])
 
     def test_wrapper_returns_none_on_pre_start_quit(self):
         fake = self._fake_app_class(outcome=None)

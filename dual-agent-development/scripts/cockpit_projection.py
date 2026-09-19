@@ -47,6 +47,7 @@ __all__ = (
     "compose_participant_lines", "compose_screen_lines",
     "compose_keys_hint",
     "run_divider_line", "runs_summary_lines",
+    "conversation_record_lines",
 )
 
 # 呈现层 lifecycle 词表（P4 的 IDLE 仅为投影层视觉态，绝不进入
@@ -238,6 +239,18 @@ _LABELS = {
         "run {n} · {status} · {task}",
         "第 {n} 轮 · {status} · {task}"),
     "no collaborations yet": ("no collaborations yet", "尚无协作轮次"),
+    # 2.8-E /runs 详情块（ConversationRecord 呈现视图；标签走闭集，
+    # 值全部为事实面 domain 词原样呈现——status/runtime_id/task_id
+    # 恒 EN 不进词表；{} 为 format 注入）
+    "── run {n} · detail ──": (
+        "── run {n} · detail ──", "── 第 {n} 轮 · 详情 ──"),
+    "task": ("task", "任务"),
+    "agents": ("agents", "成员"),
+    "outcome": ("outcome", "终态"),
+    "usage": ("usage", "用量"),
+    "{i} in / {o} out · {u} unknown · {s} unsupported": (
+        "{i} in / {o} out · {u} unknown · {s} unsupported",
+        "{i} 入 / {o} 出 · {u} 未知 · {s} 不支持"),
     # 2.8-A 会话 slash 反馈词（轮间域限定提示与 /new 兑现回执——
     # 闭集纪律：Log 行全部经词表；命令名/键字母恒 EN）
     "only between runs · /again reloads the last task": (
@@ -1556,6 +1569,69 @@ def runs_summary_lines(runs, *, width=100, locale="en",
                         locale).format(n=index, status=status_word,
                                        task=task_text)
         lines.append(truncate_to_width(line, width))
+    if ascii_only:
+        lines = [_to_ascii(line) for line in lines]
+    return tuple(lines)
+
+
+class _ZeroUsageSummary:
+    """渲染层零值鸭（record.usage 缺席防御；本层不得 import entry
+    取 UsageSummary——单向依赖律同向成立）。恒零只读，绝不编造。"""
+
+    known_input = 0
+    known_output = 0
+    unknown_count = 0
+    unsupported_count = 0
+
+
+_ZERO_USAGE = _ZeroUsageSummary()
+
+
+def conversation_record_lines(record, *, index=1, width=100,
+                              locale="en", ascii_only=False):
+    """/runs 详情块（2.8-E §17(2) ConversationRecord 呈现视图）：
+    per-run 详情行集——分节线 + task/agents/groups/outcome/result/
+    usage 标签行。纯呈现派生：每行值皆 record 字段（引擎终态快照
+    的确定性变换——只截断不补全、不总结、不拼接注入）；usage 行
+    仅 KNOWN 求和 + 三态计数诚实呈现（§20）；在飞/停驻轮结构上
+    无 record（详情块只覆盖已终态轮——诚实缺席）。行为与
+    runs_summary_lines 同律：宽度经 truncate_to_width、符号经
+    _to_ascii、标签经 ui_label 闭集。groups 恒 ()（legacy/无组
+    路径）= 零行（不伪造空组）。"""
+    usage = getattr(record, "usage", None) or _ZERO_USAGE
+    lines = [ui_label("── run {n} · detail ──", locale).format(n=index)]
+
+    def _row(label_key, value):
+        lines.append("  {}  {}".format(
+            _pad_cell(ui_label(label_key, locale), 8), value))
+
+    _row("task", str(getattr(record, "task", "") or ""))
+    steps = tuple(getattr(record, "steps", ()) or ())
+    agents = " · ".join(
+        "{} → {}".format(role, runtime) for role, runtime in steps)
+    _row("agents", agents)
+    groups = tuple(getattr(record, "groups", ()) or ())
+    if groups:
+        parts = []
+        for group_id, member_ids in groups:
+            parts.append("[{}: {}]".format(
+                group_id, " ".join(str(mid) for mid in member_ids)))
+        _row("groups", " ".join(parts))
+    status = getattr(record, "status", None)
+    _row("outcome", str(status) if status is not None else "—")
+    preview = str(getattr(record, "final_preview", "") or "")
+    _row("result", preview if preview else "—")
+    if (usage.known_input or usage.known_output
+            or usage.unknown_count or usage.unsupported_count):
+        usage_text = ui_label(
+            "{i} in / {o} out · {u} unknown · {s} unsupported",
+            locale).format(i=usage.known_input, o=usage.known_output,
+                           u=usage.unknown_count,
+                           s=usage.unsupported_count)
+        _row("usage", usage_text)
+    else:
+        _row("usage", "—")
+    lines = [truncate_to_width(line, width) for line in lines]
     if ascii_only:
         lines = [_to_ascii(line) for line in lines]
     return tuple(lines)

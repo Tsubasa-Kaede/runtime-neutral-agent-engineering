@@ -78,7 +78,7 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
         RunStatus,
         StepSpec,
     )
-    from usage_log import UsageLog
+    from usage_log import UsageLog, UsageObservation
 except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
     from .cockpit_projection import DEFAULT_ROLE_TEMPLATES
@@ -114,6 +114,7 @@ _HOST_ENTRY = None
 _EMBED_LIMIT = 4000          # prior output embedded into the next prompt
 _TASK_DISPLAY_LIMIT = 200    # task echo in human mode
 _RESULT_PREVIEW_LIMIT = 2000  # result preview in human mode
+_FINAL_PREVIEW_LIMIT = 120    # 2.8-E ConversationRecord final preview
 _JSON_OUTPUT_LIMIT = 8192    # output embedded into the JSON line
 _DETAIL_LIMIT = 200          # error/echo detail strings
 
@@ -612,7 +613,20 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     path). When a prior output is actually embedded into this step's
     prompt, exactly one HANDOFF event records the producing role
     (stage) and the receiving runtime (runtime_id) — composition
-    facts about the prompt, with no transport or delivery meaning."""
+    facts about the prompt, with no transport or delivery meaning.
+
+    2.8-E boundary pin (§17(1)/§30-E, FROZEN): this factory is the
+    ONE AND ONLY prompt seam — the future Context Compiler's graft
+    point. Its closure inputs are exactly the current run's
+    authorized inputs (task_text, task_id, role, provider,
+    timeout_seconds) plus the current run's previous step output
+    delivered at call time. It structurally cannot read previous-run
+    transcripts/prompts, ConversationRecords, historical run text,
+    cross-run memory, or UI history: Context != Full History,
+    Conversation Record != Conversation Context, and cross-run text
+    never enters any prompt (test_context_boundary.py pins all
+    three). Signature and behavior are frozen; any change requires
+    an explicit roadmap revision authorization."""
     def request_builder(previous_result):
         prompt = _PROMPT_TEMPLATE.format(role=role, task=task_text)
         if previous_result is not None:
@@ -804,6 +818,96 @@ class ComposedRun(NamedTuple):
     # 对齐（成员声明序 = steps 序 = plan 序，装配事实）是投影层
     # slot 分区派生的唯一依据。
     member_ids: tuple = ()
+
+
+# ---------------------------------- 2.8-E Conversation Record（呈现视图）
+# （§17(2)/§30-E：per-run 纯呈现视图——未来 Context Compiler/Memory
+# 的原料，本身非 context、非 truth。三律在此锚定：Context != Full
+# History / Memory != Truth / UI != Truth。构建器只读引擎快照、
+# 绝不回写；TUI 经注入消费（tui:7 单向依赖律——entry 只可被
+# 依赖、不可反向 import）。）
+
+
+class UsageSummary(NamedTuple):
+    """会话呈现层 usage 三态汇总（§20：仅 KNOWN 求和；UNKNOWN/
+    UNSUPPORTED 计数诚实呈现，零编造、零跨 run 推断——缺席
+    invocation 不入任何桶，与 UsageLog store 语义同律）。"""
+
+    known_input: int       # Σ input_tokens（仅 usage_status==KNOWN）
+    known_output: int      # Σ output_tokens（仅 usage_status==KNOWN）
+    unknown_count: int     # usage_status==UNKNOWN 记录数
+    unsupported_count: int  # usage_status==UNSUPPORTED 记录数
+
+
+class ConversationRecord(NamedTuple):
+    """per-run 呈现视图（§17(2)：task 摘要、组合、outcome、final_
+    result 预览、usage 三态汇总）。纯只读数据视图：每字段皆引擎
+    真源直读快照，绝无 UI-created truth；前三字段与 2.8-A runs
+    三元组 (task, steps, status) 同名同序（摘要面零迁移）。"""
+
+    task: str              # 本轮任务原文（预览截断归渲染层）
+    steps: tuple           # 交付序 ((role, runtime_id), ...)
+    status: str | None     # App outcome 权威词；缺席回落投影 lifecycle
+    plan: tuple = ()       # 组合披露快照 (slot_id, role, runtime, provider)
+    groups: tuple = ()     # run-local 组快照（legacy 路径恒 ()）
+    member_ids: tuple = ()
+    final_preview: str = ""  # final_result str() 截断；None → ""
+    usage: UsageSummary = UsageSummary(0, 0, 0, 0)
+    task_id: str = ""      # 身份披露（诊断呈现；绝不参与 prompt）
+
+
+def usage_summary(usage_records):
+    """三态纯聚合（§20）：仅 KNOWN 进和；UNKNOWN/UNSUPPORTED 只
+    计数；record 缺席不编造（缺席即不入任何桶）。"""
+    known_input = 0
+    known_output = 0
+    unknown_count = 0
+    unsupported_count = 0
+    for record in usage_records:
+        status = getattr(record, "usage_status", None)
+        if status is UsageObservation.KNOWN:
+            known_input += int(getattr(record, "input_tokens", 0) or 0)
+            known_output += int(getattr(record, "output_tokens", 0) or 0)
+        elif status is UsageObservation.UNKNOWN:
+            unknown_count += 1
+        elif status is UsageObservation.UNSUPPORTED:
+            unsupported_count += 1
+    return UsageSummary(known_input, known_output, unknown_count,
+                        unsupported_count)
+
+
+def conversation_record(composed, outcome, lifecycle):
+    """终态时点 ConversationRecord 纯构建器（呈现视图唯一铸造点）。
+
+    输入只读：composed（ComposedRun 鸭）读取 task/steps/plan/groups/
+    member_ids/task_id + usage() 终值快照；outcome（RunOutcome 鸭）
+    读取 status.value / final_result。status 定律与 TUI runs 镜像
+    回填同律同刻（outcome 权威词优先、缺席回落 lifecycle）。PARKED
+    结构性不达本函数（record 只在真实终态铸——在飞/停驻轮无详情，
+    诚实缺席）。final_preview = str(final_result)[:_FINAL_PREVIEW_
+    LIMIT]（COMPLETED/FAILED 才非 None；PARKED/ABORTED 由
+    RunOutcome 不变量恒 None → ""）。"""
+    status = getattr(getattr(outcome, "status", None), "value", None)
+    if status is None:
+        status = lifecycle
+    final_result = getattr(outcome, "final_result", None)
+    preview = "" if final_result is None else str(
+        final_result)[:_FINAL_PREVIEW_LIMIT]
+    usage_records = ()
+    usage_reader = getattr(composed, "usage", None)
+    if callable(usage_reader):
+        usage_records = tuple(usage_reader())
+    return ConversationRecord(
+        task=str(getattr(composed, "task", "") or ""),
+        steps=tuple(getattr(composed, "steps", ()) or ()),
+        status=(str(status) if status is not None else None),
+        plan=tuple(getattr(composed, "plan", ()) or ()),
+        groups=tuple(getattr(composed, "groups", ()) or ()),
+        member_ids=tuple(getattr(composed, "member_ids", ()) or ()),
+        final_preview=preview,
+        usage=usage_summary(usage_records),
+        task_id=str(getattr(composed, "task_id", "") or ""),
+    )
 
 
 def _task_id_mint():
@@ -1317,7 +1421,10 @@ def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
         start_composition=surfaces.start,
         task_token=intent.task_token,
         timeout_seconds=intent.timeout_seconds,
-        user_composition_surface=user_surface)
+        user_composition_surface=user_surface,
+        # 2.8-E：ConversationRecord 构建器注入（tui:7 单向依赖律——
+        # TUI 零 entry import；None=不收录，legacy/测试路径不受影响）
+        record_builder=conversation_record)
     if outcome is None:
         return 0
     composed = surfaces.composed_runs[-1]

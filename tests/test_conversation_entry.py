@@ -692,5 +692,403 @@ class ProjectionPurityTests(unittest.TestCase):
             runs, [("task", (("architect", "rt-a"),), "COMPLETED")])
 
 
+# -------------------------------------------------- 2.8-E record（呈现视图）
+
+
+def _usage_record(invocation_id, usage_status, input_tokens=None,
+                  output_tokens=None):
+    from usage_log import UsageRecord
+    return UsageRecord(
+        invocation_id=invocation_id, task_id="tid-rec",
+        agent_id=f"agent-{invocation_id}", role="coder",
+        runtime_id="rt-b", status="SUCCESS",
+        usage_status=usage_status,
+        input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+class ConversationRecordBuilderTests(unittest.TestCase):
+    """conversation_record 纯构建器：确定性/只读/status 回落/PARKED
+    诚实缺席/usage 三态/截断。全部真类型或同形鸭（REAL=0）。"""
+
+    def _composed(self, task="record task", usage=(), groups=(),
+                  final=None, status="COMPLETED"):
+        from usage_log import UsageObservation
+        outcome = SimpleNamespace(
+            status=SimpleNamespace(value=status), final_result=final)
+        composed = SimpleNamespace(
+            task=task, steps=(("architect", "rt-a"), ("coder", "rt-b")),
+            plan=(("s0", "architect", "rt-a", "pa"),
+                  ("s1", "coder", "rt-b", "pb")),
+            groups=groups, member_ids=("m-1", "m-2"),
+            task_id="tid-record", usage=lambda: tuple(usage))
+        return composed, outcome
+
+    def test_deterministic_and_readonly(self):
+        from usage_log import UsageObservation
+        usage = (_usage_record("i1", UsageObservation.KNOWN, 10, 4),)
+        composed, outcome = self._composed(usage=usage,
+                                           final="final text")
+        first = cockpit_entry.conversation_record(
+            composed, outcome, "DONE")
+        second = cockpit_entry.conversation_record(
+            composed, outcome, "DONE")
+        self.assertEqual(first, second)
+        # 只读：输入对象零改写
+        self.assertEqual(composed.task, "record task")
+        self.assertEqual(outcome.final_result, "final text")
+
+    def test_fields_are_engine_snapshots(self):
+        from usage_log import UsageObservation
+        usage = (
+            _usage_record("i1", UsageObservation.KNOWN, 100, 40),
+            _usage_record("i2", UsageObservation.KNOWN, 23, 9),
+            _usage_record("i3", UsageObservation.UNKNOWN),
+            _usage_record("i4", UsageObservation.UNSUPPORTED),
+        )
+        composed, outcome = self._composed(
+            usage=usage, final="the final answer", groups=())
+        record = cockpit_entry.conversation_record(
+            composed, outcome, "DONE")
+        self.assertEqual(record.task, "record task")
+        self.assertEqual(
+            record.steps, (("architect", "rt-a"), ("coder", "rt-b")))
+        self.assertEqual(record.status, "COMPLETED")
+        self.assertEqual(record.plan, composed.plan)
+        self.assertEqual(record.groups, ())
+        self.assertEqual(record.member_ids, ("m-1", "m-2"))
+        self.assertEqual(record.final_preview, "the final answer")
+        self.assertEqual(
+            record.usage, cockpit_entry.UsageSummary(123, 49, 1, 1))
+        self.assertEqual(record.task_id, "tid-record")
+
+    def test_status_falls_back_to_lifecycle(self):
+        composed, _ = self._composed()
+        outcome = SimpleNamespace(status=None, final_result=None)
+        record = cockpit_entry.conversation_record(
+            composed, outcome, "FAILED")
+        self.assertEqual(record.status, "FAILED")
+
+    def test_parked_outcome_yields_empty_preview(self):
+        # RunOutcome 不变量：PARKED 强制 final_result None → 预览 ""
+        composed, _ = self._composed()
+        outcome = SimpleNamespace(
+            status=SimpleNamespace(value="PARKED"), final_result=None)
+        record = cockpit_entry.conversation_record(
+            composed, outcome, "PARKED")
+        self.assertEqual(record.status, "PARKED")
+        self.assertEqual(record.final_preview, "")
+
+    def test_final_preview_truncated_at_limit(self):
+        composed, _ = self._composed()
+        outcome = SimpleNamespace(
+            status=SimpleNamespace(value="COMPLETED"),
+            final_result="x" * (cockpit_entry._FINAL_PREVIEW_LIMIT + 50))
+        record = cockpit_entry.conversation_record(
+            composed, outcome, "DONE")
+        self.assertEqual(
+            len(record.final_preview), cockpit_entry._FINAL_PREVIEW_LIMIT)
+
+    def test_groups_snapshot_passthrough(self):
+        composed, _ = self._composed(groups=(("g1", ("m-1", "m-2")),))
+        outcome = SimpleNamespace(
+            status=SimpleNamespace(value="COMPLETED"), final_result=None)
+        record = cockpit_entry.conversation_record(
+            composed, outcome, "DONE")
+        self.assertEqual(record.groups, (("g1", ("m-1", "m-2")),))
+
+
+class ConversationRecordProjectionTests(unittest.TestCase):
+    """conversation_record_lines 纯渲染：闭集标签/诚实占位/组行
+    条件在场/CJK·ASCII·窄宽铁律。"""
+
+    def _record(self):
+        from usage_log import UsageObservation
+        composed = SimpleNamespace(
+            task="detail task", steps=(("architect", "rt-a"),
+                                       ("coder", "rt-b")),
+            plan=(), groups=(("alpha", ("m-1",)),), member_ids=("m-1",),
+            task_id="tid-detail",
+            usage=lambda: (
+                _usage_record("i1", UsageObservation.KNOWN, 100, 40),
+                _usage_record("i2", UsageObservation.UNKNOWN),))
+        outcome = SimpleNamespace(
+            status=SimpleNamespace(value="COMPLETED"),
+            final_result="final snippet")
+        return cockpit_entry.conversation_record(composed, outcome,
+                                                 "DONE")
+
+    def test_detail_rows_render_with_labels(self):
+        from cockpit_projection import conversation_record_lines
+        lines = conversation_record_lines(self._record(), index=1,
+                                          width=100)
+        self.assertEqual(lines[0], "── run 1 · detail ──")
+        self.assertTrue(lines[1].startswith("  task"))
+        self.assertIn("detail task", lines[1])
+        self.assertIn("architect → rt-a · coder → rt-b", lines[2])
+        self.assertIn("[alpha: m-1]", lines[3])
+        self.assertIn("COMPLETED", lines[4])
+        self.assertIn("final snippet", lines[5])
+        self.assertIn("100 in / 40 out · 1 unknown", lines[6])
+        self.assertIn("0 unsupported", lines[6])
+
+    def test_no_groups_row_when_groups_empty(self):
+        from cockpit_projection import conversation_record_lines
+        record = self._record()._replace(groups=())
+        lines = conversation_record_lines(record, index=1, width=100)
+        self.assertFalse(any("[" in line for line in lines))
+
+    def test_zero_usage_and_no_final_are_honest_dashes(self):
+        from cockpit_projection import conversation_record_lines
+        record = self._record()._replace(
+            final_preview="", usage=cockpit_entry.UsageSummary(0, 0, 0, 0))
+        lines = conversation_record_lines(record, index=1, width=100)
+        self.assertIn("  result    —", lines)
+        self.assertIn("  usage     —", lines)
+
+    def test_zh_labels_and_ascii_and_narrow(self):
+        from cockpit_projection import (conversation_record_lines,
+                                        display_width)
+        record = self._record()
+        zh = conversation_record_lines(record, index=2, width=100,
+                                       locale="zh")
+        self.assertEqual(zh[0], "── 第 2 轮 · 详情 ──")
+        self.assertTrue(zh[1].startswith("  任务"))
+        # 窄宽 CJK 铁律（无 ascii：截断即封顶——与 runs_summary_
+        # lines 同律；ascii 转换的 →→-> 单列膨胀是全库既有顺序律，
+        # 不在宽度断言面内）
+        narrow = conversation_record_lines(record, index=1, width=26,
+                                           locale="zh")
+        for line in narrow:
+            self.assertLessEqual(display_width(line), 26)
+        # ASCII 降级：box-drawing/箭头降级（CJK 无 ASCII 等价——按
+        # _to_ascii 既有词表）
+        ascii_lines = conversation_record_lines(
+            record, index=1, width=100, locale="zh", ascii_only=True)
+        self.assertTrue(ascii_lines[0].startswith("-- 第 1 轮"))
+        self.assertTrue(any("->" in line for line in ascii_lines))
+
+    def test_record_not_mutated(self):
+        from cockpit_projection import conversation_record_lines
+        record = self._record()
+        before = tuple(record)
+        conversation_record_lines(record, index=1, width=40)
+        self.assertEqual(tuple(record), before)
+
+
+class RunRecordCollectionTests(unittest.IsolatedAsyncioTestCase):
+    """终态收录/PARKED 不铸//new 双清/第二轮追加/双镜像同步
+    （TUI 呈现态三站点——builder 经注入，TUI 零 entry import）。"""
+
+    def _app(self, start):
+        return cockpit_tui.CockpitApp(
+            composition_preview=lambda: _funnel_composition(),
+            start_composition=start,
+            record_builder=cockpit_entry.conversation_record)
+
+    async def test_terminal_collects_record_synced_with_mirror(self):
+        from usage_log import UsageObservation
+        usage = (_usage_record("i1", UsageObservation.KNOWN, 7, 3),)
+        composed = _conversation_double("collect task", ["COMPLETED"])
+        composed.usage = lambda: usage
+        composed.groups = ()
+        composed.member_ids = ("m-1", "m-2")
+        start = _StartRecorder([composed])
+        app = self._app(start)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await _start_first_run(pilot, app, "collect", start)
+            await _drive_to_between_runs(pilot, app)
+            # 双镜像同步收录（同站点同刻）
+            self.assertEqual(len(app._cockpit_runs), 1)
+            self.assertEqual(len(app._cockpit_run_records), 1)
+            record = app._cockpit_run_records[0]
+            self.assertEqual(record.task, "collect task")
+            self.assertEqual(
+                record.steps,
+                (("architect", "rt-a"), ("coder", "rt-b")))
+            self.assertEqual(record.status, "COMPLETED")
+            self.assertEqual(record.final_preview, "")
+            self.assertEqual(record.usage,
+                             cockpit_entry.UsageSummary(7, 3, 0, 0))
+            self.assertEqual(record.task_id, composed.task_id)
+
+    async def test_parked_does_not_mint_record(self):
+        start = _StartRecorder([
+            _conversation_double("parked record", ["PARKED",
+                                                   "COMPLETED"])])
+        app = self._app(start)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await _start_first_run(pilot, app, "park", start)
+            await _await_condition(
+                pilot, app, lambda: app.outcome is not None)
+            # 停驻中：结构上无 record（在飞轮无详情——诚实缺席）
+            self.assertEqual(app._cockpit_run_records, [])
+            app._cockpit_wake.set()
+            await _drive_to_between_runs(pilot, app)
+            self.assertEqual(len(app._cockpit_run_records), 1)
+            self.assertEqual(
+                app._cockpit_run_records[0].status, "COMPLETED")
+
+    async def test_new_clears_both_mirrors_together(self):
+        start = _StartRecorder([
+            _conversation_double("reset record", ["COMPLETED"])])
+        app = self._app(start)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await _start_first_run(pilot, app, "reset", start)
+            await _drive_to_between_runs(pilot, app)
+            self.assertEqual(len(app._cockpit_run_records), 1)
+            for character in "/new":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_runs, [])
+            self.assertEqual(app._cockpit_run_records, [])
+
+    async def test_second_run_appends_second_record(self):
+        start = _StartRecorder([
+            _conversation_double("first record", ["COMPLETED"]),
+            _conversation_double("second record", ["FAILED"])])
+        app = self._app(start)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await _start_first_run(pilot, app, "one", start)
+            await _drive_to_between_runs(pilot, app)
+            for character in "two":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await _await_condition(
+                pilot, app, lambda: len(start.calls) == 2)
+            await _drive_to_between_runs(pilot, app)
+            self.assertEqual(len(app._cockpit_runs), 2)
+            self.assertEqual(len(app._cockpit_run_records), 2)
+            self.assertEqual(
+                [record.task for record in app._cockpit_run_records],
+                ["first record", "second record"])
+            self.assertEqual(
+                [record.status
+                 for record in app._cockpit_run_records],
+                ["COMPLETED", "FAILED"])
+            self.assertNotEqual(app._cockpit_run_records[0].task_id,
+                                app._cockpit_run_records[1].task_id)
+
+    async def test_no_builder_means_no_collection(self):
+        # 缺省路径（record_builder=None）：零收录、既有行为不受影响
+        start = _StartRecorder([
+            _conversation_double("legacy task", ["COMPLETED"])])
+        app = cockpit_tui.CockpitApp(
+            composition_preview=lambda: _funnel_composition(),
+            start_composition=start)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await _start_first_run(pilot, app, "legacy", start)
+            await _drive_to_between_runs(pilot, app)
+            self.assertEqual(app._cockpit_run_records, [])
+            self.assertEqual(len(app._cockpit_runs), 1)
+
+
+class RunsDetailPilotTests(unittest.IsolatedAsyncioTestCase):
+    """/runs 详情块：additive（摘要行逐字节兼容）+ 详情渲染 +
+    在飞轮无详情块 + zh/窄宽形态。"""
+
+    async def _run_to_between_runs(self, pilot, app, start, text):
+        await _start_first_run(pilot, app, text, start)
+        await _drive_to_between_runs(pilot, app)
+
+    async def test_runs_appends_detail_block_after_summary(self):
+        from cockpit_projection import runs_summary_lines
+        composed = _conversation_double("detail pilot", ["COMPLETED"])
+        composed.groups = ()
+        start = _StartRecorder([composed])
+        app = cockpit_tui.CockpitApp(
+            composition_preview=lambda: _funnel_composition(),
+            start_composition=start,
+            record_builder=cockpit_entry.conversation_record)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._run_to_between_runs(pilot, app, start, "dp")
+            for character in "/runs":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await pilot.pause()
+            lines = app.log_text.splitlines()
+            # 摘要行集逐字节 = runs_summary_lines（additive 证明）
+            expected = runs_summary_lines(
+                app._cockpit_runs, width=app.size.width or 100,
+                locale=app._cockpit_locale,
+                ascii_only=app._cockpit_ascii)
+            for line in expected:
+                self.assertIn(line, lines)
+            # 详情块在场（分节线 + 标签行）
+            self.assertIn("── run 1 · detail ──", lines)
+            self.assertTrue(any(
+                line.startswith("  task") and "detail pilot" in line
+                for line in lines))
+            self.assertTrue(any(
+                line.startswith("  outcome") and "COMPLETED" in line
+                for line in lines))
+            # 摘要先于详情（块序：runs → run 1 · … → detail）
+            self.assertLess(lines.index("runs"),
+                            lines.index("── run 1 · detail ──"))
+
+    async def test_inflight_run_has_no_detail_block(self):
+        second_gate = threading.Event()
+        start = _StartRecorder([
+            _conversation_double("first inflight", ["COMPLETED"]),
+            _conversation_double("second inflight", ["FAILED"],
+                                 gate=second_gate)])
+        app = cockpit_tui.CockpitApp(
+            composition_preview=lambda: _funnel_composition(),
+            start_composition=start,
+            record_builder=cockpit_entry.conversation_record)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await self._run_to_between_runs(pilot, app, start, "one")
+            for character in "two":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await _await_condition(
+                pilot, app, lambda: len(start.calls) == 2)
+            # RUNNING 中 /runs：run 2 只有摘要行（RUNNING 词），
+            # 无第二块详情（在飞 final/usage 未定，绝不预呈）
+            for character in "/runs":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await pilot.pause()
+            lines = app.log_text.splitlines()
+            self.assertTrue(any(
+                "run 2 · RUNNING · " in line for line in lines))
+            self.assertEqual(lines.count("── run 1 · detail ──"), 1)
+            self.assertFalse(any(
+                "── run 2 · detail ──" in line for line in lines))
+            second_gate.set()
+
+    async def test_runs_detail_zh_and_narrow(self):
+        composed = _conversation_double("zh 详情轮次", ["COMPLETED"])
+        start = _StartRecorder([composed])
+        app = cockpit_tui.CockpitApp(
+            composition_preview=lambda: _funnel_composition(),
+            start_composition=start,
+            record_builder=cockpit_entry.conversation_record)
+        async with app.run_test(size=(48, 30)) as pilot:
+            await pilot.pause()
+            # 漏斗域 l 是文本（R2 切换仅主屏/COMPOSE 裸键）——locale
+            # 为本测试的呈现参数，直接置位（R2 键律已有专属测试面）
+            app._cockpit_locale = "zh"
+            await self._run_to_between_runs(pilot, app, start, "zh")
+            for character in "/runs":
+                await pilot.press(character)
+            await pilot.press("enter")
+            await pilot.pause()
+            lines = app.log_text.splitlines()
+            self.assertIn("── 第 1 轮 · 详情 ──", lines)
+            from cockpit_projection import display_width
+            for line in lines:
+                self.assertLessEqual(display_width(line), 48)
+
+
 if __name__ == "__main__":
     unittest.main()
