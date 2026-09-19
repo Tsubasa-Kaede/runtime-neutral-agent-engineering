@@ -4290,5 +4290,580 @@ class GroupSnapshotWiringPilotTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._cockpit_scroll_mode)
 
 
+# ------------------------------------------------ 2.8-D agent detail（L2b/L3）
+
+
+class L2bSidePanelPilotTests(unittest.IsolatedAsyncioTestCase):
+    """2.8-D S1：L2b 右侧 detail 侧栏——d 裸键（≥140 ∧ 组合在场门）、
+    宽度三档（<140 禁 / 140-159 与 context 互斥 / ≥160 并列）、内容 =
+    同一 agent_detail_window 直调 width=32（内容等价断言）、侧栏 ON
+    内联隐藏 / OFF 恢复、归零点（/new、轮间）、D-3 供给、缺省路径
+    零变化。全部纯呈现：零 dispatch、零事实写回。"""
+
+    async def test_d_types_text_below_140(self):
+        # 139 列：门不开 = d 文本本体（既有语义逐字保持）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(139, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_show_detail_panel)
+            self.assertFalse(app.query_one("#detail-panel").display)
+            self.assertEqual(app._composer_text(), "d")
+            gate.release.set()
+
+    async def test_d_toggles_panel_at_140(self):
+        # 140 档：侧栏开 + context 互斥隐 + 内联隐藏（Q-1）；再按恢复
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertTrue(app.query_one("#detail-zone").display)
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            self.assertTrue(app.query_one("#detail-panel").display)
+            self.assertIn("ARCHITECT", app.detail_panel_text)
+            # 140-159 档互斥：context 被置离；内联窗隐藏（同一内容
+            # 不双绘）；供给宽度扣 32（140-108）
+            self.assertFalse(app._cockpit_show_context)
+            self.assertFalse(app.query_one("#context-panel").display)
+            self.assertFalse(app.query_one("#detail-zone").display)
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_show_detail_panel)
+            self.assertFalse(app.query_one("#detail-panel").display)
+            self.assertTrue(app.query_one("#detail-zone").display)
+            gate.release.set()
+
+    async def test_d_toggles_panel_at_159(self):
+        # 159 档与 140 同律（互斥带上边界）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(159, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            self.assertTrue(app.query_one("#detail-panel").display)
+            self.assertFalse(app.query_one("#context-panel").display)
+            self.assertFalse(app.query_one("#detail-zone").display)
+            gate.release.set()
+
+    async def test_parallel_panels_at_160(self):
+        # ≥160 档：context 与 detail 并列（互斥不触发、context 不被
+        # 置离）；D-3 在 [160,171) 不扣（冻结 context 门保护）→
+        # supply 160 → context 内容存活
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            self.assertTrue(app._cockpit_show_context)
+            self.assertTrue(app.query_one("#detail-panel").display)
+            self.assertTrue(app.query_one("#context-panel").display)
+            self.assertFalse(app.query_one("#detail-zone").display)
+            self.assertEqual(app._collect_inputs().width, 160)
+            gate.release.set()
+
+    async def test_d_noop_without_expanded(self):
+        # 无展开焦点 = no-op 消费（键不落缓冲、开关零动）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertIsNone(app._cockpit_expanded_stage)
+            self.assertFalse(app._cockpit_show_detail_panel)
+            self.assertFalse(app.query_one("#detail-panel").display)
+            self.assertEqual(app._composer_text(), "")
+            gate.release.set()
+
+    async def test_panel_follows_expanded_focus(self):
+        # 侧栏焦点跟随 expanded：收起展开 → 侧栏诚实隐（开关仍开）；
+        # 重展开 → 侧栏复现（焦点 = _cockpit_expanded_stage 唯一律）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app.query_one("#detail-panel").display)
+            await pilot.press("space")           # 收起展开
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            self.assertFalse(app.query_one("#detail-panel").display)
+            self.assertEqual(app.detail_panel_text, "")
+            await pilot.press("space")           # 重展开
+            await pilot.pause()
+            self.assertTrue(app.query_one("#detail-panel").display)
+            gate.release.set()
+
+    async def test_context_reenable_hides_detail_at_150(self):
+        # c 互斥反向：140-159 档开 context 自动隐 detail
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_context)
+            self.assertFalse(app._cockpit_show_detail_panel)
+            self.assertTrue(app.query_one("#context-panel").display)
+            self.assertFalse(app.query_one("#detail-panel").display)
+            gate.release.set()
+
+    async def test_panel_content_equals_agent_detail_window(self):
+        # 内容等价证明：侧栏行集 == agent_detail_window(width=32,
+        # max_lines=10) 直调（同 slots/events/stage/lifecycle/last_
+        # outcome/ascii/locale——呈现面倍增、计算面零新逻辑）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            values = app._collect_inputs()
+            lifecycle = cockpit_projection.derive_lifecycle(
+                values.terminal, values.run_state, values.events,
+                values.facts)
+            expected = "\n".join(cockpit_projection.agent_detail_window(
+                values.slots, values.events,
+                stage="step-0-architect", lifecycle=lifecycle,
+                last_outcome=values.last_outcome, width=32,
+                ascii_only=app._cockpit_ascii, max_lines=10,
+                locale=app._cockpit_locale))
+            self.assertEqual(app.detail_panel_text, expected)
+            # 有界窗契约：≤10 行
+            self.assertLessEqual(
+                len(app.detail_panel_text.split("\n")), 10)
+            gate.release.set()
+
+    async def test_panel_lines_fit_32_columns_cjk(self):
+        # zh locale（CJK 标签列）下逐行 display_width ≤ 32；
+        # ascii_only=True 形态同律（_to_ascii 后仍 ≤32）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("L")
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_locale, "zh")
+            lines = app.detail_panel_text.split("\n")
+            self.assertTrue(lines)
+            for line in lines:
+                self.assertLessEqual(
+                    cockpit_projection.display_width(line), 32,
+                    msg=repr(line))
+            values = app._collect_inputs()
+            lifecycle = cockpit_projection.derive_lifecycle(
+                values.terminal, values.run_state, values.events,
+                values.facts)
+            ascii_lines = cockpit_projection.agent_detail_window(
+                values.slots, values.events,
+                stage="step-0-architect", lifecycle=lifecycle,
+                last_outcome=values.last_outcome, width=32,
+                ascii_only=True, max_lines=10, locale="zh")
+            for line in ascii_lines:
+                self.assertLessEqual(
+                    cockpit_projection.display_width(line), 32)
+            gate.release.set()
+
+    async def test_panel_reset_on_new_session_clear(self):
+        # /new 兑现归零（会话呈现遗忘——开关与 scroll_mode 同批）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            app._new_session_clear()
+            self.assertFalse(app._cockpit_show_detail_panel)
+            gate.release.set()
+
+    async def test_panel_reset_between_runs(self):
+        # 终态轮间归零（run 终态呈现归零点——下一轮组合可能不同）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_show_detail_panel)
+            app._between_runs_record("COMPLETED")
+            self.assertFalse(app._cockpit_show_detail_panel)
+            gate.release.set()
+
+    async def test_d3_supply_deducted_in_exclusive_band(self):
+        # 140-159 档：侧栏渲染时供给扣 32（140→108、159→127）
+        for width, supply in ((140, 108), (159, 127)):
+            gate = _Gate()
+            app = make_app(driver=gate.driver)
+            async with app.run_test(size=(width, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("space")
+                await pilot.press("d")
+                await pilot.pause()
+                self.assertEqual(app._collect_inputs().width, supply)
+                gate.release.set()
+
+    async def test_d3_supply_parallel_bands(self):
+        # ≥160：[160,171) 不扣（context 门保护——登记限制承袭溢出）；
+        # ≥172 扣 32 后仍 ≥140（context 内容存活、供给诚实）
+        for width, supply in ((160, 160), (170, 170), (172, 140),
+                              (200, 168)):
+            gate = _Gate()
+            app = make_app(driver=gate.driver)
+            async with app.run_test(size=(width, 40)) as pilot:
+                await pilot.pause()
+                await pilot.press("space")
+                await pilot.press("d")
+                await pilot.pause()
+                self.assertEqual(app._collect_inputs().width, supply)
+                gate.release.set()
+
+    async def test_double_off_width_supply_parity(self):
+        # 双侧关闭（缺省/仅展开不开侧栏）= 既有宽度行为保持不变：
+        # 供给恒 = size.width（不扣任何 dock——含 context 28 先例）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            self.assertEqual(app._collect_inputs().width, 150)
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(app._collect_inputs().width, 150)
+            self.assertFalse(app.query_one("#detail-panel").display)
+            gate.release.set()
+
+    async def test_hint_shows_detail_word_at_140(self):
+        # dock 提示行：≥140 增 Detail 词（与 Context 同位惯例）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            self.assertIn("[D]etail", app._dock_controls_line())
+            self.assertIn("[C]ontext", app._dock_controls_line())
+            gate.release.set()
+
+    async def test_hint_no_detail_word_below_140(self):
+        # <140：d 是文本本体——提示行不出 Detail 词
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(139, 40)) as pilot:
+            await pilot.pause()
+            self.assertNotIn("[D]etail", app._dock_controls_line())
+            gate.release.set()
+
+    async def test_default_path_unchanged(self):
+        # 缺省路径（不按 d）：侧栏恒隐、context 缺省在（≥140）、
+        # 内联展开行为与基线一致（既有 R1 契约面零变化）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await pilot.pause()
+            self.assertEqual(app.detail_panel_text, "")
+            self.assertFalse(app.query_one("#detail-panel").display)
+            self.assertTrue(app._cockpit_show_context)
+            self.assertTrue(app.query_one("#context-panel").display)
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertIn("▼ ARCHITECT", app.detail_text)
+            self.assertTrue(app.query_one("#detail-zone").display)
+            gate.release.set()
+
+
+class L3TraceFocusParityTests(unittest.IsolatedAsyncioTestCase):
+    """2.8-D S2 第一测试（授权令：parity 成立后才能加非 None 行为）：
+    TraceScreen(initial_agents_stage=None) 与既有 TraceScreen() 逐
+    字节 parity——四 tab 文本/状态行/默认 tab/零标记。"""
+
+    async def test_none_param_parity_golden(self):
+        gate = _Gate()
+        plain = make_app(driver=gate.driver)
+        async with plain.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            plain.push_screen(cockpit_tui.TraceScreen())
+            await pilot.pause()
+            a = plain.screen
+            for _ in range(200):
+                if a.agents_text:
+                    break
+                await pilot.pause()
+            golden = (a.observation_text, a.ctrl_text, a.usage_text,
+                      a.agents_text, a.trace_status_text)
+            self.assertEqual(
+                a.query_one("#trace-tabs").active, "tab-obs")
+            self.assertNotIn("▶", a.agents_text)
+            gate.release.set()
+        gate2 = _Gate()
+        explicit = make_app(driver=gate2.driver)
+        async with explicit.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            explicit.push_screen(cockpit_tui.TraceScreen(
+                initial_agents_stage=None))
+            await pilot.pause()
+            b = explicit.screen
+            for _ in range(200):
+                if b.agents_text:
+                    break
+                await pilot.pause()
+            self.assertEqual(
+                golden,
+                (b.observation_text, b.ctrl_text, b.usage_text,
+                 b.agents_text, b.trace_status_text))
+            self.assertEqual(
+                b.query_one("#trace-tabs").active, "tab-obs")
+            self.assertNotIn("▶", b.agents_text)
+            gate2.release.set()
+
+
+class L3TraceFocusEntryTests(unittest.IsolatedAsyncioTestCase):
+    """2.8-D S2：L3 入口与定位——x/enter 双职（Q-3：选中格即展开格
+    才导航，否则既有语义逐字保持）、▶ 标记、AGENTS tab 激活、尽力
+    滚动、escape pop 状态零变、Trace 既有键/冒泡回归、8 组合矩阵。"""
+
+    def _pushed(self, app):
+        return isinstance(app.screen, cockpit_tui.TraceScreen)
+
+    async def test_x_pushes_trace_with_focus(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            screen = app.screen
+            self.assertEqual(
+                screen.query_one("#trace-tabs").active, "tab-agents")
+            self.assertIn("▶ ARCHITECT", screen.agents_text)
+            self.assertNotIn("▶ CODER", screen.agents_text)
+            self.assertEqual(screen._trace_agents_focus,
+                             "step-0-architect")
+            gate.release.set()
+
+    async def test_enter_pushes_trace_with_focus(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            self.assertEqual(app.screen._trace_agents_focus,
+                             "step-0-architect")
+            self.assertIn("▶ ARCHITECT", app.screen.agents_text)
+            gate.release.set()
+
+    async def test_enter_without_expanded_keeps_submit(self):
+        # 无展开：Enter 保持既有空提交 no-op（不导航）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertFalse(self._pushed(app))
+            self.assertIsNone(app._cockpit_expanded_stage)
+            gate.release.set()
+
+    async def test_moved_selection_disarms_navigation(self):
+        # 展开存在但选中已移走（selected ≠ expanded）→ 候选 None：
+        # enter = 空提交 no-op；x = 文本本体
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_expanded_stage,
+                             "step-0-architect")
+            self.assertEqual(app._cockpit_selected_index, 1)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertFalse(self._pushed(app))
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertFalse(self._pushed(app))
+            self.assertEqual(app._composer_text(), "x")
+            gate.release.set()
+
+    async def test_x_without_expanded_types_x(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertFalse(self._pushed(app))
+            self.assertEqual(app._composer_text(), "x")
+            gate.release.set()
+
+    async def test_focus_on_second_member(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("right")
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_expanded_stage, "step-1-coder")
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            self.assertIn("▶ CODER", app.screen.agents_text)
+            self.assertNotIn("▶ ARCHITECT", app.screen.agents_text)
+            gate.release.set()
+
+    async def test_escape_pops_back_state_unchanged(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(self._pushed(app))
+            # 主屏呈现态零变（导航纯观察）
+            self.assertEqual(app._cockpit_expanded_stage,
+                             "step-0-architect")
+            self.assertEqual(app._cockpit_selected_index, 0)
+            gate.release.set()
+
+    async def test_scroll_best_effort_with_marker_fallback(self):
+        # 4 成员（28 行）超 24 行视口：焦点第 4 员（行 21）→ 滚动
+        # 离开顶部（尽力；夹取合法）；▶ 标记恒在场（降级兜底）
+        plan = tuple(
+            (f"step-{i}-{role}", role, f"rt-{i}", f"prov-{i}")
+            for i, role in enumerate(
+                ("architect", "coder", "reviewer", "tester")))
+        gate = _Gate()
+        app = make_app(driver=gate.driver, plan=plan)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("right")
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_expanded_stage,
+                             "step-3-tester")
+            await pilot.press("x")
+            for _ in range(20):
+                await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            screen = app.screen
+            self.assertIn("▶ TESTER", screen.agents_text)
+            scroll = screen.query_one("#scroll-agents")
+            self.assertGreater(float(scroll.scroll_y), 0.0)
+            self.assertLessEqual(float(scroll.scroll_y), 21.0)
+            gate.release.set()
+
+    async def test_trace_x_regression_inside_screen(self):
+        # Trace 在顶：x = 既有全局展开 toggle（BINDINGS 优先），
+        # 绝不二次 push / 不落 composer
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            before = app.screen._trace_expanded
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertTrue(self._pushed(app))
+            self.assertNotEqual(app.screen._trace_expanded, before)
+            self.assertEqual(app._composer_text(), "")
+            gate.release.set()
+
+    async def test_bubbling_regression_inside_trace(self):
+        # 冒泡契约照旧：c 触发 context toggle；l 被排除（locale 零变）
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 36)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("x")
+            await pilot.pause()
+            context_before = app._cockpit_show_context
+            locale_before = app._cockpit_locale
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertNotEqual(app._cockpit_show_context,
+                                context_before)
+            await pilot.press("l")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_locale, locale_before)
+            gate.release.set()
+
+    async def test_entry_matrix_eight_combinations(self):
+        # Q-3 8 组合矩阵（buffer 空/非空 × plan 在场/缺席 × 焦点
+        # 命中/缺席 × enter/x）：仅"空 ∧ plan ∧ 命中"导航，其余
+        # 保持既有语义（提交/文本）
+        cases = (
+            # (buffer_prefix, plan_override, expand, key, expect_push)
+            ("", None, True, "enter", True),
+            ("", None, True, "x", True),
+            ("", None, False, "enter", False),
+            ("", None, False, "x", False),
+            ("", (), False, "enter", False),
+            ("", (), False, "x", False),
+            ("hello", None, True, "enter", False),
+            ("hello", None, True, "x", False),
+        )
+        for buffer_prefix, plan_override, expand, key, expect in cases:
+            with self.subTest(buffer=buffer_prefix or "<empty>",
+                              plan=bool(plan_override is None),
+                              expand=expand, key=key):
+                gate = _Gate()
+                kwargs = {"driver": gate.driver}
+                if plan_override is not None:
+                    kwargs["plan"] = plan_override
+                app = make_app(**kwargs)
+                async with app.run_test(size=(100, 36)) as pilot:
+                    await pilot.pause()
+                    if expand:
+                        await pilot.press("space")
+                        await pilot.pause()
+                    if buffer_prefix:
+                        for ch in buffer_prefix:
+                            await pilot.press(ch)
+                        await pilot.pause()
+                    await pilot.press(key)
+                    await pilot.pause()
+                    self.assertEqual(self._pushed(app), expect)
+                    gate.release.set()
+
+
 if __name__ == "__main__":
     unittest.main()

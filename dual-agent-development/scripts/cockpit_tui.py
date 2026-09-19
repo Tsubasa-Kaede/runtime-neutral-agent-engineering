@@ -57,6 +57,7 @@ from cockpit_projection import (
     AgentSlotView,
     ProjectionInputs,
     agent_detail,
+    agent_detail_window,
     apply_budget_narrowing,
     build_projection,
     COMPOSITION_ROLES,
@@ -137,7 +138,7 @@ _H_SCROLL_STEP = 8
 _MAIN_ZONE_SELECTORS = (
     "#header-zone", "#task-zone", "#collab-scroll", "#collab-zone",
     "#detail-zone", "#activity-zone", "#result-zone", "#progress-zone",
-    "#collab-log", "#context-panel")
+    "#collab-log", "#context-panel", "#detail-panel")
 
 # UX2-R1：composer 行数上限（内部滚动，绝不外撑破坏布局）与
 # Collaboration Log ring 上限（D 裁决：ring 仅淘汰显示行——有损
@@ -268,6 +269,18 @@ def _build_classes() -> None:
                 await super()._on_key(event)
                 return
             if key == "enter":
+                focus = (None if self.text
+                         else app._trace_focus_candidate())
+                if focus is not None:
+                    # 2.8-D L3（Q-3 双职）：当前选中格即展开格时
+                    # 空缓冲 Enter = Detail→Trace 导航（"于已展开格
+                    # 上再按"）；其余保持既有提交语义（空提交 no-op
+                    # 契约收窄为"无展开焦点时"）
+                    event.prevent_default()
+                    event.stop()
+                    app.push_screen(TraceScreen(
+                        initial_agents_stage=focus))
+                    return
                 event.prevent_default()
                 event.stop()
                 app._composer_submit()
@@ -302,6 +315,29 @@ def _build_classes() -> None:
                 event.prevent_default()
                 event.stop()
                 app._bare_key(key)
+                return
+            if (not self.text and key == "d"
+                    and event.character is not None
+                    and app._cockpit_plan
+                    and (app.size.width or 0) >= 140):
+                # 2.8-D L2b 裸键 d（门与 t/c 同族收紧）：<140 或
+                # 组合缺席 = d 文本本体（既有语义逐字保持）；
+                # ≥140 ∧ 组合在场 = 侧栏 toggle（展开缺席时
+                # no-op 消费——语义归 _bare_key）
+                event.prevent_default()
+                event.stop()
+                app._bare_key("d")
+                return
+            if (not self.text and key == "x"
+                    and event.character is not None
+                    and app._trace_focus_candidate() is not None):
+                # 2.8-D L3：明确导航入口（Q-3 裁决 x = 主入口）——
+                # 选中格已展开时空缓冲 x 改职为 Agent→Trace 导航；
+                # 其余情形 x = 文本本体（既有语义逐字保持）
+                event.prevent_default()
+                event.stop()
+                app.push_screen(TraceScreen(
+                    initial_agents_stage=app._trace_focus_candidate()))
                 return
             if not self.text and key in ("left", "right", "space"):
                 # 空缓冲导航/展开（R1 契约：←/→ 选中、space 展开；
@@ -375,6 +411,7 @@ def _build_classes() -> None:
         #composer {{ height: auto; max-height: {_COMPOSER_MAX_ROWS}; }}
         #collab-log {{ height: 1fr; }}
         #context-panel {{ dock: right; width: 28; display: none; }}
+        #detail-panel {{ dock: right; width: 32; display: none; }}
         #header-zone {{ height: 1; }}
         #detail-zone {{ height: auto; }}
         #activity-zone {{ height: auto; }}
@@ -454,8 +491,17 @@ def _build_classes() -> None:
             self.agent_text = ""
             self.activity_text = ""
             self.detail_text = ""
+            # 2.8-D L2b：侧栏文本镜像（funnel_text 先例——属性镜像
+            # 便于测试断言；内容=agent_detail_window 直调同函数）
+            self.detail_panel_text = ""
             self._cockpit_ascii = _ascii_preferred()
             self._cockpit_show_context = True
+            # 2.8-D L2b 呈现态：右侧 detail 侧栏开关（缺省关——
+            # 缺省路径与基线逐字节一致的钉定前提）。与 show_context
+            # 同类：纯呈现、会话内、绝不入投影真相回写；焦点成员
+            # = _cockpit_expanded_stage（D-1 裁决——侧栏恒"正在
+            # 深化看谁"），展开缺席时侧栏诚实空。
+            self._cockpit_show_detail_panel = False
             # 2.8-B 组呈现态（呈现层私有，绝不入投影真相回写）：
             # scroll_mode = H 显式横滚开关（ERRATA-2 契约——toggle、
             # H 下 ←/→ 仅滚动且 selected_index 冻结、非空缓冲恒文本
@@ -563,6 +609,9 @@ def _build_classes() -> None:
                     show_line_numbers=False)
                 yield Static("", id="dock-controls")
             yield Static("", id="context-panel")
+            # 2.8-D L2b：右侧 detail 侧栏（dock:right 32——与
+            # context panel 同 dock 域兄弟容器；漏斗态随组隐藏）
+            yield Static("", id="detail-panel")
 
         def on_mount(self) -> None:
             if self._cockpit_composition_preview is not None:
@@ -652,6 +701,21 @@ def _build_classes() -> None:
         def _collect_inputs(self):
             """入口供应的事实源只读快照 → 投影输入（零第二真相）。"""
             width = self.size.width or 100
+            # 2.8-D D-3 宽度供给补偿（方案 A）：detail 侧栏实际
+            # 占据 32 列 dock 时，投影行按剩余宽截断（空间不撒谎）。
+            # 只补 detail 的 32、绝不补 context 的 28（context dock
+            # 溢出为 2.8-A 起登记的既有特征，本阶段不改）。扣除仅
+            # 两情形：侧栏正在渲染内容（开关 ∧ 展开焦点 ∧ ≥140）
+            # 且 (W<160——彼档 context 已被互斥排除，扣除无冲突；
+            # 或 W−32≥140——≥172 并列档，冻结的 _context_lines
+            # width<140 空门保持存活)。[160,171) 并列档承袭溢出
+            # （扣除会杀 context 内容 = 既有特征优先，登记限制）。
+            # 双侧关闭/缺省 = 零变化（既有宽度行为保持不变的钉定）。
+            if (self._cockpit_show_detail_panel
+                    and self._cockpit_expanded_stage is not None
+                    and width >= 140
+                    and (width < 160 or width - 32 >= 140)):
+                width -= 32
             session = self._cockpit_session
             return ProjectionInputs(
                 task=self._cockpit_task,
@@ -749,6 +813,30 @@ def _build_classes() -> None:
             values.reveal_seqs = fresh
             values.result_reveal = self._cockpit_result_reveal_ticks > 0
             state = build_projection(values)
+            # 2.8-D L2b：右侧 detail 侧栏行集——同一 agent_detail_
+            # window、同参（slots/events/stage/lifecycle/last_
+            # outcome/ascii/locale/max_lines 表达式与 build_projection
+            # 内联窗逐字同构）仅 width=32：呈现面倍增、计算面零新
+            # 逻辑。A4 预算前取值——侧栏不参与主内容列高度预算
+            # （_apply_content_budget 可能改写 values.detail_max_lines
+            # 收窄内联窗，侧栏须与基线 max_lines=10 等价）。焦点
+            # 缺席/宽度不足/开关关闭 = 诚实空（D-1/D-2 门同源）。
+            panel_detail_show = (
+                self._cockpit_show_detail_panel
+                and self._cockpit_expanded_stage is not None
+                and self.size.width >= 140)
+            if panel_detail_show:
+                self.detail_panel_text = "\n".join(agent_detail_window(
+                    values.slots, values.events,
+                    stage=self._cockpit_expanded_stage,
+                    lifecycle=lifecycle,
+                    last_outcome=values.last_outcome,
+                    width=32, ascii_only=self._cockpit_ascii,
+                    max_lines=(10 if values.detail_max_lines is None
+                               else values.detail_max_lines),
+                    locale=self._cockpit_locale))
+            else:
+                self.detail_panel_text = ""
             # CU-TUI-INPUT A4：内容高度预算——Σ可见区行数必须服从
             # dock 保留高度；超出时按让位次序收窄/隐藏（纯呈现，
             # 可能经呈现参数第二遍重建——其余字段逐字节不变）。
@@ -770,12 +858,15 @@ def _build_classes() -> None:
             self.agent_text = "\n".join(state.collaboration_lines)
             self._zone_update("#collab-zone", self.agent_text)
             # R1 Detail 有界窗：管线正下方；身份消失/未展开 = 诚实空；
-            # 高度预算与活动尾窗同门规（<24 隐藏，Trace 仍是全量出口）
+            # 高度预算与活动尾窗同门规（<24 隐藏，Trace 仍是全量出口）；
+            # 2.8-D L2b（Q-1）：侧栏在场时内联窗隐藏——同一内容
+            # 不双绘（侧栏 OFF 即恢复，缺省路径零变化）
             self.detail_text = "\n".join(state.detail_lines)
             detail = self.query_one("#detail-zone")
             self._zone_update("#detail-zone", self.detail_text)
             detail.display = bool(self.detail_text) \
-                and self.size.height >= 24 and detail_fits
+                and self.size.height >= 24 and detail_fits \
+                and not panel_detail_show
             self.activity_text = "\n".join(state.activity_lines)
             activity = self.query_one("#activity-zone")
             self._zone_update("#activity-zone", self.activity_text)
@@ -801,12 +892,30 @@ def _build_classes() -> None:
             self._refresh_dock()
             panel = self.query_one("#context-panel")
             wide = self.size.width >= 140
-            if state.context_lines and wide and self._cockpit_show_context:
+            # 2.8-D L2b：140-159 档 context/detail 二选一——toggle
+            # 时已互斥置位，此处 render 兜底只防 resize 跨档残留
+            # （双侧同求 ∧ <160 → detail 优先置离 context）
+            panel_context_show = bool(
+                state.context_lines and wide
+                and self._cockpit_show_context)
+            if panel_detail_show and panel_context_show \
+                    and self.size.width < 160:
+                panel_context_show = False
+            if panel_context_show:
                 self._zone_update("#context-panel",
                                   "\n".join(state.context_lines))
                 panel.display = True
             else:
                 panel.display = False
+            # 2.8-D L2b：右侧 detail 侧栏（dock:right 32；宽度门
+            # ≥140 + 焦点在场；内容已在上文 A4 预算前算得）
+            detail_panel = self.query_one("#detail-panel")
+            if panel_detail_show:
+                self._zone_update("#detail-panel",
+                                  self.detail_panel_text)
+                detail_panel.display = True
+            else:
+                detail_panel.display = False
             # 2.8-A 轮间换屏（延迟至此：上面各 zone 的 display 赋值
             # 已全部落地，隐藏不再被回卷）
             if self._cockpit_funnel_reentry_pending:
@@ -951,6 +1060,8 @@ def _build_classes() -> None:
                         f"{verb('Quit')} {word('→')} {target}")
             if self.size.width >= 140:
                 line += f" {verb('Context')}"
+                # 2.8-D L2b：<140 时 d 为文本本体（门不在此档开）
+                line += f" {verb('Detail')}"
             return line
 
         def _dock_receipt_line(self) -> str:
@@ -1099,6 +1210,11 @@ def _build_classes() -> None:
                 self._refresh(advance_tick=False)
             elif name == "context":
                 self._cockpit_show_context = not self._cockpit_show_context
+                # 2.8-D L2b（Q-2）：/context 与 c 裸键同律——
+                # 140-159 档开 context 自动隐 detail
+                if (self._cockpit_show_context
+                        and (self.size.width or 0) < 160):
+                    self._cockpit_show_detail_panel = False
                 self._refresh()
             elif name == "clear":
                 # Log 是有损派生缓存（D 裁决）：清显示不触碰事实源；
@@ -1167,8 +1283,10 @@ def _build_classes() -> None:
             self._cockpit_runs = []
             self._cockpit_last_task = ""
             # 2.8-B：组快照缓存与横滚态一并归零（纯呈现遗忘——
-            # 事实源零触碰同律）
+            # 事实源零触碰同律）；2.8-D：detail 侧栏开关一并归零
+            # （/new = 新会话呈现，侧栏缺省关闭）
             self._cockpit_scroll_mode = False
+            self._cockpit_show_detail_panel = False
             self._cockpit_groups = ()
             self._cockpit_member_ids = ()
             # 2.8-C：组草稿与 id 计数器一并归零（/new 双清：draft +
@@ -1296,6 +1414,7 @@ def _build_classes() -> None:
             self._cockpit_member_ids = tuple(
                 getattr(composed, "member_ids", ()) or ())
             self._cockpit_scroll_mode = False
+            self._cockpit_show_detail_panel = False
             scroller = self.query("#collab-scroll")
             if scroller:
                 scroller[0].scroll_x = 0
@@ -1340,6 +1459,7 @@ def _build_classes() -> None:
             # 2.8-B：run-local 组快照与横滚态随 run 归零（下一轮
             # 组合可能完全不同——快照真相在下一 Start 时重取）
             self._cockpit_scroll_mode = False
+            self._cockpit_show_detail_panel = False
             self._cockpit_groups = ()
             self._cockpit_member_ids = ()
             # stage 直落 NOT_STARTED（而非 TERMINAL）：漏斗再入的
@@ -1896,6 +2016,20 @@ def _build_classes() -> None:
                     self._bare_key(key)
                 return
 
+        def _trace_focus_candidate(self):
+            """2.8-D L3：Detail→Trace 导航焦点（呈现态派生，零新真
+            相）——当前选中格即展开格（master §14"于已展开格上再按"）
+            时返回该 stage，否则 None。x/enter 双入口同源单条件
+            （Q-3：Enter 双职语义的唯一判据）。"""
+            if (self._cockpit_expanded_stage is None
+                    or not self._cockpit_plan):
+                return None
+            index = min(self._cockpit_selected_index,
+                        len(self._cockpit_plan) - 1)
+            if self._cockpit_plan[index][0] != self._cockpit_expanded_stage:
+                return None
+            return self._cockpit_expanded_stage
+
         def _bare_key(self, key: str) -> None:
             """空缓冲裸键 hidden shortcuts（六键契约降权不降义——
             语义逐字沿用 _command_key 旧分支）。e 不再是命令：
@@ -1918,7 +2052,26 @@ def _build_classes() -> None:
                 self.push_screen(TraceScreen())
             elif key == "c":
                 self._cockpit_show_context = not self._cockpit_show_context
+                # 2.8-D L2b（Q-2）：140-159 档与 detail 侧栏二选一
+                # ——开 context 自动隐 detail（toggle 时互斥置位）
+                if (self._cockpit_show_context
+                        and (self.size.width or 0) < 160):
+                    self._cockpit_show_detail_panel = False
                 self._refresh()
+            elif key == "d":
+                # 2.8-D L2b：右侧 detail 侧栏 toggle（纯呈现开关，
+                # c/H 同构）。展开焦点缺席 = no-op（授权 §八——无
+                # "正在深化看谁"时无可呈现）；140-159 档与 context
+                # 二选一——开启时置离 context（≥160 并列）。
+                # 零推进渲染、零外发、零事实触碰。
+                if self._cockpit_expanded_stage is None:
+                    return
+                self._cockpit_show_detail_panel = (
+                    not self._cockpit_show_detail_panel)
+                if (self._cockpit_show_detail_panel
+                        and (self.size.width or 0) < 160):
+                    self._cockpit_show_context = False
+                self._refresh(advance_tick=False)
             elif key in ("l", "L"):
                 # 零推进渲染（动画 tick/揭示一概不动）、零外发、
                 # 零事实触碰（R2 冻结语义原样）
@@ -2113,6 +2266,20 @@ def _build_classes() -> None:
         _trace_selected_seq = None
         _trace_expanded = False
         _trace_seen_base = None
+        # 2.8-D L3：AGENTS 预选焦点（构造注入呈现参数；None = 与
+        # 既有 TraceScreen() 逐字节 parity——golden 钉定）
+        _trace_agents_focus = None
+
+        def __init__(self, initial_agents_stage=None):
+            """2.8-D L3（Q-4）：initial_agents_stage = 首次进入的
+            presentation focus hint——on_mount 激活 AGENTS tab、
+            尽力滚动定位、AGENTS 渲染加 ▶ 标记。None（缺省）= 与
+            既有 TraceScreen() 完全 parity（默认 OBS tab、零标记、
+            零滚动）。hint 仅首次进入消费（滚动一次性）；标记随屏
+            存续但绝不升级为 domain truth——选择/跟随/展开等交互
+            态零改；定位失败可靠降级 = 仅标记不滚动。"""
+            super().__init__()
+            self._trace_agents_focus = initial_agents_stage
 
         def compose(self):
             yield Static("", id="trace-status")
@@ -2133,8 +2300,37 @@ def _build_classes() -> None:
 
         def on_mount(self) -> None:
             self._trace_refresh()
+            # 2.8-D L3：focus hint 首次进入消费——激活 AGENTS tab +
+            # 渲染后尽力滚动（follow 检测既有律自愈：定位离开底部
+            # 即自动断跟随，交互态零显式触碰；失败静默降级 = ▶ 标记
+            # 仍在场）。None 路径零涉 = parity。
+            if self._trace_agents_focus is not None:
+                try:
+                    self.query_one("#trace-tabs").active = "tab-agents"
+                except Exception:
+                    pass
+                self.call_after_refresh(self._trace_focus_scroll)
             # live 投影：与主界面同节拍的数据驱动刷新
             self.set_interval(0.5, self._trace_refresh)
+
+        def _trace_focus_scroll(self) -> None:
+            """尽力滚动（Q-4 降级兜底在位）：mount 时 _trace_expanded
+            恒 False → 逐槽恰 7 行，目标行 = 命中槽前全部槽 ×7。
+            任何失败静默（标记降级兜底，绝不影响交互态）。"""
+            try:
+                target = self._trace_agents_focus
+                if target is None:
+                    return
+                values = self.app._collect_inputs()
+                line = 0
+                for slot_view in values.slots:
+                    if slot_view.stage == target:
+                        break
+                    line += 7
+                scroll = self.query_one("#scroll-agents")
+                scroll.scroll_to(y=line, animate=False)
+            except Exception:
+                pass
 
         # ------------------------------------------------ 投影刷新
 
@@ -2187,10 +2383,22 @@ def _build_classes() -> None:
                 trace_usage_lines(values.usage_records,
                                   ascii_only=values.ascii_only))
             self._update_static("#trace-usage", self.usage_text)
-            self.agents_text = "\n".join(agent_detail(
-                values.slots, values.events, values.usage_records,
-                values.last_outcome, expanded=self._trace_expanded,
-                width=values.width, ascii_only=values.ascii_only))
+            # 2.8-D L3：AGENTS 平铺 = 逐槽 agent_detail 串联（每槽
+            # 恰 7 行——agent_detail 内部即逐槽循环 extend，逐槽调用
+            # 串联与单调用逐字节同构，None parity 由 golden 钉定）；
+            # focus 在场时该槽 role 头行加 ▶ 前缀（TUI 侧后处理，
+            # projection 零改；▸ 先例——trace 标记不随 ascii 转换）
+            blocks = []
+            for slot_view in values.slots:
+                block = agent_detail(
+                    (slot_view,), values.events, values.usage_records,
+                    values.last_outcome, expanded=self._trace_expanded,
+                    width=values.width, ascii_only=values.ascii_only)
+                if (self._trace_agents_focus is not None
+                        and slot_view.stage == self._trace_agents_focus):
+                    block = ("▶ " + block[0],) + block[1:]
+                blocks.extend(block)
+            self.agents_text = "\n".join(blocks)
             self._update_static("#trace-agents", self.agents_text)
             # 钉住状态行（§二十）：跟随中空行；钉住时呈现新事件计数
             # （follow/seen_base 均为呈现态，绝非事实）
