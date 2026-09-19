@@ -295,7 +295,8 @@ class ProjectionInputs:
                  "version", "width", "ascii_only",
                  "pulse", "reveal_seqs", "result_reveal",
                  "selected_index", "expanded_stage", "locale",
-                 "detail_max_lines", "result_max_lines", "include_trace")
+                 "detail_max_lines", "result_max_lines", "include_trace",
+                 "groups", "member_ids", "scroll_mode")
 
     def __init__(self, *, task="", slots=(), events=(), facts=(),
                  usage_records=(), terminal=None, run_state=None,
@@ -304,7 +305,8 @@ class ProjectionInputs:
                  result_reveal=False, selected_index=0,
                  expanded_stage=None, locale="en",
                  detail_max_lines=None, result_max_lines=None,
-                 include_trace=True):
+                 include_trace=True, groups=(), member_ids=(),
+                 scroll_mode=False):
         self.task = task
         self.slots = tuple(slots)
         self.events = tuple(events)
@@ -342,6 +344,15 @@ class ProjectionInputs:
         # trace_obs/trace_ctrl/trace_usage 为 ()——trace 消费方改经
         # trace_*_lines 三函数直取，主屏不显示 trace 故可免算）。
         self.include_trace = include_trace
+        # 2.8-B 纯呈现输入（additive——缺省下全部输出与既有投影
+        # 逐字节一致）：groups/member_ids = run-local 组合快照只读
+        # 供应（真相链 declaration → resolved → run-local snapshot
+        # → 本输入；TUI/投影只读消费、绝不回写）；scroll_mode =
+        # H 显式横滚呈现参数（True = 管线行集豁免宽度截断——
+        # viewport 偏移由 TUI 容器持有，本层零状态零回写）。
+        self.groups = tuple(groups)
+        self.member_ids = tuple(member_ids)
+        self.scroll_mode = bool(scroll_mode)
 
 
 class ProjectedState:
@@ -693,26 +704,99 @@ def _pipeline_marker(index, selected, expanded_stage, slots):
     return None
 
 
+def derive_slot_chains(slots, member_ids, group_specs):
+    """2.8-B 纯派生：声明组 specs + run-local member_ids 快照 →
+    槽位链列表（隐式主链（未分组成员，声明序）先行；声明组按声明
+    序、组内按成员声明位序）。位置对齐律：member_ids 与 slots 同序
+    同长（成员声明序 = steps 序 = plan 序——entry 装配事实）。只读
+    零回写；无法对齐（空 specs / 空 member_ids / 长度不匹配 / 引用
+    未知成员）= 诚实退化为单链——绝不按宽度或事件猜测分组
+    （_chain_groups 纪律保持）。"""
+    specs = tuple(group_specs or ())
+    ids = tuple(member_ids or ())
+    if not specs or not ids or len(ids) != len(slots):
+        return (tuple(slots),), (None,)
+    position = {member_id: index for index, member_id in enumerate(ids)}
+    used = set()
+    declared = []
+    for spec in specs:
+        group_id = getattr(spec, "group_id", None)
+        indexes = []
+        for member_id in getattr(spec, "member_ids", ()):
+            slot_index = position.get(member_id)
+            if (slot_index is not None and slot_index not in used
+                    and slot_index not in indexes):
+                indexes.append(slot_index)
+        used.update(indexes)
+        declared.append((group_id, tuple(sorted(indexes))))
+    chains = []
+    labels = []
+    implicit = tuple(index for index in range(len(slots))
+                     if index not in used)
+    if implicit:
+        chains.append(tuple(slots[index] for index in implicit))
+        labels.append(None)
+    for group_id, indexes in declared:
+        if not indexes:
+            continue
+        chains.append(tuple(slots[index] for index in indexes))
+        labels.append(group_id)
+    if len(chains) == 1 and labels[0] is None:
+        return (tuple(slots),), (None,)
+    return tuple(chains), tuple(labels)
+
+
 def pipeline_lines(slots, events, *, lifecycle="RUNNING", pulse=False,
                    tier="MAIN", width=100, selected_index=0,
-                   expanded_stage=None, groups=None, ascii_only=False,
-                   locale="en"):
-    """协作管线行集（R1 布局宪法：横向=同一协作组内的链相邻关系，
-    纵向=不同协作组）。
+                   expanded_stage=None, groups=None, group_labels=(),
+                   scroll_mode=False, ascii_only=False, locale="en"):
+    """协作管线行集（R1 布局宪法 + 2.8-B 组横排律：横向=同一协作
+    组内的链相邻关系，纵向=不同协作组的显式退让态）。
 
     cell 三行 "marker+符号 ROLE / runtime / 符号 状态词"；同行相邻
     cell 间连接符 ──→=观察到的真实 HANDOFF、┄┄→=计划相邻（§九真值
     契约）；超列换行 ↳ 前缀 = 同组续行（绝非第二组）；选中 cell 带
     ▶/▼ marker 与 ▲ 指针。cols=1（含 DEGRADED）退化为纵向链：块间
-    ↓/┆ 同真值律。逐行按宽度截断（不溢出铁律）。R2：locale 只换
-    状态呈现词——tier/容量/换行/续行/marker/指针列/连接符/分组
-    与语言完全正交。"""
+    ↓/┆ 同真值律。逐行按宽度截断（不溢出铁律；scroll_mode=True =
+    H 显式横滚豁免——行集不截断，viewport 偏移由调用方容器持有）。
+    R2：locale 只换状态呈现词——tier/容量/换行/续行/marker/指针列/
+    连接符/分组与语言完全正交。
+
+    2.8-B 布局律（ERRATA-3 纯宽度算法）：单链恒走既有渲染路径
+    （groups=()/未分组 与既有输出逐字节一致）；多链经带宽算术——
+    band(cols) = Σ 链宽 + 链间连接符列，≤ width → 组间横排；超出
+    则 cols 自协商值递减重算（组内 wrap 收窄，只改变换行绝不丢
+    成员）；cols=1 仍超宽 → 组间显式纵叠（组间空行分界、组内 wrap
+    照旧）。布局判定绝不依组数分支——任何组数一律走同一宽度
+    比较。组标签形态随 tier（宽度派生）：FULL/MAIN_WIDE/DEGRADED
+    组头行 [id]；MAIN 行内标签折叠 "id·ROLE"（标签宽度计入
+    cell_width——诚实宽度算术的一部分）。组 id = 声明事实面绝不
+    翻译。链间连接符 ──→/┄┄→ 锚定前链末 cell 的 head 行，真值
+    谓词与链内同源（connection_observed——跨组同样成立）。"""
     if not slots:
         return ()
     groups = _chain_groups(slots) if groups is None else tuple(groups)
+    labels = (tuple(group_labels) if group_labels
+              else (None,) * len(groups))
     cells = _pipeline_cells(slots, events, lifecycle=lifecycle,
                             pulse=pulse, ascii_only=ascii_only,
                             locale=locale)
+    # 声明索引表：链内成员 → cells/marker 的全局索引（成员声明序，
+    # 与链序解耦——隐式主链先行会重排链序，flat 索引绝不可按链序
+    # 累计位移）。
+    decl_index = {id(slot_view): index
+                  for index, slot_view in enumerate(slots)}
+    # MAIN 行内组标签：声明组首成员 head 折叠（组 id = 事实面）
+    if tier == "MAIN":
+        for chain_index in range(len(groups)):
+            label = labels[chain_index]
+            chain = groups[chain_index]
+            if label is None or not chain:
+                continue
+            cell = cells[decl_index[id(chain[0])]]
+            glyph = cell["head"].split(" ", 1)[0]
+            cell["head"] = (
+                f"{glyph} {label}·{cell['slot'].role.upper()}")
     selected = max(0, min(selected_index, len(cells) - 1))
     tier_caps = {"DEGRADED": 1, "MAIN": 2, "MAIN_WIDE": 3, "FULL": 4}
     cap = tier_caps.get(tier, 2)
@@ -725,63 +809,168 @@ def pipeline_lines(slots, events, *, lifecycle="RUNNING", pulse=False,
     while (cols + 1 <= cap
            and (cols + 1) * (cell_width + 2) + cols * gap <= width):
         cols += 1
+    member_indexes = [[decl_index[id(member)] for member in group]
+                      for group in groups]
+    if len(groups) > 1:
+        # 纯宽度布局律（ERRATA-3）：band 自协商 cols 递减搜索，
+        # 命中即组间横排；cols=1 仍超宽 = 组间显式纵叠（落入下方
+        # 既有分界渲染，cols=协商值——组内 wrap 照旧）。
+        band_cols = None
+        for candidate in range(cols, 0, -1):
+            band = (len(groups) - 1) * gap
+            for chain in groups:
+                placed = min(candidate, len(chain))
+                band += placed * (cell_width + 2) + (placed - 1) * gap
+            if band <= width:
+                band_cols = candidate
+                break
+        if band_cols is not None:
+            return _finish_lines(
+                _compose_band(groups, events, cells, cols=band_cols,
+                              member_indexes=member_indexes,
+                              cell_width=cell_width, gap=gap,
+                              selected=selected,
+                              expanded_stage=expanded_stage,
+                              slots=slots, tier=tier, labels=labels),
+                width=width, ascii_only=ascii_only,
+                scroll_mode=scroll_mode)
     lines = []
-    group_offset = 0               # 组首成员 → cells 全局索引
     for group_index, group in enumerate(groups):
         if group_index:
             lines.append("")         # 组间空行 = 纵向分界
-        members = list(group)
-        if cols == 1:
-            for member_index in range(len(members)):
-                if member_index:
-                    observed = connection_observed(
-                        members[member_index - 1],
-                        members[member_index], events)
-                    lines.append("  " + ("↓" if observed else "┆"))
-                _append_vertical_block(
-                    lines, cells[group_offset + member_index],
-                    flat=group_offset + member_index, selected=selected,
-                    expanded_stage=expanded_stage, slots=slots,
-                    continued=member_index > 0)
-            group_offset += len(members)
-            continue
-        rows = [members[start:start + cols]
-                for start in range(0, len(members), cols)]
-        for row_index, row in enumerate(rows):
-            row_start = row_index * cols
-            row_prefix = "↳ " if row_index else ""
-            heads, runtimes, states = [], [], []
-            pointer_column = None
-            for position in range(len(row)):
-                flat = group_offset + row_start + position
-                marker = _pipeline_marker(
-                    flat, selected, expanded_stage, slots)
-                prefix = f"{marker} " if marker else "  "
-                heads.append(prefix
-                             + _pad_cell(cells[flat]["head"], cell_width))
-                runtimes.append(
-                    "  " + _pad_cell(cells[flat]["runtime"], cell_width))
-                states.append(
-                    "  " + _pad_cell(cells[flat]["state"], cell_width))
-                if flat == selected:
-                    pointer_column = position * (cell_width + 2 + gap)
-                if position + 1 < len(row):
-                    observed = connection_observed(
-                        members[row_start + position],
-                        members[row_start + position + 1], events)
-                    link = "──→" if observed else "┄┄→"
-                    heads.append(f" {link} ")
-                    runtimes.append(" " + " " * 3 + " ")
-                    states.append(" " + " " * 3 + " ")
-            lines.append(row_prefix + "".join(heads))
-            lines.append(row_prefix + "".join(runtimes))
-            lines.append(row_prefix + "".join(states))
-            if pointer_column is not None:
-                lines.append(row_prefix + " " * pointer_column + "▲")
-        group_offset += len(members)
+        block, _anchor = _chain_block_lines(
+            group, events, cells, member_indexes[group_index],
+            selected=selected, expanded_stage=expanded_stage,
+            slots=slots, cols=cols, cell_width=cell_width, gap=gap,
+            label_line=(f"[{labels[group_index]}]"
+                        if labels[group_index] is not None
+                        and tier != "MAIN" else None))
+        lines.extend(block)
+    return _finish_lines(lines, width=width, ascii_only=ascii_only,
+                         scroll_mode=scroll_mode)
+
+
+def _compose_band(groups, events, cells, *, cols, member_indexes,
+                  cell_width, gap, selected, expanded_stage, slots,
+                  tier, labels):
+    """组间横排合成（2.8-B ERRATA-3）：块顶对齐逐行拼接；中间块按
+    块宽右补齐、尾块不补、合成行 rstrip（多链合成面专用——单链恒
+    走既有路径不经此处）。链间连接符列锚定前链末 cell 的 head 行
+    （──→=真实跨组 HANDOFF、┄┄→=计划相邻——connection_observed
+    真值谓词，绝不伪造连接）。组头行统一占据各自块的首行（无组头
+    的块补空行对齐——标签恒在内容上方）。"""
+    label_of = [None if (labels[index] is None or tier == "MAIN")
+                else f"[{labels[index]}]"
+                for index in range(len(groups))]
+    pad_label = any(label is not None for label in label_of)
+    blocks = []
+    for group_index, group in enumerate(groups):
+        block, anchor = _chain_block_lines(
+            group, events, cells, member_indexes[group_index],
+            selected=selected, expanded_stage=expanded_stage,
+            slots=slots, cols=cols, cell_width=cell_width, gap=gap,
+            label_line=label_of[group_index], pad_label=pad_label)
+        blocks.append((block, anchor))
+    block_widths = [
+        max((display_width(line) for line in block), default=0)
+        for block, _anchor in blocks]
+    links = []
+    for index in range(len(groups) - 1):
+        producer = groups[index][-1] if groups[index] else None
+        consumer = groups[index + 1][0] if groups[index + 1] else None
+        links.append("──→" if (
+            producer is not None and consumer is not None
+            and connection_observed(producer, consumer, events))
+            else "┄┄→")
+    row_count = max(len(block) for block, _anchor in blocks)
+    lines = []
+    for row in range(row_count):
+        parts = []
+        for index, (block, anchor) in enumerate(blocks):
+            text = block[row] if row < len(block) else ""
+            part = _pad_cell(text, block_widths[index])
+            if index + 1 < len(blocks):
+                part += (f" {links[index]} " if anchor == row
+                         else " " * gap)
+            parts.append(part)
+        lines.append("".join(parts).rstrip())
+    return lines
+
+
+def _finish_lines(lines, *, width, ascii_only, scroll_mode):
+    """行集出口：ascii 投影恒应用；宽度截断铁律在 scroll_mode=True
+    （H 显式横滚——viewport 由调用方容器持有）时豁免。"""
     if ascii_only:
         lines = [_to_ascii(line) for line in lines]
+    if scroll_mode:
+        return tuple(lines)
     return tuple(truncate_to_width(line, width) for line in lines)
+
+
+def _chain_block_lines(members, events, cells, member_indexes, *,
+                       selected, expanded_stage, slots, cols,
+                       cell_width, gap, label_line, pad_label=False):
+    """单链块渲染（R1 既有算法原样抽取——行序/续行/marker/指针逐字
+    保持；label_line 非空时块首加组头行）。member_indexes = 成员 →
+    cells/marker 的全局声明索引（与链序解耦）。返回 (行列表,
+    anchor)：anchor = 末 cell 所在 head 行的行号（2.8-B 链间连接符
+    锚点；空链 anchor=None）。pad_label=True 且本块无组头行时块首
+    补空行（横排合成下标签统一在内容上方）。"""
+    lines = []
+    if label_line is not None:
+        lines.append(label_line)
+    elif pad_label:
+        lines.append("")
+    anchor = None
+    if cols == 1:
+        for member_index in range(len(members)):
+            if member_index:
+                observed = connection_observed(
+                    members[member_index - 1],
+                    members[member_index], events)
+                lines.append("  " + ("↓" if observed else "┆"))
+            anchor = len(lines)
+            _append_vertical_block(
+                lines, cells[member_indexes[member_index]],
+                flat=member_indexes[member_index], selected=selected,
+                expanded_stage=expanded_stage, slots=slots,
+                continued=member_index > 0)
+        return lines, anchor
+    rows = [members[start:start + cols]
+            for start in range(0, len(members), cols)]
+    for row_index, row in enumerate(rows):
+        row_start = row_index * cols
+        row_prefix = "↳ " if row_index else ""
+        heads, runtimes, states = [], [], []
+        pointer_column = None
+        for position in range(len(row)):
+            flat = member_indexes[row_start + position]
+            marker = _pipeline_marker(
+                flat, selected, expanded_stage, slots)
+            prefix = f"{marker} " if marker else "  "
+            heads.append(prefix
+                         + _pad_cell(cells[flat]["head"], cell_width))
+            runtimes.append(
+                "  " + _pad_cell(cells[flat]["runtime"], cell_width))
+            states.append(
+                "  " + _pad_cell(cells[flat]["state"], cell_width))
+            if flat == selected:
+                pointer_column = position * (cell_width + 2 + gap)
+            if position + 1 < len(row):
+                observed = connection_observed(
+                    members[row_start + position],
+                    members[row_start + position + 1], events)
+                link = "──→" if observed else "┄┄→"
+                heads.append(f" {link} ")
+                runtimes.append(" " + " " * 3 + " ")
+                states.append(" " + " " * 3 + " ")
+        anchor = len(lines)
+        lines.append(row_prefix + "".join(heads))
+        lines.append(row_prefix + "".join(runtimes))
+        lines.append(row_prefix + "".join(states))
+        if pointer_column is not None:
+            lines.append(row_prefix + " " * pointer_column + "▲")
+    return lines, anchor
 
 
 def _append_vertical_block(lines, cell, *, flat, selected,
@@ -912,6 +1101,13 @@ def build_projection(values):
                                  values.events, values.facts)
     glyphs = (_LIFECYCLE_GLYPHS_ASCII if values.ascii_only
               else _LIFECYCLE_GLYPHS)
+    # 2.8-B 组消费：run-local 快照（groups+member_ids）→ 纯派生槽位
+    # 链（隐式主链先行+声明组按声明序）→ pipeline_lines 多链布局
+    # 律；无声明组（specs 空/对齐失败）= groups=None 既有单链路径，
+    # 输出与既有投影逐字节一致。
+    chains, chain_labels = derive_slot_chains(
+        values.slots, values.member_ids, values.groups)
+    grouped = any(label is not None for label in chain_labels)
     state = ProjectedState(
         header_line=_header_line(values, lifecycle),
         task_line=(ui_label("TASK", values.locale) + " "
@@ -924,6 +1120,9 @@ def build_projection(values):
             pulse=values.pulse, tier=tier, width=content_width,
             selected_index=values.selected_index,
             expanded_stage=values.expanded_stage,
+            groups=chains if grouped else None,
+            group_labels=chain_labels if grouped else (),
+            scroll_mode=values.scroll_mode,
             ascii_only=values.ascii_only, locale=values.locale),
         activity_lines=activity_tail_lines(
             values.events, reveal_seqs=values.reveal_seqs,

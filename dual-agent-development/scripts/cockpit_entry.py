@@ -795,6 +795,15 @@ class ComposedRun(NamedTuple):
     # 纯呈现载荷——装配层（ExecutionSlot/plan/RunState/pipeline）
     # 零感知（M0 Group 六不等式）。
     groups: tuple = ()
+    # 2.8-B run-local 成员标识快照：与 groups 同点同法（STEP 7
+    # _replace 注入 live.member_ids；legacy/default 路径不传恒 ()）。
+    # 真相链 = CompositionIntent.members（declaration）→
+    # ResolvedComposition.member_ids（resolved）→ 本快照（run-local
+    # immutable snapshot）→ ProjectionInputs（presentation input）——
+    # 呈现层只读消费、绝不回写声明面。member_ids 与 steps/plan 位置
+    # 对齐（成员声明序 = steps 序 = plan 序，装配事实）是投影层
+    # slot 分区派生的唯一依据。
+    member_ids: tuple = ()
 
 
 def _task_id_mint():
@@ -1213,10 +1222,16 @@ def _user_composition_surface(registry, skipped, evidence, *,
         # STEP 6b 2.8-A 前轮 TERMINAL 补发（恰在 append 前——列表
         # 此刻仅含已完成前轮；单 run 路径列表空 = 零行为差）
         _flush_prior_run_terminals(composed_runs, terminal_emitted)
-        # STEP 7 groups = run-local 呈现元数据（装配零感知，NamedTuple
-        # 官方 _replace 注入；不经 ExecutionSlot/CockpitSession/
-        # RunState/pipeline）
-        composed = composed._replace(groups=live.groups)
+        # STEP 7 groups + member_ids = run-local 呈现快照（装配零感知，
+        # NamedTuple 官方 _replace 注入；不经 ExecutionSlot/
+        # CockpitSession/RunState/pipeline。双字段同一注入点——
+        # 注入原子：经此点两者齐注（member_ids 恒随声明成员、
+        # groups 可为 ()＝未编排组）；default 漏斗与 legacy 直装配
+        # 不经此点、双缺省 ()。投影以 groups 为布局触发，
+        # member_ids 仅作声明位置映射——groups=() 时恒单链，
+        # 与冻结基线逐字节一致。
+        composed = composed._replace(groups=live.groups,
+                                     member_ids=live.member_ids)
         composed_runs.append(composed)
         return composed
 

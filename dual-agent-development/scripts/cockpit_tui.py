@@ -116,16 +116,28 @@ _TARGETS = ("NEXT_INVOCATION", "SUBMISSION")
 # （"quick fix" 的 q、"parse" 的 p 均为文字）。UX2-R2：e 召回最近
 # 提交供改写（REVISION 语义——gate=空缓冲 ∧ 存在历史提交），
 # 不入裸命令键集（无历史提交时 e 是文字本体）。
-_BARE_COMMAND_KEYS = frozenset(("p", "r", "a", "q", "t", "c", "l", "L"))
+_BARE_COMMAND_KEYS = frozenset(("p", "r", "a", "q", "t", "c", "l", "L",
+                                "H"))
+
+# 2.8-B H 显式横滚模式：←/→ 单次滚动的列步长（呈现参数——与
+# tier/截断律完全正交）。
+_H_SCROLL_STEP = 8
 
 # RUNNING 观察区选择器（漏斗态整组隐藏，Start 后整组复现）。
 # CU-TUI-INPUT A1/A2 + UX2-R1：#input-dock（composer）恒在场
 # （漏斗与 RUNNING 同一底部 dock——Start 前后输入位置恒底，绝不
 # 跳变），故不在隐藏组内；#collab-log 属主屏观察区（漏斗态隐藏）。
+# 2.8-B：协作管线迁入 #collab-scroll（HorizontalScroll——H 显式
+# 横滚模式的 viewport 容器；常规态内容已按宽截断恒无溢出 = 零
+# 视觉差）。容器与内层 #collab-zone 成对入组整组隐藏/复现（Static
+# 本体 display 随组翻转——既有测试断言面零迁移）。#collab-zone
+# width:auto = Static 按内容定宽（默认填充容器宽会把超宽行软换行、
+# 溢出永不成立——H 滚动将结构性失效；截断律下常规态内容宽 ≤
+# 容器宽 = 零布局差）。
 _MAIN_ZONE_SELECTORS = (
-    "#header-zone", "#task-zone", "#collab-zone", "#detail-zone",
-    "#activity-zone", "#result-zone", "#progress-zone", "#collab-log",
-    "#context-panel")
+    "#header-zone", "#task-zone", "#collab-scroll", "#collab-zone",
+    "#detail-zone", "#activity-zone", "#result-zone", "#progress-zone",
+    "#collab-log", "#context-panel")
 
 # UX2-R1：composer 行数上限（内部滚动，绝不外撑破坏布局）与
 # Collaboration Log ring 上限（D 裁决：ring 仅淘汰显示行——有损
@@ -196,7 +208,8 @@ def _build_classes() -> None:
 
     from textual.app import App
     from textual.binding import Binding
-    from textual.containers import Container, VerticalScroll
+    from textual.containers import (Container, HorizontalScroll,
+                                    VerticalScroll)
     from textual.screen import Screen
     from textual.widgets import Static, TabbedContent, TabPane, TextArea
     from textual.widgets import RichLog
@@ -366,6 +379,8 @@ def _build_classes() -> None:
         #detail-zone {{ height: auto; }}
         #activity-zone {{ height: auto; }}
         #result-zone {{ height: auto; }}
+        #collab-scroll {{ height: auto; }}
+        #collab-zone {{ width: auto; }}
         """
 
         # tab 是 Screen 默认焦点键会先期消费——priority 绑定改走
@@ -441,6 +456,18 @@ def _build_classes() -> None:
             self.detail_text = ""
             self._cockpit_ascii = _ascii_preferred()
             self._cockpit_show_context = True
+            # 2.8-B 组呈现态（呈现层私有，绝不入投影真相回写）：
+            # scroll_mode = H 显式横滚开关（ERRATA-2 契约——toggle、
+            # H 下 ←/→ 仅滚动且 selected_index 冻结、非空缓冲恒文本
+            # 域；与 selected_index/show_context 三件彼此独立）；
+            # groups/member_ids = run-local 组合快照只读缓存（Start
+            # 成功时自 ComposedRun 鸭取——本层零 entry import，真相
+            # 链 declaration → resolved → run-local snapshot → 本
+            # 缓存 → ProjectionInputs，单向只读）。legacy 直达路径
+            # 无组合快照 = 恒 ()（groups=() 字节等价路径）。
+            self._cockpit_scroll_mode = False
+            self._cockpit_groups = ()
+            self._cockpit_member_ids = ()
             # CU-TUI-5 漏斗面：注入闭包 = 组合真相唯一通道；Start 前
             # _cockpit_composed 恒 None（late-bound，零引擎对象）。
             # timeout 已由入口闭包捕获（真值不在本层），参数仅为
@@ -511,7 +538,10 @@ def _build_classes() -> None:
             yield Static("", id="compose-screen")
             yield Static("", id="header-zone")
             yield Static("", id="task-zone")
-            yield Static("", id="collab-zone")
+            # 2.8-B：管线区入 HorizontalScroll（H 显式横滚 viewport；
+            # 常规态截断行恒不溢出 = 零布局差）
+            with HorizontalScroll(id="collab-scroll"):
+                yield Static("", id="collab-zone")
             yield Static("", id="detail-zone")
             yield Static("", id="activity-zone")
             yield Static("", id="result-zone")
@@ -631,6 +661,11 @@ def _build_classes() -> None:
                               else session.last_outcome),
                 width=width,
                 ascii_only=self._cockpit_ascii,
+                # 2.8-B 组呈现输入：run-local 快照只读缓存 + H 横滚
+                # 呈现参数（投影层纯消费，零回写）
+                groups=self._cockpit_groups,
+                member_ids=self._cockpit_member_ids,
+                scroll_mode=self._cockpit_scroll_mode,
                 # CU-PERF-1 W2：主屏不显示 trace（唯一消费方是
                 # TraceScreen，改经 trace_*_lines 三函数直取）——
                 # 免除每 tick 的全事件格式化白算。
@@ -1123,6 +1158,11 @@ def _build_classes() -> None:
             TraceScreen 全量事实不触碰（真相在引擎，显示史在 UI）。"""
             self._cockpit_runs = []
             self._cockpit_last_task = ""
+            # 2.8-B：组快照缓存与横滚态一并归零（纯呈现遗忘——
+            # 事实源零触碰同律）
+            self._cockpit_scroll_mode = False
+            self._cockpit_groups = ()
+            self._cockpit_member_ids = ()
             self.query_one("#collab-log").clear()
             self._cockpit_log_lines = []
             self.log_text = ""
@@ -1234,6 +1274,17 @@ def _build_classes() -> None:
             self._cockpit_session = composed.session
             self._cockpit_control = composed.dispatch_control
             self._cockpit_revision_pending = composed.revision_pending
+            # 2.8-B run-local 快照只读缓存（getattr 鸭取——本层零
+            # entry import 先例；新 run = 新呈现：横滚开关与 viewport
+            # 偏移一并归零）
+            self._cockpit_groups = tuple(
+                getattr(composed, "groups", ()) or ())
+            self._cockpit_member_ids = tuple(
+                getattr(composed, "member_ids", ()) or ())
+            self._cockpit_scroll_mode = False
+            scroller = self.query("#collab-scroll")
+            if scroller:
+                scroller[0].scroll_x = 0
             # 2.8-A run 镜像收录 + 轮间召回源 + 分节线（run N ≥ 2
             # 启动时入 Log——呈现层纯数据连接线，事实面零触碰）
             self._cockpit_last_task = composed.task
@@ -1272,6 +1323,11 @@ def _build_classes() -> None:
                     status = lifecycle
                 self._cockpit_runs[-1] = (task, steps, status)
             self._cockpit_composed = None
+            # 2.8-B：run-local 组快照与横滚态随 run 归零（下一轮
+            # 组合可能完全不同——快照真相在下一 Start 时重取）
+            self._cockpit_scroll_mode = False
+            self._cockpit_groups = ()
+            self._cockpit_member_ids = ()
             # stage 直落 NOT_STARTED（而非 TERMINAL）：漏斗再入的
             # 输入前相位。mount 清 composer 排队的 Changed 消息可能
             # 在本函数之后才处理——彼时 pre_start 已复真，_funnel_
@@ -1635,12 +1691,29 @@ def _build_classes() -> None:
                 self._cockpit_locale = (
                     "zh" if self._cockpit_locale == "en" else "en")
                 self._refresh(advance_tick=False)
+            elif key == "H":
+                # 2.8-B H 显式横滚模式（ERRATA-2 契约）：仅主屏组合
+                # 在场时 toggle（漏斗前置/COMPOSE 态不可达本分支——
+                # 键各自归文本/选择屏路由 = 诚实 no-op；TraceScreen
+                # 在顶由 App 键路由先行拦截）。零推进渲染、零外发、
+                # 零事实触碰（c 键同构纯呈现开关）。
+                if self._cockpit_plan:
+                    self._cockpit_scroll_mode = (
+                        not self._cockpit_scroll_mode)
+                    self._refresh(advance_tick=False)
 
         def _pipeline_nav_key(self, key: str) -> None:
             """空缓冲导航/展开（R1 契约：←/→ 选中、space 展开；Enter
             已归提交——空提交 no-op 既有语义）。纯呈现态：clamp、
-            空组合 no-op、零外发。"""
+            空组合 no-op、零外发。2.8-B（ERRATA-2）：H 模式下 ←/→
+            唯一语义 = collab-zone 水平滚动（selected_index 冻结——
+            同状态下 navigation 与 scrolling 互斥，本入口分流）；
+            normal 模式 ←/→ 既有语义逐字不变；space 两模式下恒为
+            展开（与滚动无冲突面）。"""
             if not self._cockpit_plan:
+                return
+            if self._cockpit_scroll_mode and key in ("left", "right"):
+                self._scroll_collab_zone(key)
                 return
             if key in ("left", "right"):
                 delta = -1 if key == "left" else 1
@@ -1656,6 +1729,19 @@ def _build_classes() -> None:
                     None if self._cockpit_expanded_stage == stage
                     else stage)
                 self._refresh()
+
+        def _scroll_collab_zone(self, key: str) -> None:
+            """H 模式下 ←/→ 的唯一语义：collab-zone viewport 水平
+            滚动（ERRATA-2 契约第 4/7 点）。滚动偏移由容器持有
+            （App 零镜像）；selected_index 冻结；零外发、零事实
+            触碰——纯呈现态。"""
+            scroller = self.query("#collab-scroll")
+            if not scroller:
+                return
+            delta = (-_H_SCROLL_STEP if key == "left"
+                     else _H_SCROLL_STEP)
+            scroller[0].scroll_x = max(
+                0.0, scroller[0].scroll_x + delta)
 
         # ------------------------------------------------ 键位（状态机）
 

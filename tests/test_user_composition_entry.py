@@ -395,6 +395,10 @@ class GroupPermutationTests(unittest.TestCase):
         self.assertEqual(regrouped.groups,
                          (_group("left", ("m1", "m2")),
                           _group("right", ("m3",))))
+        # 2.8-B：member_ids = 声明成员快照（STEP 7 同点注入），
+        # 组置换不改变它；两条路径（有组/无组）取值相同。
+        self.assertEqual(baseline.member_ids, ("m1", "m2", "m3"))
+        self.assertEqual(regrouped.member_ids, ("m1", "m2", "m3"))
 
 
 # ----------------------------------------------------------------- parity
@@ -435,6 +439,12 @@ class DefaultUserParityTests(unittest.TestCase):
                          default_composed.execution_id)
         self.assertEqual(user_composed.groups, ())   # 17：default=()
         self.assertEqual(default_composed.groups, ())
+        # 2.8-B 双路径快照语义：default 漏斗直装配（不经 STEP 7）
+        # 双缺省 ()；user 路径同点齐注——groups=()（未编排组）但
+        # member_ids 恒随声明成员。
+        self.assertEqual(default_composed.member_ids, ())
+        self.assertEqual(user_composed.member_ids,
+                         tuple(spec.member_id for spec in intent.members))
         # 零 execution：parity 两侧都只装配未驱动
         for adapter in adapters:
             self.assertEqual(adapter.requests, [])
@@ -459,23 +469,34 @@ class ComposedRunGroupsCompatTests(unittest.TestCase):
         composed = cockpit_entry._assemble_execution(
             resolved, "legacy task", steps, None, event_index=EventIndex())
         self.assertEqual(composed.groups, ())
+        self.assertEqual(composed.member_ids, ())
 
     def test_field_order_and_constructor_compatibility(self):
         self.assertEqual(
-            cockpit_entry.ComposedRun._fields[:-1],
+            cockpit_entry.ComposedRun._fields[:-2],
             ("task", "steps", "plan", "task_id", "execution_id",
              "emit", "drive", "session", "dispatch_control",
              "revision_pending", "events", "facts", "usage"))
-        self.assertEqual(cockpit_entry.ComposedRun._fields[-1], "groups")
+        self.assertEqual(cockpit_entry.ComposedRun._fields[-2], "groups")
+        self.assertEqual(cockpit_entry.ComposedRun._fields[-1], "member_ids")
         keyword = cockpit_entry.ComposedRun(
             task="t", steps=(), plan=(), task_id="t", execution_id="e",
             emit=None, drive=None, session=None, dispatch_control=None,
             revision_pending=None, events=None, facts=None, usage=None)
         self.assertEqual(keyword.groups, ())
+        self.assertEqual(keyword.member_ids, ())
         positional = cockpit_entry.ComposedRun(
             "t", (), (), "t", "e", None, None, None, None, None,
             None, None, None)
         self.assertEqual(positional.groups, ())
+        self.assertEqual(positional.member_ids, ())
+        with_ids = cockpit_entry.ComposedRun(
+            task="t", steps=(), plan=(), task_id="t", execution_id="e",
+            emit=None, drive=None, session=None, dispatch_control=None,
+            revision_pending=None, events=None, facts=None, usage=None,
+            member_ids=("m1", "m2"))
+        self.assertEqual(with_ids.member_ids, ("m1", "m2"))
+        self.assertEqual(with_ids.groups, ())
 
 
 # --------------------------------------------------------- import guard

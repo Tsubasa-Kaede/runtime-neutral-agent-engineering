@@ -4101,5 +4101,194 @@ class UX2R3AcceptanceTests(unittest.IsolatedAsyncioTestCase):
             "unknown command · /help lists commands")   # 未知 locale 回退
 
 
+# ------------------- 2.8-B: H 显式横滚模式（ERRATA-2 契约）
+
+
+class HScrollModePilotTests(unittest.IsolatedAsyncioTestCase):
+    """2.8-B H 模式契约：裸键 toggle（再按退出，无自动退出）、H 下
+    ←/→ 唯一语义 = collab viewport 水平滚动（selected_index 冻结、
+    完整行集不截断）、normal ←/→ 逐字不变、composer 非空 H/←/→ 归
+    文本、TraceScreen 在顶 honest no-op、漏斗前置 H = 任务文本、纯
+    呈现态（零外发、零事实触碰、零 RunState 推进）。"""
+
+    async def test_bare_h_toggles_and_second_h_exits(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver,
+                       control=make_control(recorded,
+                                            receipt_result("ACCEPTED")))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            self.assertFalse(app._cockpit_scroll_mode)
+            await pilot.press("H")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_scroll_mode)
+            await pilot.press("H")   # 再按 = toggle 退出（无自动退出）
+            await pilot.pause()
+            self.assertFalse(app._cockpit_scroll_mode)
+            gate.release.set()
+        self.assertEqual(recorded, [])   # 纯呈现开关：零外发
+
+    async def test_h_arrows_scroll_viewport_and_freeze_selection(self):
+        gate = _Gate()
+        long_rt = "runtime-identifier-" + "x" * 61   # 80 列 >> 视口
+        plan = (("step-0-architect", "architect", long_rt, "prov-a"),
+                ("step-1-coder", "coder", long_rt, "prov-b"))
+        app = make_app(driver=gate.driver, plan=plan)
+        async with app.run_test(size=(50, 24)) as pilot:
+            await pilot.pause()
+            scroller = app.query_one("#collab-scroll")
+            # 常规态不溢出铁律：超宽行按视口截断（DEGRADED 纵向块的
+            # runtime 行原样渲染、出口截断——截断豁免的诚实对照面）
+            self.assertNotIn(long_rt, app.agent_text)
+            await pilot.press("H")
+            await pilot.pause()
+            await pilot.pause()
+            # H 豁免：完整行集不截断（viewport 偏移由容器持有）
+            self.assertIn(long_rt, app.agent_text)
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_selected_index, 0)   # 冻结
+            self.assertEqual(scroller.scroll_x,
+                             cockpit_tui._H_SCROLL_STEP)
+            await pilot.press("left")
+            await pilot.pause()
+            self.assertEqual(scroller.scroll_x, 0)             # 回滚
+            self.assertEqual(app._cockpit_selected_index, 0)
+            gate.release.set()
+
+    async def test_normal_mode_arrows_unchanged(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_selected_index, 1)
+            self.assertEqual(app.query_one("#collab-scroll").scroll_x, 0)
+            gate.release.set()
+
+    async def test_composer_text_owns_h_and_arrows(self):
+        gate = _Gate()
+        recorded = []
+        app = make_app(driver=gate.driver,
+                       control=make_control(recorded,
+                                            receipt_result("ACCEPTED")))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("x")   # 先入文本态（裸键仅空缓冲）
+            await pilot.press("H")   # 大写 H 同为文本
+            await pilot.press("left")
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertIn("H", app._composer_text())
+            self.assertFalse(app._cockpit_scroll_mode)   # 未 toggle
+            self.assertEqual(app._cockpit_selected_index, 0)
+            self.assertEqual(app.query_one("#collab-scroll").scroll_x, 0)
+            gate.release.set()
+        self.assertEqual(recorded, [])
+
+    async def test_trace_on_top_h_is_honest_no_op(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("t")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, cockpit_tui.TraceScreen)
+            await pilot.press("H")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_scroll_mode)   # 未 toggle
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, cockpit_tui.TraceScreen)
+            await pilot.press("H")   # 回主屏后可达
+            await pilot.pause()
+            self.assertTrue(app._cockpit_scroll_mode)
+            gate.release.set()
+
+    async def test_funnel_pre_start_h_is_task_text(self):
+        start = _StartRecorder([])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            await pilot.press("H")
+            await pilot.pause()
+            self.assertEqual(app._composer_text(), "H")   # 任务文本
+            self.assertFalse(app._cockpit_scroll_mode)    # 零 toggle
+            self.assertEqual(start.calls, [])
+
+    async def test_h_mode_is_presentation_only(self):
+        gate = _Gate()
+        app = make_app(driver=gate.driver)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            events_before = app._cockpit_events()
+            activity_before = app.last_state.activity_lines
+            await pilot.press("H")
+            await pilot.press("right")
+            await pilot.press("left")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_events(), events_before)
+            self.assertEqual(app.last_state.activity_lines,
+                             activity_before)
+            self.assertIsNone(app._cockpit_session.run_state)
+            gate.release.set()
+
+
+# ------------------- 2.8-B: run-local 组快照接线（缓存/消费/遗忘）
+
+
+class GroupSnapshotWiringPilotTests(unittest.IsolatedAsyncioTestCase):
+    """2.8-B 组快照接线：Start 成功自 ComposedRun 鸭取只读缓存 →
+    ProjectionInputs 消费（横排组呈现）→ 终态轮间遗忘归零（下一轮
+    组合可能完全不同——呈现遗忘，真相在引擎三源）。"""
+
+    async def test_start_success_caches_snapshot_renders_and_clears(self):
+        from composition_core import CollaborationGroupSpec
+        gate = _Gate()
+        composed = composed_run_double(gate=gate)
+        composed.groups = (CollaborationGroupSpec(
+            group_id="alpha", member_ids=("member-1",)),)
+        composed.member_ids = ("member-1", "member-2")
+        start = _StartRecorder([composed])
+        app = make_funnel_app(funnel_composition(), start)
+        async with app.run_test(size=(100, 24)) as pilot:
+            for key in "my task":
+                await pilot.press(key)
+            await pilot.press("enter")
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
+            # 只读缓存 = run-local 快照（getattr 鸭取，零 entry import）
+            self.assertEqual(app._cockpit_groups, composed.groups)
+            self.assertEqual(app._cockpit_member_ids,
+                             ("member-1", "member-2"))
+            # 消费面：MAIN_WIDE 组头形态 [alpha] + 隐式主链先行 + 两链
+            # 同行横排（implicit coder 在前、[alpha] 组头锚定其块首列）
+            self.assertIn("[alpha]", app.agent_text)
+            self.assertTrue(
+                any("CODER" in line and "ARCHITECT" in line
+                    for line in app.agent_text.split("\n")))
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
+            # 引擎真值模拟：run 完成置 session.terminal（真 session
+            # 由引擎置位；双件同形）。终态跃迁后的 _refresh 触发轮间
+            # 遗忘块（interval tick 实时 0.5s——测试内显式推一次，
+            # ChangeDetection 先例同法）
+            composed.session.terminal = RunStatus.COMPLETED
+            await pilot.pause()
+            app._refresh()
+            await pilot.pause()
+            # 终态轮间遗忘：快照与横滚态归零
+            self.assertEqual(app._cockpit_groups, ())
+            self.assertEqual(app._cockpit_member_ids, ())
+            self.assertFalse(app._cockpit_scroll_mode)
+
+
 if __name__ == "__main__":
     unittest.main()

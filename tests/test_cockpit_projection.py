@@ -1736,16 +1736,29 @@ class PipelineLayoutTests(unittest.TestCase):
                 self.assertLessEqual(
                     projection.display_width(line), width, width)
 
-    def test_explicit_groups_stack_vertically(self):
-        slots_ = template_slots(3)
-        lines = projection.pipeline_lines(
-            slots_, (), width=100, groups=(slots_[:2], slots_[2:]))
-        joined = "\n".join(lines)
-        self.assertIn("", lines)               # 组间空行 = 纵向分界
-        self.assertEqual(joined.count("┄┄→"), 1)  # 连接符仅存在于组内
-        group2_head = [line for line in lines
-                       if "REVIEWER" in line][0]
-        self.assertFalse(group2_head.startswith("↳"))  # 新组 ≠ 续行
+    def test_explicit_groups_vertical_fallback_under_width_pressure(self):
+        """2.8-B 迁移钉（原 test_explicit_groups_stack_vertically）：
+        纵叠不再是多组默认——只在纯宽度算法于 cols=1 仍超宽时的
+        显式退让态。同拓扑 (2,1,1) @50（band 55>50）→ 纵叠；
+        @80（band 75≤80）→ 横排（布局随宽度不随组数）。"""
+        slots_ = template_slots(4)
+        groups = (slots_[:2], slots_[2:3], slots_[3:])
+        vertical = projection.pipeline_lines(
+            slots_, (), width=50, groups=groups)
+        self.assertEqual(
+            sum(1 for line in vertical if line == ""), 2)  # 组间空行
+        joined = "\n".join(vertical)
+        self.assertIn("┄┄→", joined)          # 组内 wrap 照旧（cols=2）
+        for role in ("ARCHITECT", "CODER", "TESTER", "REVIEWER"):
+            head = [line for line in vertical if role in line][0]
+            self.assertFalse(head.startswith("↳"))  # 新组 ≠ 续行
+        self.assertTrue(all(
+            projection.display_width(line) <= 50 for line in vertical))
+        horizontal = projection.pipeline_lines(
+            slots_, (), width=80, groups=groups)
+        self.assertNotIn("", horizontal)      # 宽度足够 = 横排
+        self.assertIn("ARCHITECT", horizontal[0])
+        self.assertIn("REVIEWER", horizontal[0])
 
 
 class DegradedVerticalTests(unittest.TestCase):
@@ -2952,6 +2965,332 @@ class DetailWindowSinglePassTests(unittest.TestCase):
         joined = "\n".join(self._window(()))
         self.assertIn("—", joined)
         self.assertIn("NOT_STARTED", joined)
+
+# ====================================================== 2.8-B 组横排律
+
+
+class _GroupSpec:
+    """CollaborationGroupSpec 鸭子值（group_id / member_ids）。"""
+
+    __slots__ = ("group_id", "member_ids")
+
+    def __init__(self, group_id, member_ids):
+        self.group_id = group_id
+        self.member_ids = tuple(member_ids)
+
+
+def canonical_fixture():
+    """canonical 3-group fixture（2.8-B 授权 §八）：roles gct/coder/
+    tester/reviewer 声明序；member ids member-1..4；runtime 标签
+    rt-0..3；groups alpha(member-1, member-2) / beta(member-3) /
+    implicit(member-4)。"""
+    roles = ("gct", "coder", "tester", "reviewer")
+    slots = tuple(slot(role, f"rt-{index}")
+                  for index, role in enumerate(roles))
+    member_ids = tuple(f"member-{index + 1}"
+                       for index in range(len(roles)))
+    specs = (_GroupSpec("alpha", ("member-1", "member-2")),
+             _GroupSpec("beta", ("member-3",)))
+    return slots, member_ids, specs
+
+
+def cjk_group_slots(count=3):
+    roles = ("架构", "编码", "评审")[:count]
+    return tuple(slot(role, f"运行时-{index}")
+                 for index, role in enumerate(roles))
+
+
+class SlotChainDerivationTests(unittest.TestCase):
+    """2.8-B：specs + member_ids 快照 → 槽位链纯派生（隐式主链
+    先行、声明序保持、对齐失败诚实退化、零回写）。"""
+
+    def test_canonical_chains_implicit_first_declaration_order(self):
+        slots, member_ids, specs = canonical_fixture()
+        chains, labels = projection.derive_slot_chains(
+            slots, member_ids, specs)
+        self.assertEqual(
+            [[member.role for member in chain] for chain in chains],
+            [["reviewer"], ["gct", "coder"], ["tester"]])
+        self.assertEqual(labels, (None, "alpha", "beta"))
+
+    def test_partial_grouping_keeps_ungrouped_declaration_order(self):
+        slots = template_slots(4)
+        member_ids = ("m1", "m2", "m3", "m4")
+        specs = (_GroupSpec("a", ("m4",)), _GroupSpec("b", ("m1",)))
+        chains, labels = projection.derive_slot_chains(
+            slots, member_ids, specs)
+        # 隐式链（未分组 m2/m3，声明序）先行；声明组按声明序
+        self.assertEqual(
+            [[member.role for member in chain] for chain in chains],
+            [["coder", "tester"], ["reviewer"], ["architect"]])
+        self.assertEqual(labels, (None, "a", "b"))
+
+    def test_within_group_order_is_declaration_position(self):
+        slots = template_slots(4)
+        member_ids = ("m1", "m2", "m3", "m4")
+        specs = (_GroupSpec("a", ("m3", "m1")),)  # 声明逆序引用
+        chains, labels = projection.derive_slot_chains(
+            slots, member_ids, specs)
+        self.assertEqual(
+            [member.role for member in chains[1]],
+            ["architect", "tester"])               # 组内按声明位序
+
+    def test_alignment_failure_degrades_to_single_chain(self):
+        slots = template_slots(3)
+        unknown_member = (_GroupSpec("a", ("m9",)),)
+        for member_ids in ((), ("m1",),            # 空 / 长度不匹配
+                           ("m1", "m2", "m3")):     # 引用未知成员
+            specs = ((_GroupSpec("a", ("m1",)),)
+                     if member_ids != ("m1", "m2", "m3")
+                     else unknown_member)
+            chains, labels = projection.derive_slot_chains(
+                slots, member_ids, specs)
+            self.assertEqual(chains, (tuple(slots),))
+            self.assertEqual(labels, (None,))
+
+    def test_derivation_never_mutates_inputs(self):
+        slots = template_slots(4)
+        member_ids = ("m1", "m2", "m3", "m4")
+        specs = (_GroupSpec("a", ("m1", "m2")),
+                 _GroupSpec("b", ("m3",)))
+        projection.derive_slot_chains(slots, member_ids, specs)
+        self.assertEqual(len(slots), 4)
+        self.assertEqual(member_ids, ("m1", "m2", "m3", "m4"))
+        self.assertEqual(specs[0].member_ids, ("m1", "m2"))
+        self.assertEqual(specs[1].group_id, "b")
+
+
+class CanonicalGroupFixtureTests(unittest.TestCase):
+    """2.8-B canonical 3-group fixture @ width=80：纯宽度算法得出
+    横排（绝不因组数特判）；隐式主链先行；行内组标签；连接符
+    真值两态。"""
+
+    def _lines(self, events=()):
+        slots, member_ids, specs = canonical_fixture()
+        chains, labels = projection.derive_slot_chains(
+            slots, member_ids, specs)
+        return projection.pipeline_lines(
+            slots, events, tier="MAIN", width=80, groups=chains,
+            group_labels=labels)
+
+    def test_canonical_three_groups_horizontal_at_80(self):
+        lines = self._lines()
+        self.assertNotIn("", lines)               # 无组间空行 = 横排
+        head = lines[0]
+        self.assertIn("○ REVIEWER", head)         # 隐式主链先行
+        self.assertIn("▶ ○ alpha·GCT", head)      # 选中=声明 0（marker
+        self.assertIn("○ CODER", head)            # 与渲染序解耦）
+        self.assertIn("○ beta·TESTER", head)
+        self.assertLess(head.index("REVIEWER"), head.index("alpha·GCT"))
+        self.assertLess(head.index("alpha·GCT"), head.index("beta·TESTER"))
+        self.assertTrue(all(projection.display_width(line) <= 80
+                            for line in lines))
+        runtimes = lines[1]
+        self.assertLess(runtimes.index("rt-3"),   # runtime 随槽位不随链
+                        runtimes.index("rt-0"))
+
+    def test_canonical_connector_truth_two_states(self):
+        planned = self._lines()
+        self.assertEqual(planned[0].count("┄┄→"), 3)   # 零事件=计划相邻
+        self.assertNotIn("──→", "\n".join(planned))
+        # 跨组 HANDOFF：producer=reviewer（隐式链末）→ consumer=rt-0
+        # （alpha 首成员 runtime）——connection_observed 真值谓词
+        observed = self._lines((
+            ev(ExecutionEventType.HANDOFF, seq=0, stage="reviewer",
+               runtime="rt-0"),))
+        head = observed[0]
+        self.assertIn("──→", head)
+        self.assertLess(head.index("REVIEWER"), head.index("──→"))
+        self.assertLess(head.index("──→"), head.index("alpha·GCT"))
+        self.assertEqual(head.count("┄┄→"), 2)    # 其余连接仍计划相邻
+
+    def test_canonical_fixture_via_build_projection(self):
+        slots, member_ids, specs = canonical_fixture()
+        state = projection.build_projection(projection.ProjectionInputs(
+            task="canonical", slots=slots, width=84,   # 84-4=80
+            groups=specs, member_ids=member_ids))
+        self.assertNotIn("", state.collaboration_lines)
+        self.assertIn("alpha·GCT", state.collaboration_lines[0])
+        self.assertIn("beta·TESTER", state.collaboration_lines[0])
+
+
+class GroupWidthAlgorithmTests(unittest.TestCase):
+    """2.8-B ERRATA-3：布局随宽度不随组数；宽度阶梯；组头形态随
+    tier；无静默溢出；scroll_mode 豁免截断。"""
+
+    _TOPOLOGIES = {
+        "single": (lambda slots: (slots,)),
+        "pair": (lambda slots: (slots[:2], slots[2:])),
+        "triple": (lambda slots: (slots[:2], slots[2:3], slots[3:])),
+        "quad": (lambda slots: (slots[:1], slots[1:2],
+                                slots[2:3], slots[3:])),
+    }
+
+    def test_layout_follows_width_not_group_count(self):
+        slots = template_slots(4)
+        split = self._TOPOLOGIES["triple"](slots)
+        # 同拓扑：50 → 纵叠 / 80 → 横排
+        narrow = projection.pipeline_lines(slots, (), width=50,
+                                           groups=split)
+        self.assertIn("", narrow)
+        wide = projection.pipeline_lines(slots, (), width=80,
+                                         groups=split)
+        self.assertNotIn("", wide)
+        # 不同组数（2 vs 4 组）同宽 80 → 同为横排
+        pair = projection.pipeline_lines(
+            slots, (), width=80, groups=self._TOPOLOGIES["pair"](slots))
+        quad = projection.pipeline_lines(
+            slots, (), width=80, groups=self._TOPOLOGIES["quad"](slots))
+        self.assertNotIn("", pair)
+        self.assertNotIn("", quad)
+
+    def test_no_silent_overflow_across_width_matrix(self):
+        for width, tier in ((80, "MAIN"), (100, "MAIN_WIDE"),
+                            (140, "FULL"), (160, "FULL"),
+                            (200, "FULL")):
+            for ascii_only in (False, True):
+                for slots in (template_slots(4), cjk_group_slots(3)):
+                    for build in self._TOPOLOGIES.values():
+                        lines = projection.pipeline_lines(
+                            slots, (), tier=tier, width=width,
+                            groups=build(slots),
+                            group_labels=("g1", "g2", "g3", "g4"),
+                            ascii_only=ascii_only)
+                        self.assertTrue(lines, (width, ascii_only))
+                        for line in lines:
+                            self.assertLessEqual(
+                                projection.display_width(line), width,
+                                (width, ascii_only, repr(line)))
+
+    def test_label_form_follows_tier(self):
+        slots = template_slots(4)
+        member_ids = ("m1", "m2", "m3", "m4")
+        specs = (_GroupSpec("alpha", ("m1", "m2")),
+                 _GroupSpec("beta", ("m3",)))
+        chains, labels = projection.derive_slot_chains(
+            slots, member_ids, specs)
+        # MAIN：行内标签折叠进首成员 head
+        main_lines = projection.pipeline_lines(
+            slots, (), tier="MAIN", width=80, groups=chains,
+            group_labels=labels)
+        self.assertIn("alpha·ARCHITECT", main_lines[0])
+        self.assertIn("beta·TESTER", main_lines[0])
+        self.assertNotIn("[alpha]", "\n".join(main_lines))
+        # FULL：组头行在内容上方（无标签块补空行对齐）
+        full_lines = projection.pipeline_lines(
+            slots, (), tier="FULL", width=156, groups=chains,
+            group_labels=labels)
+        self.assertIn("[alpha]", full_lines[0])
+        self.assertIn("[beta]", full_lines[0])
+        self.assertTrue(full_lines[0].endswith("[beta]"))
+        self.assertIn("ARCHITECT", full_lines[1])
+        # DEGRADED：组头 + cols=1 纵向链（带宽足够时组间仍横排成带）
+        degraded = projection.pipeline_lines(
+            slots, (), tier="DEGRADED", width=70, groups=chains,
+            group_labels=labels)
+        self.assertIn("[alpha]", degraded[0])
+        self.assertIn("[beta]", degraded[0])
+        self.assertIn("┆", "\n".join(degraded))   # 链内 ↓/┆ 律保持
+
+    def test_vertical_fallback_law(self):
+        long_slots = tuple(
+            slot(f"impl-engineer-{index}",
+                 f"impl-engineer-{index}", f"rt-{index}")
+            for index in range(4))
+        specs = (_GroupSpec("alpha", ("member-1", "member-2")),
+                 _GroupSpec("beta", ("member-3",)),
+                 _GroupSpec("gamma", ("member-4",)))
+        chains, labels = projection.derive_slot_chains(
+            long_slots, tuple(f"member-{i + 1}" for i in range(4)),
+            specs)
+        lines = projection.pipeline_lines(
+            long_slots, (), tier="MAIN", width=40, groups=chains,
+            group_labels=labels)
+        self.assertEqual(sum(1 for line in lines if line == ""), 2)
+        joined = "\n".join(lines)
+        for role in ("alpha·IMPL-ENGINEER-0", "beta·IMPL-ENGINEER-2",
+                     "gamma·IMPL-ENGINEER-3"):
+            self.assertIn(role, joined)
+        self.assertTrue(all(projection.display_width(line) <= 40
+                            for line in lines))
+
+    def test_scroll_mode_exempts_truncation(self):
+        long_slots = (slot("architect", "runtime-identifier-very-long-0"),
+                      slot("coder", "runtime-identifier-very-long-1"))
+        truncated = projection.pipeline_lines(long_slots, (), width=30)
+        untruncated = projection.pipeline_lines(
+            long_slots, (), width=30, scroll_mode=True)
+        self.assertTrue(all(projection.display_width(line) <= 30
+                            for line in truncated))
+        self.assertTrue(any(projection.display_width(line) > 30
+                            for line in untruncated))
+        self.assertIn("runtime-identifier-very-long-0",
+                      "\n".join(untruncated))
+
+    def test_layout_decision_has_no_group_count_branch(self):
+        """源级钉定（ERRATA-3）：横排/纵叠分支仅含宽度比较——
+        len(groups) 只许作单链多路性守卫（>1）与算术项。"""
+        with open(projection.__file__, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        for forbidden in ("len(groups) >=", "len(groups) ==",
+                          "len(groups) <", "group_count"):
+            self.assertNotIn(forbidden, source, forbidden)
+        self.assertIn("for candidate in range(cols, 0, -1):", source)
+
+
+class GroupEquivalenceTests(unittest.TestCase):
+    """2.8-B 兼容律：groups=() 与既有投影逐字节一致；单声明组 =
+    既有链渲染 + 组标签增量；对齐失败零组路径。"""
+
+    def test_zero_groups_inputs_are_byte_equivalent(self):
+        slots = template_slots(4)
+        events = ()
+        legacy = projection.ProjectionInputs(
+            task="t", slots=slots, events=events, width=100)
+        explicit = projection.ProjectionInputs(
+            task="t", slots=slots, events=events, width=100,
+            groups=(), member_ids=(), scroll_mode=False)
+        legacy_state = projection.build_projection(legacy)
+        explicit_state = projection.build_projection(explicit)
+        for field in legacy_state.__slots__:
+            self.assertEqual(getattr(legacy_state, field),
+                             getattr(explicit_state, field), field)
+
+    def test_unalignable_groups_degrade_to_zero_group_path(self):
+        slots = template_slots(4)
+        specs = (_GroupSpec("alpha", ("member-1", "member-2")),)
+        degraded = projection.build_projection(projection.ProjectionInputs(
+            slots=slots, width=100, groups=specs,
+            member_ids=("only-one",)))          # 长度不匹配 → 退化
+        baseline = projection.build_projection(
+            projection.ProjectionInputs(slots=slots, width=100))
+        self.assertEqual(degraded.collaboration_lines,
+                         baseline.collaboration_lines)
+
+    def test_single_declared_group_full_tier_is_label_line_plus_chain(self):
+        slots = template_slots(4)
+        unlabeled = projection.pipeline_lines(
+            slots, (), tier="FULL", width=156)
+        labeled = projection.pipeline_lines(
+            slots, (), tier="FULL", width=156, groups=(slots,),
+            group_labels=("alpha",))
+        self.assertEqual(labeled[0], "[alpha]")
+        self.assertEqual(tuple(labeled[1:]), unlabeled)
+
+    def test_single_declared_group_main_roles_keep_order(self):
+        slots = template_slots(4)
+        unlabeled = projection.pipeline_lines(
+            slots, (), tier="MAIN", width=80)
+        labeled = projection.pipeline_lines(
+            slots, (), tier="MAIN", width=80, groups=(slots,),
+            group_labels=("alpha",))
+        self.assertEqual(len(labeled), len(unlabeled))
+        for index, (a, b) in enumerate(zip(labeled, unlabeled)):
+            normalized = "".join(a.split()).replace("alpha·", "")
+            self.assertEqual(
+                normalized, "".join(b.split()),
+                index)  # 去标签去空白后逐行同形（仅标签与 padding 增量）
+
 
 if __name__ == "__main__":
     unittest.main()
