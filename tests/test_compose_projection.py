@@ -273,5 +273,155 @@ class FunnelPreviewHeaderCompatTests(unittest.TestCase):
         self.assertEqual(lines[0], "Collaboration plan (default)")
 
 
+# ---------------------------------------------------- 2.8-C group authoring
+
+
+class ComposeGroupLinesTests(unittest.TestCase):
+    """2.8-C 组段纯函数：group_id 原样（事实面）/角色 uppercase/
+    main 隐式段/零组零行。"""
+
+    def test_zero_groups_yields_no_rows(self):
+        self.assertEqual(
+            cockpit_projection.compose_group_lines(
+                (), {"rt-a": "architect"}, ("rt-a",)), ())
+
+    def test_group_lines_roles_and_implicit_main(self):
+        lines = cockpit_projection.compose_group_lines(
+            (("g1", ("rt-a", "rt-b")), ("g2", ("rt-c",))),
+            {"rt-a": "architect", "rt-b": "coder", "rt-c": "tester",
+             "rt-d": "reviewer"},
+            ("rt-a", "rt-b", "rt-c", "rt-d"))
+        self.assertEqual(lines, ("g1: ARCHITECT · CODER",
+                                 "g2: TESTER",
+                                 "main: REVIEWER"))
+
+    def test_all_grouped_no_main_line(self):
+        lines = cockpit_projection.compose_group_lines(
+            (("g1", ("rt-a", "rt-b")),),
+            {"rt-a": "architect", "rt-b": "coder"},
+            ("rt-a", "rt-b"))
+        self.assertEqual(lines, ("g1: ARCHITECT · CODER",))
+
+    def test_absent_role_honest_dash(self):
+        lines = cockpit_projection.compose_group_lines(
+            (("g1", ("rt-a",)),), {}, ("rt-a",))
+        # rt-a 已入组 → 无隐式成员 → 零 main 行
+        self.assertEqual(lines, ("g1: —",))
+
+    def test_group_id_verbatim_skipped_numbering(self):
+        """跳号 id 原样按创建序呈现（零重排/零重编——ERRATA-3）。"""
+        lines = cockpit_projection.compose_group_lines(
+            (("g1", ("rt-a",)), ("g3", ("rt-b",))),
+            {"rt-a": "coder", "rt-b": "coder"}, ())
+        self.assertEqual(lines, ("g1: CODER", "g3: CODER"))
+
+    def test_locale_changes_main_label_only(self):
+        groups = (("g1", ("rt-a",)),)
+        roles = {"rt-a": "architect", "rt-b": "coder"}
+        selected = ("rt-a", "rt-b")
+        en = cockpit_projection.compose_group_lines(
+            groups, roles, selected, locale="en")
+        zh = cockpit_projection.compose_group_lines(
+            groups, roles, selected, locale="zh")
+        self.assertEqual(en, ("g1: ARCHITECT", "main: CODER"))
+        self.assertEqual(zh, ("g1: ARCHITECT", "主链: CODER"))
+
+
+class ComposeParticipantGroupTagTests(unittest.TestCase):
+    def test_group_tag_appended_to_grouped_member_only(self):
+        lines = compose_participant_lines(
+            ("rt-a", "rt-b"), {"rt-a": "architect", "rt-b": "coder"},
+            participant_index=0,
+            groups=(("g1", ("rt-b",)),))
+        self.assertEqual(
+            lines,
+            ("▶ member-1  ARCHITECT ← rt-a",
+             "  member-2  CODER ← rt-b  [g1]"))
+
+    def test_default_groups_byte_identical(self):
+        selected = ("rt-a", "rt-b")
+        roles = {"rt-a": "architect", "rt-b": "coder"}
+        self.assertEqual(
+            compose_participant_lines(selected, roles),
+            compose_participant_lines(selected, roles, groups=()))
+
+
+class ComposeScreenGroupSectionTests(unittest.TestCase):
+    def _screen(self, **overrides):
+        values = dict(
+            version_text="2.7.0", task_text="demo task", entries=_pool(),
+            selected_ids=("rt-a", "rt-b"), cursor_index=0,
+            roles={"rt-a": "architect", "rt-b": "coder"},
+            participant_index=0, preview_composition=None,
+            message_lines=(), width=100, ascii_only=False, locale="en")
+        values.update(overrides)
+        return compose_screen_lines(**values)
+
+    def test_group_section_rendered_when_groups_present(self):
+        lines = self._screen(
+            groups=(("g1", ("rt-a",)),))
+        text = "\n".join(lines)
+        self.assertIn("── groups", text)
+        self.assertIn("g1: ARCHITECT", text)
+        self.assertIn("main: CODER", text)
+        # participant 组标签同屏在场
+        self.assertIn("member-1  ARCHITECT ← rt-a  [g1]", text)
+        # 段序：roles 行之后、计划块之前
+        self.assertLess(lines.index("roles (r): architect · coder · "
+                                    "reviewer · tester"),
+                        lines.index("── groups"))
+
+    def test_zero_groups_section_absent_and_byte_parity(self):
+        """groups 缺省 = 行集逐字节不变（AC-12 golden 前沿）。"""
+        legacy = self._screen()
+        default = self._screen(groups=(), group_mode=False)
+        self.assertEqual(legacy, default)
+        self.assertNotIn("── groups", "\n".join(legacy))
+
+    def test_group_mode_hint_dual_form(self):
+        base = self._screen()
+        mode = self._screen(group_mode=True)
+        self.assertEqual(base[-1], compose_keys_hint(locale="en"))
+        self.assertIn("g new group", mode[-1])
+        self.assertIn("space group", mode[-1])
+        self.assertIn("x dissolve", mode[-1])
+        zh_mode = self._screen(group_mode=True, locale="zh")
+        self.assertIn("g 建组", zh_mode[-1])
+        self.assertIn("解散", zh_mode[-1])
+
+    def test_height_budget_accounts_for_group_lines(self):
+        entries = tuple(_entry(f"rt-{index}", "prov")
+                        for index in range(8))
+        common = dict(entries=entries, selected_ids=("rt-a", "rt-b"),
+                      roles={"rt-a": "architect", "rt-b": "coder"},
+                      height=15)
+        without = self._screen(**common)
+        with_groups = self._screen(
+            groups=(("g1", ("rt-a",)), ("g2", ("rt-b",))), **common)
+        # 组段（3 行 + 头）挤占池窗：可见池行减少、下限 3 恒保
+        pool_without = [line for line in without if "[ ] rt-" in line]
+        pool_with = [line for line in with_groups if "[ ] rt-" in line]
+        self.assertEqual(len(pool_without), 6)
+        self.assertEqual(len(pool_with), 3)
+        self.assertIn("── groups", "\n".join(with_groups))
+
+    def test_narrow_width_truncates_group_lines(self):
+        for width in (40, 60, 80):
+            lines = self._screen(
+                width=width,
+                groups=(("g1", ("rt-a", "rt-b")),))
+            self.assertTrue(all(cockpit_projection.display_width(line)
+                                <= width for line in lines))
+
+    def test_cjk_locale_group_section(self):
+        lines = self._screen(
+            locale="zh", groups=(("g1", ("rt-a",)),))
+        text = "\n".join(lines)
+        self.assertIn("── 分组", text)
+        self.assertIn("主链:", text)
+        # group_id 事实面恒 EN
+        self.assertIn("g1: ARCHITECT", text)
+
+
 if __name__ == "__main__":
     unittest.main()

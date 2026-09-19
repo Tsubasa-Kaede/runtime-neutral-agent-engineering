@@ -6,6 +6,11 @@ esc 返回漏斗（selection/override/已知角色保留，W6）· q 无可失
 状态单键退出、有可失状态两段守卫（W7）· l EN⇄ZH。COMPOSE 是
 pre-run funnel 阶段——绝不触碰 C2 RUNNING 三态。全部离线
 doubles；REAL=0。
+
+2.8-C GROUP_AUTHORING（ERRATA 1-4）：g 进模式/建组（恒不退出——
+仅 Enter/Esc 回 BASE）；space 成员资格环；x 解散；单调 id
+（g1,g2,g3→删 g2→g4）；拒绝 = honest no-op（零 draft 变更 ⇒
+零 invalidate）；剪除钩子；/new 双清（draft+seq）。
 """
 import sys
 import threading
@@ -132,8 +137,9 @@ class _UserSurfaceRecorder:
         self.listing_calls += 1
         return self.entries
 
-    def preview(self, selection):
-        self.preview_calls.append(tuple(selection))
+    def preview(self, selection, groups=()):
+        """镜像 user 面 2.8-C 契约：preview(selection, groups=())。"""
+        self.preview_calls.append((tuple(selection), tuple(groups)))
         return self.preview_results.pop(0)
 
     def start(self, task_text, intent, expected_resolved):
@@ -270,9 +276,10 @@ class ComposeStagePilotTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             # 阶段一：preview（计划块在场；start 未调用）
             self.assertEqual(len(user.preview_calls), 1)
-            selection = user.preview_calls[0]
+            selection, preview_groups = user.preview_calls[0]
             self.assertEqual(
                 tuple(rt for rt, _ in selection), ("rt-a", "rt-b"))
+            self.assertEqual(preview_groups, ())
             self.assertIn("architect  ← rt-a", _compose_text(app))
             self.assertEqual(user.start_calls, [])
             await pilot.press("enter")
@@ -702,6 +709,530 @@ class ComposeP2JourneyTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
         self.assertEqual(app.outcome, "compose-outcome")
         self.assertIs(user.start_calls[0][2], resolved)
+
+
+# ----------------------------------------------- 2.8-C GROUP_AUTHORING
+
+
+class GroupAuthoringModeTests(unittest.IsolatedAsyncioTestCase):
+    """ERRATA-1：g 恒不退出模式；仅 Enter/Esc 回 BASE；六态链。"""
+
+    async def _enter_compose_with_two(self, pilot):
+        await pilot.press("c")
+        await pilot.press("space")
+        await pilot.press("down")
+        await pilot.press("space")
+        await pilot.pause()
+
+    async def test_g_enters_mode_and_stays_after_create(self):
+        """A1/A3 负向：g 创建后模式位仍 True（不存在 g→BASE 路径）。"""
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._enter_compose_with_two(pilot)
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_compose_group_mode)
+            self.assertIn("g new group", _compose_text(app))
+            await pilot.press("g")  # 创建 g1 → 保持模式（负向 g→BASE）
+            await pilot.pause()
+            self.assertTrue(app._cockpit_compose_group_mode)
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-a",)),))
+            self.assertEqual(app._cockpit_compose_group_seq, 2)
+
+    async def test_enter_and_esc_return_base_with_draft_preserved(self):
+        """A2：Enter/Esc 仅回 BASE（draft 保留 W6；不触发 preview）。"""
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._enter_compose_with_two(pilot)
+            await pilot.press("g")
+            await pilot.press("g")  # 创建 g1
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_compose_group_mode)
+            self.assertTrue(app.query_one("#compose-screen").display)
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-a",)),))
+            self.assertEqual(user.preview_calls, [])
+            # 再进模式 → esc 同律（draft 保留）
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_compose_group_mode)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_compose_group_mode)
+            self.assertTrue(app.query_one("#compose-screen").display)
+            self.assertFalse(app.query_one("#funnel-screen").display)
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-a",)),))
+
+    async def test_esc_ladder_mode_base_funnel(self):
+        """esc 阶梯：模式 → BASE → FUNNEL（两跳；draft 保留）。"""
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("g")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            # 第一跳：模式 → BASE（仍在 COMPOSE）
+            self.assertTrue(app.query_one("#compose-screen").display)
+            await pilot.press("escape")
+            await pilot.pause()
+            # 第二跳：BASE → FUNNEL
+            self.assertTrue(app.query_one("#funnel-screen").display)
+
+    async def test_empty_selection_g_honest_reject(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_compose_group_mode)
+            self.assertIn("select a runtime first", _compose_text(app))
+
+    async def test_q_guard_unchanged_in_mode(self):
+        """A5：模式内 q = 既有 W7 两段守卫（非模式退出）。"""
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("g")
+            await pilot.pause()
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertTrue(app.is_running)
+            self.assertTrue(app._cockpit_compose_group_mode)
+            self.assertIn("q again to quit", _compose_text(app))
+            # 任意非 q 键 disarm（模式键同样生效）
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertFalse(app._cockpit_compose_q_armed)
+            self.assertTrue(app._cockpit_compose_group_mode)
+
+
+class GroupAuthoringKeysTests(unittest.IsolatedAsyncioTestCase):
+    """§10 矩阵：space 环 / x 解散 / up/down/r/H 显式 no-op / ←→。"""
+
+    async def _select_and_enter_mode(self, pilot, count):
+        await pilot.press("c")
+        for _ in range(count):
+            await pilot.press("space")
+            await pilot.press("down")
+        await pilot.press("g")
+        await pilot.pause()
+
+    async def test_space_ring_joins_moves_and_leaves(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._select_and_enter_mode(pilot, 3)
+            # rt-b 建组 → space 出组（末成员移出 → 解散 + 披露）
+            await pilot.press("right")   # rt-b
+            await pilot.press("g")       # g1=(rt-b)
+            await pilot.press("right")   # rt-c
+            await pilot.press("g")       # g2=(rt-c)
+            await pilot.pause()
+            await pilot.press("space")   # rt-c 出组 → g2 解散
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-b",)),))
+            self.assertIn("group g2 dissolved", _compose_text(app))
+            await pilot.press("space")   # rt-c 入 g1（环下一站）
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups,
+                (("g1", ("rt-b", "rt-c")),))
+            await pilot.press("left")    # 回 rt-b（组内声明位序第二）
+            await pilot.press("space")   # rt-b 移组：g1 → 环下一 = ungrouped
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-c",)),))
+
+    async def test_space_zero_groups_noop(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._select_and_enter_mode(pilot, 2)
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_groups, ())
+            self.assertTrue(app._cockpit_compose_group_mode)
+
+    async def test_x_dissolves_and_ungrouped_rejects(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._select_and_enter_mode(pilot, 3)
+            await pilot.press("right")   # rt-b
+            await pilot.press("g")       # g1=(rt-b)
+            await pilot.press("right")   # rt-c
+            await pilot.press("space")   # rt-c 入 g1 → 两成员
+            await pilot.pause()
+            await pilot.press("x")       # 解散 g1（2 名成员移出）
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_groups, ())
+            self.assertIn("group g1 dissolved · 2 member(s) ungrouped",
+                          _compose_text(app))
+            # ungrouped participant x = honest no-op
+            await pilot.press("x")
+            await pilot.pause()
+            self.assertIn("no group to dissolve", _compose_text(app))
+            self.assertTrue(app._cockpit_compose_group_mode)
+
+    async def test_up_down_r_h_are_noops_in_mode(self):
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b", "rt-c", "rt-d"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._select_and_enter_mode(pilot, 4)
+            await pilot.press("g")       # g1=(rt-a)
+            await pilot.press("r")       # 模式内 no-op
+            await pilot.press("up")
+            await pilot.press("down")
+            await pilot.press("H")
+            await pilot.pause()
+            self.assertTrue(app._cockpit_compose_group_mode)
+            self.assertEqual(app._cockpit_compose_cursor, 3)  # 4 行池钳位
+            self.assertEqual(app._cockpit_compose_roles, {})
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-a",)),))
+
+    async def test_arrows_move_participant_cursor_in_mode(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await self._select_and_enter_mode(pilot, 3)
+            await pilot.press("right")
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_pcursor, 2)
+            await pilot.press("left")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_pcursor, 1)
+
+
+class GroupCreationPreconditionTests(unittest.IsolatedAsyncioTestCase):
+    """ERRATA-2：拒绝 = honest no-op（零 draft 变更 ⇒ 零 invalidate）。"""
+
+    async def test_grouped_member_g_is_zero_mutation_noop(self):
+        """grouped+g：draft 逐字节不变 + 披露不被 invalidate + 消息。"""
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b", "rt-c"),
+            preview_results=[
+                (SimpleNamespace(members=()), resolved_double()),
+                (SimpleNamespace(members=()), resolved_double())])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("enter")   # preview #1（无组）
+            await pilot.pause()
+            fingerprint = app._cockpit_compose_fp
+            self.assertIsNotNone(fingerprint)
+            await pilot.press("g")       # 进模式
+            await pilot.press("g")       # 创建 g1 → invalidate → fp None
+            await pilot.pause()
+            self.assertIsNone(app._cockpit_compose_fp)
+            await pilot.press("escape")  # 回 BASE → preview #2（带组）
+            await pilot.press("enter")
+            await pilot.pause()
+            fingerprint2 = app._cockpit_compose_fp
+            self.assertIsNotNone(fingerprint2)
+            before = app._cockpit_compose_groups
+            await pilot.press("g")       # 再进模式（当前 rt-a 已分组）
+            await pilot.press("g")       # 拒绝：honest no-op
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_groups, before)
+            # 零 invalidate：披露仍有效（fp 未被清）+ 诚实消息
+            self.assertEqual(app._cockpit_compose_fp, fingerprint2)
+            self.assertIn("member already grouped", _compose_text(app))
+
+    async def test_group_limit_reached_is_zero_mutation_noop(self):
+        """上限分支（AC-C-GROUP-03）：注入 4 组防御态——数学上 UI
+        结构性不可达（4 组 ⇒ 全员已分组，先命中 already-grouped
+        分支）；此处直注 draft 覆盖防御分支行为契约本身。"""
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.pause()
+            # 直注：4 组在场（含跨组引用的非法防御态——仅测分支契约）
+            app._cockpit_compose_groups = (
+                ("g1", ("rt-b",)), ("g2", ("rt-c",)),
+                ("g3", ("rt-b",)), ("g4", ("rt-c",)))
+            await pilot.press("g")   # 进模式；当前 rt-a ungrouped
+            await pilot.pause()
+            await pilot.press("g")   # 组数=4 → 拒绝
+            await pilot.pause()
+            self.assertEqual(len(app._cockpit_compose_groups), 4)
+            self.assertEqual(app._cockpit_compose_group_seq, 1)
+            self.assertIn("group limit reached", _compose_text(app))
+            self.assertTrue(app._cockpit_compose_group_mode)
+
+
+class GroupIdLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    """ERRATA-3：g1,g2,g3 → 删 g2 → g1,g3 → create → g4（无复用/
+    无重编号；声明序 ≠ id 数值序）；/new 双清 draft+seq。"""
+
+    async def test_canonical_lifecycle_g4_after_deletion(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c",
+                                             "rt-d"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            for _ in range(4):
+                await pilot.press("space")
+                await pilot.press("down")
+            await pilot.pause()
+            await pilot.press("g")
+            await pilot.press("g")                     # g1=(rt-a)
+            await pilot.press("right")
+            await pilot.press("g")                     # g2=(rt-b)
+            await pilot.press("right")
+            await pilot.press("g")                     # g3=(rt-c)
+            await pilot.pause()
+            self.assertEqual(
+                tuple(gid for gid, _ in app._cockpit_compose_groups),
+                ("g1", "g2", "g3"))
+            await pilot.press("left")                  # rt-b
+            await pilot.press("x")                     # 解散 g2
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups,
+                (("g1", ("rt-a",)), ("g3", ("rt-c",))))
+            await pilot.press("right")
+            await pilot.press("right")                 # rt-d ungrouped
+            await pilot.press("g")                     # → g4（非 g2 复用）
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups,
+                (("g1", ("rt-a",)), ("g3", ("rt-c",)),
+                 ("g4", ("rt-d",))))
+            self.assertEqual(app._cockpit_compose_group_seq, 5)
+            # 声明序 ≠ 数值连续：draft 序 g1,g3,g4（无重排/重编号）
+            self.assertIn("g1: ", _compose_text(app))
+            self.assertIn("g3: ", _compose_text(app))
+            self.assertIn("g4: ", _compose_text(app))
+
+    async def test_new_session_clear_resets_draft_and_sequence(self):
+        """/new 双清：draft 与 seq 同时归零（绝不只清其一）。"""
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("g")
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-a",)),))
+            self.assertEqual(app._cockpit_compose_group_seq, 2)
+            # esc 阶梯出 COMPOSE（模式 → BASE → FUNNEL 两跳）再 /new
+            await pilot.press("escape")
+            await pilot.press("escape")
+            await pilot.pause()
+            # /new 兑现（y 确认后调用的纯呈现遗忘点）
+            app._new_session_clear()
+            self.assertEqual(app._cockpit_compose_groups, ())
+            self.assertEqual(app._cockpit_compose_group_seq, 1)
+            self.assertFalse(app._cockpit_compose_group_mode)
+            # 归零后再创建 → g1 重新从 1 起（全新草稿域）。
+            # 重入后 selection 保留 [rt-a]（W6）——直接进模式建组。
+            await pilot.press("c")
+            await pilot.press("g")
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertEqual(
+                app._cockpit_compose_groups, (("g1", ("rt-a",)),))
+            self.assertEqual(app._cockpit_compose_group_seq, 2)
+
+
+class GroupPruneHookTests(unittest.IsolatedAsyncioTestCase):
+    """§11 剪除钩子：BASE 勾选剔除 / 重入失效 → 组剪除+空组解散+
+    披露行（draft ⊆ selection 不变量维持）。"""
+
+    async def test_toggle_off_grouped_member_prunes_group(self):
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b", "rt-c"),
+            preview_results=[])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")          # rt-a
+            await pilot.press("down")
+            await pilot.press("space")          # rt-b
+            await pilot.press("g")
+            await pilot.press("g")              # g1=(rt-a)
+            await pilot.press("escape")         # 回 BASE（draft 保留）
+            await pilot.pause()
+            # 池光标回 rt-a（勾选序后光标在 rt-b——up 一步）
+            await pilot.press("up")
+            await pilot.press("space")          # 剔除 rt-a → g1 空解散
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_groups, ())
+            self.assertIn("group g1 dissolved", _compose_text(app))
+            self.assertNotIn("rt-a  [g1]", _compose_text(app))
+
+    async def test_reentry_prunes_stale_grouped_member(self):
+        user = _UserSurfaceRecorder(_entries("rt-a", "rt-b", "rt-c"))
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="do work")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("g")
+            await pilot.press("g")              # g1=(rt-a)
+            # esc 阶梯两跳出 COMPOSE（模式 → BASE → FUNNEL）
+            await pilot.press("escape")
+            await pilot.press("escape")
+            # 池漂移：rt-a 失效
+            user.entries = _entries("rt-b", "rt-c")
+            await pilot.press("c")
+            await pilot.pause()
+            self.assertEqual(app._cockpit_compose_groups, ())
+            text = _compose_text(app)
+            self.assertIn("removed from selection: rt-a", text)
+            self.assertIn("group g1 dissolved", text)
+
+
+class GroupPreviewIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """组随 Enter 两段入链（draft → preview 铸 intent）；stamp 含组
+    维度（组变更必重 preview）；拒绝态不 invalidate（披露有效直达
+    start）；六态链 FUNNEL→BASE→MODE→BASE→PREVIEW→RUNNING。"""
+
+    async def test_full_journey_passes_groups_to_preview_and_start(self):
+        gate = _Gate()
+        intent_double = SimpleNamespace(members=())
+        resolved = resolved_double()
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b", "rt-c"),
+            preview_results=[
+                (intent_double, resolved), (intent_double, resolved)],
+            start_results=[composed_run_double(gate=gate)])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="compose task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            # MODE：建组 g1=(rt-a)（六态链第三态）
+            await pilot.press("g")
+            await pilot.press("g")
+            await pilot.press("right")
+            await pilot.press("space")          # rt-b 入 g1
+            await pilot.pause()
+            await pilot.press("enter")          # 回 BASE
+            await pilot.press("enter")          # preview #1（带组）
+            await pilot.pause()
+            self.assertEqual(len(user.preview_calls), 1)
+            _selection, preview_groups = user.preview_calls[0]
+            self.assertEqual(preview_groups,
+                             (("g1", ("rt-a", "rt-b")),))
+            # 组变更（再入模式 rt-c 入组）→ invalidate → 必重 preview
+            await pilot.press("g")
+            await pilot.press("right")
+            await pilot.press("right")
+            await pilot.press("space")          # rt-c 入 g1
+            await pilot.press("enter")
+            await pilot.press("enter")          # preview #2（新组态）
+            await pilot.pause()
+            self.assertEqual(len(user.preview_calls), 2)
+            _selection, preview_groups2 = user.preview_calls[1]
+            self.assertEqual(preview_groups2,
+                             (("g1", ("rt-a", "rt-b", "rt-c")),))
+            # PREVIEW → RUNNING：start 用同一 intent/expected
+            await pilot.press("enter")
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
+            _task, intent, expected = user.start_calls[0]
+            self.assertIs(intent, intent_double)
+            self.assertIs(expected, resolved)
+            # 换屏归零模式位（draft 本体保留 W6）
+            self.assertFalse(app._cockpit_compose_group_mode)
+            self.assertEqual(app._cockpit_compose_groups,
+                             (("g1", ("rt-a", "rt-b", "rt-c")),))
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
+
+    async def test_rejected_noop_keeps_disclosure_valid_to_start(self):
+        """拒绝态零 invalidate 的最强形式：grouped+g 后 Enter 直接
+        start（披露未被污染——stamp 匹配）。"""
+        gate = _Gate()
+        intent_double = SimpleNamespace(members=())
+        resolved = resolved_double()
+        user = _UserSurfaceRecorder(
+            _entries("rt-a", "rt-b", "rt-c"),
+            preview_results=[(intent_double, resolved)],
+            start_results=[composed_run_double(gate=gate)])
+        app = make_compose_app(funnel_composition(), _StartRecorder([]),
+                               user, task_token="compose task")
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.press("c")
+            await pilot.press("space")
+            await pilot.press("down")
+            await pilot.press("space")
+            await pilot.press("g")
+            await pilot.press("g")              # g1=(rt-a)
+            await pilot.press("enter")          # 回 BASE
+            await pilot.press("enter")          # preview（带组）
+            await pilot.pause()
+            self.assertEqual(len(user.preview_calls), 1)
+            await pilot.press("g")              # 进模式
+            await pilot.press("g")              # rt-a 已分组 → 拒绝
+            await pilot.pause()
+            self.assertEqual(len(user.preview_calls), 1)
+            await pilot.press("escape")         # 回 BASE
+            await pilot.press("enter")          # 披露仍有效 → start
+            for _ in range(100):
+                if app._cockpit_composed is not None:
+                    break
+                await pilot.pause()
+            self.assertEqual(len(user.start_calls), 1)
+            self.assertEqual(app._cockpit_stage, cockpit_tui.STAGE_RUNNING)
+            gate.release.set()
+            for _ in range(200):
+                if app.outcome is not None:
+                    break
+                await pilot.pause()
 
 
 if __name__ == "__main__":

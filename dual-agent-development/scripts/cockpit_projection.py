@@ -252,6 +252,28 @@ _LABELS = {
     "session display cleared · run counter reset": (
         "session display cleared · run counter reset",
         "会话呈现史已清空 · 轮次计数已重置"),
+    # 2.8-C 组编排词面（组段/键提示双形态/模式反馈；group_id 恒 EN
+    # 事实面不进词表——原样呈现，跳号不重排）
+    "groups": ("groups", "分组"),
+    "main": ("main", "主链"),
+    "←→ member · g new group · space group · x dissolve · "
+    "enter/esc back · l lang · q quit": (
+        "←→ member · g new group · space group · x dissolve · "
+        "enter/esc back · l lang · q quit",
+        "←→ 成员 · g 建组 · space 换组 · x 解散 · enter/esc 返回 · "
+        "l 语言 · q 退出"),
+    "select a runtime first": (
+        "select a runtime first", "请先勾选 runtime"),
+    "member already grouped · space ring / x dissolve": (
+        "member already grouped · space ring / x dissolve",
+        "成员已分组 · space 环切换 / x 解散"),
+    "group limit reached (4)": (
+        "group limit reached (4)", "组数已达上限（4）"),
+    "no group to dissolve": (
+        "no group to dissolve", "当前成员无组可解散"),
+    "group {id} dissolved · {n} member(s) ungrouped": (
+        "group {id} dissolved · {n} member(s) ungrouped",
+        "组 {id} 已解散 · {n} 名成员移出"),
 }
 
 
@@ -1570,27 +1592,72 @@ def compose_pool_lines(entries, *, selected_ids=(), cursor_index=0,
 
 
 def compose_participant_lines(selected_ids, roles, *,
-                              participant_index=0):
+                              participant_index=0, groups=()):
     """participant 行（声明序 = sorted runtime_id）：
     member-N  ROLE ← runtime_id。roles 值缺席（尚未指派/未预览）
     = 诚实 "—"（缺席呈现既有惯例）；duplicate Role 合法（按声明
-    原样呈现）；零选择 = 零行（区块标题由组装器管理）。"""
+    原样呈现）；零选择 = 零行（区块标题由组装器管理）。
+
+    2.8-C：groups（UI 域草稿）→ 行尾组标签 ` [gN]`（group_id 原样
+    呈现——结构身份非呈现标签）；缺省 () 零组 = 行集逐字节不变。"""
+    owner = {}
+    for group_id, member_ids in groups:
+        for runtime_id in member_ids:
+            owner[runtime_id] = group_id
     lines = []
     for index, runtime_id in enumerate(sorted(selected_ids)):
         marker = "▶ " if index == participant_index else "  "
         role = roles.get(runtime_id)
         role_text = role.upper() if role else "—"
+        tag = f"  [{owner[runtime_id]}]" if runtime_id in owner else ""
         lines.append(f"{marker}member-{index + 1}  {role_text} "
-                     f"← {runtime_id}")
+                     f"← {runtime_id}{tag}")
     return tuple(lines)
 
 
-def compose_keys_hint(*, locale="en", ascii_only=False):
+def compose_group_lines(groups, roles=None, selected_ids=(), *,
+                        locale="en"):
+    """2.8-C 组段行集（纯呈现）：g1: ROLE · ROLE … + main 隐式段。
+
+    groups = ((group_id, (runtime_id, ...)), ...) 创建序——group_id
+    恒原样呈现（事实面，跳号不重排不重编）；组行角色 uppercase
+    （缺席 = "—" 诚实惯例）；未入组 participant 汇入 main 行（无
+    隐式成员 = 零 main 行）；零组 = 零行（区块标题由组装器管理）。"""
+    roles = roles or {}
+    lines = []
+    if not groups:
+        return ()
+    grouped = set()
+    for group_id, member_ids in groups:
+        grouped.update(member_ids)
+        lines.append("{gid}: {roles}".format(
+            gid=group_id,
+            roles=" · ".join(
+                (roles.get(runtime_id) or "—").upper()
+                for runtime_id in member_ids)))
+    implicit = tuple(runtime_id for runtime_id in sorted(selected_ids)
+                     if runtime_id not in grouped)
+    if implicit:
+        lines.append("{main}: {roles}".format(
+            main=ui_label("main", locale),
+            roles=" · ".join(
+                (roles.get(runtime_id) or "—").upper()
+                for runtime_id in implicit)))
+    return tuple(lines)
+
+
+def compose_keys_hint(*, locale="en", ascii_only=False, group_mode=False):
     """COMPOSE 键提示（唯一提示面；键字母恒 EN 既有惯例，动词经
-    闭集词表）。"""
-    line = ui_label(
-        "↑↓ move · space select · ←→ member · r role · "
-        "enter preview/start · esc back · l lang · q quit", locale)
+    闭集词表）。2.8-C：group_mode=True 双形态——组编排模式键集
+    （g 建组/space 换组环/x 解散；g 恒不退出模式）。"""
+    if group_mode:
+        line = ui_label(
+            "←→ member · g new group · space group · x dissolve · "
+            "enter/esc back · l lang · q quit", locale)
+    else:
+        line = ui_label(
+            "↑↓ move · space select · ←→ member · r role · "
+            "enter preview/start · esc back · l lang · q quit", locale)
     if ascii_only:
         line = _to_ascii(line)
     return line
@@ -1600,17 +1667,25 @@ def compose_screen_lines(version_text, task_text, entries, *,
                          selected_ids=(), cursor_index=0, roles=None,
                          participant_index=0, preview_composition=None,
                          message_lines=(), width=100, height=None,
-                         ascii_only=False, locale="en"):
+                         ascii_only=False, locale="en", groups=(),
+                         group_mode=False):
     """COMPOSE 屏组装（漏斗首屏同型）：header / task 回显 / 池清单 /
     participants / 计划块（preview 成功时）/ 瞬态反馈 / 键提示末行。
 
     preview_composition 带 reason（CompositionError duck）或零绑定时
     计划块缺席——错误词经 message_lines 原样呈现（本层零推断）。
     height 只约束池窗口且始终保留光标与至少三条真实池行；逐行宽度
-    截断（不溢出铁律）。"""
+    截断（不溢出铁律）。
+
+    2.8-C：groups（UI 域草稿）→ participants 组标签 + 组段（仅
+    非零组时呈现，含区块头；高度预算 fixed_count 计入）；group_mode
+    → 键提示双形态。缺省（groups=() / False）行集逐字节不变。"""
     roles = roles or {}
     entries = tuple(entries)
     selected_ids = tuple(selected_ids)
+    groups = tuple(groups or ())
+    group_lines = (compose_group_lines(groups, roles, selected_ids,
+                                       locale=locale) if groups else ())
     header = (f"dual-agent cockpit · {version_text}"
               if version_text else "dual-agent cockpit")
     lines = [f"{header} · {ui_label('compose collaboration', locale)}",
@@ -1625,6 +1700,7 @@ def compose_screen_lines(version_text, task_text, entries, *,
     hidden = 0
     if height is not None and len(entries) > 3:
         fixed_count = (7 + len(selected_ids) + len(message_lines)
+                       + (len(group_lines) + 1 if group_lines else 0)
                        + (1 if len(entries) < 2 else 0))
         pool_limit = max(3, height - fixed_count)
         if pool_limit < len(entries):
@@ -1643,10 +1719,14 @@ def compose_screen_lines(version_text, task_text, entries, *,
 
     lines.append(f"── {ui_label('participants', locale)}")
     lines.extend(compose_participant_lines(
-        selected_ids, roles, participant_index=participant_index))
+        selected_ids, roles, participant_index=participant_index,
+        groups=groups))
     role_text = " · ".join(COMPOSITION_ROLES)
     lines.append(ui_label("roles (r): {roles}", locale).format(
         roles=role_text))
+    if group_lines:
+        lines.append(f"── {ui_label('groups', locale)}")
+        lines.extend(group_lines)
     if len(entries) < 2:
         lines.append(ui_label(
             "need ≥2 VERIFIED runtimes — qualify first", locale))
@@ -1661,7 +1741,7 @@ def compose_screen_lines(version_text, task_text, entries, *,
     else:
         lines.append(ui_label("press enter to preview", locale))
     lines.extend(message_lines)
-    lines.append(compose_keys_hint(locale=locale))
+    lines.append(compose_keys_hint(locale=locale, group_mode=group_mode))
     lines = [truncate_to_width(line, width) for line in lines]
     if ascii_only:
         lines = [_to_ascii(line) for line in lines]

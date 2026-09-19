@@ -313,5 +313,142 @@ class StartViaPreviewTests(unittest.TestCase):
         self.assertTrue(hasattr(result, "composition"))
 
 
+# ---------------------------------------------------- 2.8-C group authoring
+
+
+class GroupAuthoringEntryTests(unittest.TestCase):
+    """2.8-C entry 闭包：groups 通道（透传/映射/缺省/置换不变/backstop）。
+
+    设计 §21 entry 面：preview(selection, groups) 换算 member-N 域；
+    组零参与 steps 派生链（Q7/AC-C-SEM-02）；缺省 () 后向兼容；
+    core 四组错误词 backstop（空组 = GAP-1 登记文档测试——预期通过
+    validate 的诚实面）。"""
+
+    def test_groups_passed_through_as_member_domain(self):
+        """UI 域组草稿 → intent.groups member-N 域（组内=声明位序）。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = (("rt-a", "architect"), ("rt-b", "coder"),
+                     ("rt-c", "tester"), ("rt-d", "reviewer"))
+        groups = (("g1", ("rt-b", "rt-a")), ("g2", ("rt-d",)))
+        intent, resolved = surface.preview(selection, groups)
+        self.assertIsNone(getattr(resolved, "reason", None))
+        # 组内成员序 = selection 声明位序归一（草稿输入序不保留）
+        self.assertEqual(
+            tuple((spec.group_id, spec.member_ids) for spec in intent.groups),
+            (("g1", ("member-1", "member-2")), ("g2", ("member-4",))))
+        # resolved 透传（结构身份全链同值——AC-C-SEM-01）
+        self.assertEqual(resolved.groups, intent.groups)
+
+    def test_group_member_order_follows_selection_declaration(self):
+        """组内成员序 = selection 声明位序过滤（乱序组内输入归一）。"""
+        surface, _, _, _, _, _ = _surface()
+        selection = (("rt-b", "coder"), ("rt-a", "architect"))
+        # 草稿组内输入逆声明序——换算后仍按声明位序
+        intent, resolved = surface.preview(
+            selection, (("g1", ("rt-a", "rt-b")),))
+        self.assertEqual(intent.groups[0].member_ids,
+                         ("member-1", "member-2"))
+
+    def test_partial_grouping_implicit_members_untouched(self):
+        """部分分组：未入组成员不出现于任何组（隐式主链域）。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = tuple(
+            (f"rt-{name}", "coder") for name in "abcd")
+        intent, resolved = surface.preview(
+            selection, (("g9", ("rt-b",)),))
+        grouped = {member for spec in intent.groups
+                   for member in spec.member_ids}
+        self.assertEqual(grouped, {"member-2"})
+
+    def test_default_groups_empty_backward_compatible(self):
+        """缺省 groups=()：与 P1 平面协作逐字节同构（groups 恒 ()）。"""
+        surface, _, _, _, _, _ = _surface()
+        selection = (("rt-a", "architect"), ("rt-b", "coder"))
+        intent_legacy, resolved_legacy = surface.preview(selection)
+        intent_default, resolved_default = surface.preview(selection, ())
+        self.assertEqual(intent_legacy, intent_default)
+        self.assertEqual(resolved_legacy, resolved_default)
+        self.assertEqual(intent_default.groups, ())
+
+    def test_group_order_permutation_steps_identical(self):
+        """组声明序置换 + 同 members 序 → steps/bindings 逐字节不变
+        （Group ≠ execution ordering primitive；AC-C-SEM-02）。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = tuple(
+            (f"rt-{name}", role) for name, role in zip(
+                "abcd", ("architect", "coder", "tester", "reviewer")))
+        first_groups = (("g1", ("rt-a", "rt-b")), ("g2", ("rt-c",)))
+        second_groups = (("g2", ("rt-c",)), ("g1", ("rt-a", "rt-b")))
+        _, first = surface.preview(selection, first_groups)
+        _, second = surface.preview(selection, second_groups)
+        _, bare = surface.preview(selection)
+        self.assertEqual(first.steps, second.steps)
+        self.assertEqual(first.steps, bare.steps)
+        self.assertEqual(first.bindings, second.bindings)
+        self.assertEqual(first.member_ids, second.member_ids)
+        # 组本体随声明序保真（id 数值序 ≠ 声明序分叉用例）
+        self.assertEqual(
+            tuple(spec.group_id for spec in first.groups), ("g1", "g2"))
+        self.assertEqual(
+            tuple(spec.group_id for spec in second.groups), ("g2", "g1"))
+
+    def test_skipped_id_numbers_preserved_verbatim(self):
+        """跳号 id（g1,g3）：声明序+id 字符串原样透传（零重排/零重编）。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = tuple((f"rt-{name}", "coder") for name in "abcd")
+        groups = (("g1", ("rt-a",)), ("g3", ("rt-b", "rt-c")))
+        intent, resolved = surface.preview(selection, groups)
+        self.assertEqual(
+            tuple(spec.group_id for spec in intent.groups), ("g1", "g3"))
+        self.assertEqual(
+            tuple(spec.group_id for spec in resolved.groups), ("g1", "g3"))
+
+    def test_unknown_runtime_group_member_rejected(self):
+        """组引用池外 runtime → core GROUP_MEMBER_UNKNOWN 原词回传。"""
+        surface, _, _, _, _, _ = _surface()
+        selection = (("rt-a", "architect"), ("rt-b", "coder"))
+        intent, result = surface.preview(
+            selection, (("g1", ("rt-zzz",)),))
+        self.assertIsNone(intent)
+        self.assertEqual(result.reason, "GROUP_MEMBER_UNKNOWN")
+
+    def test_member_in_multiple_groups_rejected(self):
+        """双归属构造（绕过 UI 直调）→ core MEMBER_IN_MULTIPLE_GROUPS。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = tuple((f"rt-{name}", "coder") for name in "abcd")
+        intent, result = surface.preview(
+            selection, (("g1", ("rt-a",)), ("g2", ("rt-a", "rt-b"))))
+        self.assertIsNone(intent)
+        self.assertEqual(result.reason, "MEMBER_IN_MULTIPLE_GROUPS")
+
+    def test_empty_group_passes_validation_gap1_documented(self):
+        """CORE GAP-1 文档测试：空组经 validate 不拒（:182-195 空环零
+        迭代）——设计登记不修 core；TUI draft 结构性不可空（AC-04），
+        此处钉定 backstop 缺口真实存在（诚实面，非期望行为）。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = tuple((f"rt-{name}", "coder") for name in "abcd")
+        intent, resolved = surface.preview(selection, (("g1", ()),))
+        # GAP-1：core 不拒——resolved 透传空组（真实行为钉定）
+        self.assertIsNone(getattr(resolved, "reason", None))
+        self.assertEqual(resolved.groups[0].member_ids, ())
+
+    def test_invalid_group_id_rejected(self):
+        """group_id 非非空字符串 → core INVALID_GROUP_ID 原词。"""
+        surface, _, _, _, _, _ = _surface()
+        selection = (("rt-a", "architect"), ("rt-b", "coder"))
+        intent, result = surface.preview(selection, (("", ("rt-a",)),))
+        self.assertIsNone(intent)
+        self.assertEqual(result.reason, "INVALID_GROUP_ID")
+
+    def test_duplicate_group_id_rejected(self):
+        """重复 group_id → core DUPLICATE_GROUP_ID 原词。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = tuple((f"rt-{name}", "coder") for name in "abcd")
+        intent, result = surface.preview(
+            selection, (("g1", ("rt-a",)), ("g1", ("rt-b",))))
+        self.assertIsNone(intent)
+        self.assertEqual(result.reason, "DUPLICATE_GROUP_ID")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1111,16 +1111,24 @@ def _user_composition_surface(registry, skipped, evidence, *,
         确定性、零注册、零写入；UI 绝不直接触 registry/evidence。"""
         return _verified_pool(registry, evidence)
 
-    def _selection_to_intent(selection):
+    def _selection_to_intent(selection, groups=()):
         """P1 selection → CompositionIntent（纯装配，零 IO）。
 
         selection = ((runtime_id, role), ...) 声明序（P1：一勾选
         runtime = 一 participant）；member_id 按声明序稳定生成
-        member-1..N；groups 恒空（P1 平面协作）。合法性门归
-        validate_composition（UI 结构上只产闭集 role + 2-4 勾选，
-        非法形状由 core 诚实拒）。"""
+        member-1..N。合法性门归 validate_composition（UI 结构上只
+        产闭集 role + 2-4 勾选，非法形状由 core 诚实拒）。
+
+        2.8-C：groups = ((group_id, (runtime_id, ...)), ...) UI 域
+        组草稿（创建序），换算为 member-N 域 CollaborationGroupSpec
+        ——组内成员序 = participant 声明位序（selection 序的组内过滤，
+        与 2.8-B 组内声明位序消费一致）；组零参与 steps 派生链
+        （core :217-236）。缺省 () = P1 平面协作（旧路径逐字节
+        不变）。未知 runtime_id 交 core GROUP_MEMBER_UNKNOWN 诚实拒
+        （TUI 剪除钩子维持 draft ⊆ selection，此处 backstop）。"""
         from composition_core import (
             AgentSpec,
+            CollaborationGroupSpec,
             CompositionIntent,
             RuntimeBindingRequest,
         )
@@ -1130,10 +1138,26 @@ def _user_composition_surface(registry, skipped, evidence, *,
             member_id = f"member-{index}"
             members.append(AgentSpec(member_id, role))
             requests[member_id] = RuntimeBindingRequest(runtime_id)
+        member_groups = []
+        known = {runtime_id for runtime_id, _role in selection}
+        for group_id, member_runtime_ids in groups:
+            # 组内成员序 = participant 声明位序（重复引用保多重度）；
+            # 未知 runtime_id 原样透传（core GROUP_MEMBER_UNKNOWN 诚实
+            # 拒——零静默丢弃，backstop 面）。
+            member_ids = []
+            for index, (runtime_id, _role) in enumerate(selection, start=1):
+                member_ids.extend(
+                    [f"member-{index}"]
+                    * member_runtime_ids.count(runtime_id))
+            member_ids.extend(runtime_id for runtime_id
+                              in member_runtime_ids
+                              if runtime_id not in known)
+            member_groups.append(CollaborationGroupSpec(
+                group_id, tuple(member_ids)))
         return CompositionIntent(
             members=tuple(members),
             binding_requests=requests,
-            groups=())
+            groups=tuple(member_groups))
 
     def _prefill_default_roles(selection):
         """role=None 成员的默认角色回填——复用唯一默认指派真源：
@@ -1156,7 +1180,7 @@ def _user_composition_surface(registry, skipped, evidence, *,
              role if role is not None else by_runtime.get(runtime_id))
             for runtime_id, role in selection)
 
-    def preview_selection(selection):
+    def preview_selection(selection, groups=()):
         """CU-COCKPIT-1：只读预览（零副作用零执行）。
 
         活读 Verified 池 → role=None 回填默认（唯一指派真源复用）
@@ -1164,10 +1188,13 @@ def _user_composition_surface(registry, skipped, evidence, *,
         （调用方经 expected_resolved 传入 start 作披露全等门基准）；
         失败 = CompositionError 原词（intent 恒 None）。与 start 各自
         活读池——两次读池间池可变正是 start 第 4 步全等门的存在
-        意义（CompositionChanged，零静默重绑）。"""
+        意义（CompositionChanged，零静默重绑）。
+
+        2.8-C：groups（UI 域组草稿）缺省 () 后向兼容；draft 恒经
+        此 preview 铸 intent 才入链（唯一事实源升级点，设计 §7）。"""
         from composition_core import resolve_composition
         selection = _prefill_default_roles(selection)
-        intent = _selection_to_intent(selection)
+        intent = _selection_to_intent(selection, groups)
         result = resolve_composition(intent,
                                      _verified_pool(registry, evidence))
         if isinstance(result, CompositionError):

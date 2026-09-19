@@ -532,5 +532,52 @@ class AssemblyFailureTests(unittest.TestCase):
         self.assertIn("at least one slot spec", str(raised.exception))
 
 
+class GroupAuthoringChainTests(unittest.TestCase):
+    """2.8-C：preview→start 组全链（draft 经 preview 铸 intent →
+    STEP 7 run-local 快照落 run；快照对后续 authoring 免疫）。
+
+    设计 §20 M3 扩面：组快照落 run + 后续组编辑零回写。"""
+
+    def _select(self, surface):
+        return tuple(
+            (entry.runtime_id, role)
+            for entry, role in zip(
+                surface.listing(),
+                ("architect", "coder", "tester", "reviewer")))
+
+    def test_preview_to_start_snapshots_groups_into_run(self):
+        surface, adapters, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = self._select(surface)
+        draft = (("g1", ("rt-a", "rt-b")), ("g2", ("rt-c",)))
+        intent, expected = surface.preview(selection, draft)
+        composed = surface.start("chain task", intent, expected)
+        # STEP 7 快照 = resolved 透传（结构身份全链同值）
+        self.assertEqual(composed.groups, intent.groups)
+        self.assertEqual(
+            tuple(spec.group_id for spec in composed.groups), ("g1", "g2"))
+        self.assertEqual(composed.member_ids,
+                         ("member-1", "member-2", "member-3", "member-4"))
+        # NO EXECUTION 硬门
+        self.assertTrue(all(adapter.requests == [] for adapter in adapters))
+
+    def test_completed_run_snapshot_immune_to_later_authoring(self):
+        """已完成 run 快照 immutable：后续新 preview（不同组）零回写。"""
+        surface, _, _, _, _, _ = _surface(adapters=_four_adapters())
+        selection = self._select(surface)
+        intent, expected = surface.preview(
+            selection, (("g1", ("rt-a", "rt-b")),))
+        composed = surface.start("first task", intent, expected)
+        frozen_groups = composed.groups
+        frozen_members = composed.member_ids
+        # 后续 authoring：重入 draft 再编排（同 selection 不同组）
+        second_intent, second_expected = surface.preview(
+            selection, (("g9", ("rt-c", "rt-d")),))
+        self.assertNotEqual(second_intent.groups, frozen_groups)
+        self.assertEqual(composed.groups, frozen_groups)
+        self.assertEqual(composed.member_ids, frozen_members)
+        # 快照随 run 存量不动（列表唯一项仍持原组）
+        self.assertEqual(surface.composed_runs[0].groups, frozen_groups)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -358,7 +358,7 @@ def _build_classes() -> None:
             event.prevent_default()
             event.stop()
             if key in ("up", "down", "left", "right", "space", "enter",
-                       "escape", "q", "r", "l", "L"):
+                       "escape", "q", "r", "l", "L", "g", "x"):
                 self.app._compose_dispatch(key)
 
     class CockpitApp(App):  # type: ignore[misc]
@@ -512,6 +512,14 @@ def _build_classes() -> None:
             self._cockpit_compose_expected = None
             self._cockpit_compose_fp = None
             self._cockpit_compose_message = ()
+            # 2.8-C GROUP_AUTHORING 子模式（纯呈现态；g 恒不退出——
+            # 仅 Enter/Esc 回 BASE）：draft = ((group_id, (runtime_id,
+            # ...)), ...) 创建序（声明序）；seq 单调递增计数器——
+            # 永不复用/永不重编号（ERRATA-3：删除不回收，/new 归零
+            # draft 时 seq 一并归零）
+            self._cockpit_compose_group_mode = False
+            self._cockpit_compose_groups = ()
+            self._cockpit_compose_group_seq = 1
             # P2 W7：q 两段守卫（TUI ephemeral 交互态——绝不入
             # RunState/ControlBoundary/EventIndex/UsageLog/引擎真相）
             self._cockpit_compose_q_armed = False
@@ -1163,6 +1171,12 @@ def _build_classes() -> None:
             self._cockpit_scroll_mode = False
             self._cockpit_groups = ()
             self._cockpit_member_ids = ()
+            # 2.8-C：组草稿与 id 计数器一并归零（/new 双清：draft +
+            # seq 同时清、绝不只清其一；不继承上一 run 组状态——
+            # run-local 快照已于终态轮间归零，两道闸互为冗余）
+            self._cockpit_compose_group_mode = False
+            self._cockpit_compose_groups = ()
+            self._cockpit_compose_group_seq = 1
             self.query_one("#collab-log").clear()
             self._cockpit_log_lines = []
             self.log_text = ""
@@ -1396,16 +1410,20 @@ def _build_classes() -> None:
                 self._cockpit_compose_pcursor = min(
                     self._cockpit_compose_pcursor,
                     max(0, len(self._cockpit_compose_selected) - 1))
+            # 2.8-C 剪除钩子（重入失效）：失效 runtime 从组剪除 +
+            # 空组解散 + 披露行（draft ⊆ selection 不变量维持）
+            group_prune_lines = (self._compose_group_prune(set(removed))
+                                 if removed else ())
             self._cockpit_compose_active = True
             self._cockpit_compose_entries = entries
             self._cockpit_compose_cursor = min(
                 self._cockpit_compose_cursor, max(0, len(entries) - 1))
             self._compose_invalidate_preview()
             self._cockpit_compose_message = (
-                (ui_label("removed from selection: {ids}",
-                          self._cockpit_locale).format(
-                    ids=", ".join(removed)),)
-                if removed else ())
+                ((ui_label("removed from selection: {ids}",
+                           self._cockpit_locale).format(
+                    ids=", ".join(removed)),) if removed else ())
+                + group_prune_lines)
             self.query_one("#funnel-screen").display = False
             self.query_one("#compose-screen").display = True
             self._compose_refresh()
@@ -1456,7 +1474,9 @@ def _build_classes() -> None:
                 # 纯算术窗口化，零新滚动子系统）
                 height=self.size.height or None,
                 ascii_only=self._cockpit_ascii,
-                locale=self._cockpit_locale)
+                locale=self._cockpit_locale,
+                groups=self._cockpit_compose_groups,
+                group_mode=self._cockpit_compose_group_mode)
             self.compose_text = "\n".join(lines)
             self._zone_update("#compose-screen", self.compose_text)
             self._refresh_dock()
@@ -1465,7 +1485,13 @@ def _build_classes() -> None:
             """COMPOSE 键语义（唯一入口；呈现态快照，零 dispatch 零
             事实写回）。P2 W7：q 有可失状态（selection 或 task 草稿）
             时两段守卫——首 q 只武装 + 横幅，任意其它键/esc/换屏
-            解除；仅 armed 态 q 走既有 self.exit()。"""
+            解除；仅 armed 态 q 走既有 self.exit()。
+
+            2.8-C GROUP_AUTHORING（ERRATA-1）：g 恒不退出模式（创建
+            组后保持）；仅 Enter/Esc 回 BASE（draft 保留）；模式内
+            space=成员资格环 / x=解散 / up/down/r=显式 no-op / ←→=
+            participant 光标 / l/L·q 全保留（W7 disarm 对模式键同样
+            生效）。"""
             if self._cockpit_compose_q_armed and key != "q":
                 # disarm + 撤守卫横幅（armed 期间仅本路由可改横幅）
                 self._cockpit_compose_q_armed = False
@@ -1486,6 +1512,13 @@ def _build_classes() -> None:
                 self.exit()
                 return
             if key == "escape":
+                if self._cockpit_compose_group_mode:
+                    # esc 阶梯新梯级：模式 → BASE（draft 保留 W6；
+                    # 不直达漏斗）
+                    self._cockpit_compose_group_mode = False
+                    self._cockpit_compose_message = ()
+                    self._compose_refresh()
+                    return
                 self._compose_exit_screen()
                 return
             if key in ("l", "L"):
@@ -1493,13 +1526,38 @@ def _build_classes() -> None:
                     "zh" if self._cockpit_locale == "en" else "en")
                 self._compose_refresh()
                 return
+            if key == "enter":
+                if self._cockpit_compose_group_mode:
+                    # Enter 仅结束组编辑回 BASE（draft 保留；两段
+                    # Preview/Start 律仍在 BASE——模式内绝不启动）
+                    self._cockpit_compose_group_mode = False
+                    self._cockpit_compose_message = ()
+                    self._compose_refresh()
+                    return
+                self._compose_enter()
+                return
+            if key == "g":
+                if self._cockpit_compose_group_mode:
+                    self._compose_group_create()
+                else:
+                    self._compose_group_enter_mode()
+                return
+            if key == "x":
+                if self._cockpit_compose_group_mode:
+                    self._compose_group_dissolve()
+                # BASE：no-op 消费（组域动作仅模式内——矩阵 §10）
+                return
             if key == "up":
+                if self._cockpit_compose_group_mode:
+                    return  # 显式 no-op（participants 为横条）
                 if self._cockpit_compose_entries:
                     self._cockpit_compose_cursor = max(
                         0, self._cockpit_compose_cursor - 1)
                 self._compose_refresh()
                 return
             if key == "down":
+                if self._cockpit_compose_group_mode:
+                    return  # 显式 no-op
                 if self._cockpit_compose_entries:
                     self._cockpit_compose_cursor = min(
                         len(self._cockpit_compose_entries) - 1,
@@ -1507,6 +1565,9 @@ def _build_classes() -> None:
                 self._compose_refresh()
                 return
             if key == "space":
+                if self._cockpit_compose_group_mode:
+                    self._compose_group_ring()
+                    return
                 self._compose_toggle()
                 return
             if key == "left":
@@ -1523,11 +1584,176 @@ def _build_classes() -> None:
                     self._compose_refresh()
                 return
             if key == "r":
+                if self._cockpit_compose_group_mode:
+                    return  # 角色编辑回 BASE 完成（task 编辑同律）
                 self._compose_cycle_role()
                 return
-            if key == "enter":
-                self._compose_enter()
+
+        def _compose_group_enter_mode(self) -> None:
+            """g（BASE）：进 GROUP_AUTHORING（2.8-C）。selection 空 =
+            诚实拒（不进模式）；draft 跨进/出模式保留（W6 同律）。"""
+            if not self._cockpit_compose_selected:
+                self._cockpit_compose_message = (
+                    ui_label("select a runtime first",
+                             self._cockpit_locale),)
+                self._compose_refresh()
                 return
+            self._cockpit_compose_group_mode = True
+            self._cockpit_compose_message = ()
+            self._compose_refresh()
+
+        def _compose_group_owner_map(self):
+            """participant→group_id 单值映射（派生呈现，零存储——
+            UI 状态结构性不可表达双归属；core backstop 仍在）。"""
+            owner = {}
+            for group_id, member_ids in self._cockpit_compose_groups:
+                for runtime_id in member_ids:
+                    owner[runtime_id] = group_id
+            return owner
+
+        def _compose_group_current(self):
+            """当前 participant runtime_id（←→ 光标；零选择守卫）。"""
+            selected = self._cockpit_compose_selected
+            if not selected:
+                return None
+            return selected[min(self._cockpit_compose_pcursor,
+                                len(selected) - 1)]
+
+        def _compose_group_create(self) -> None:
+            """g（MODE，ERRATA-1/2/3）：创建组 + **保持模式**。
+            precondition 唯一 = 当前 participant ungrouped ∧ 组数<4；
+            拒绝 = honest no-op（零 draft 变更 ⇒ 不触发 invalidate）；
+            id = g{seq} 单调铸造（永不复用/永不重编号，删除不回收）。"""
+            runtime_id = self._compose_group_current()
+            if runtime_id is None:
+                return
+            if runtime_id in self._compose_group_owner_map():
+                self._cockpit_compose_message = (
+                    ui_label(
+                        "member already grouped · space ring / x dissolve",
+                        self._cockpit_locale),)
+                self._compose_refresh()
+                return
+            if len(self._cockpit_compose_groups) >= 4:
+                self._cockpit_compose_message = (
+                    ui_label("group limit reached (4)",
+                             self._cockpit_locale),)
+                self._compose_refresh()
+                return
+            group_id = f"g{self._cockpit_compose_group_seq}"
+            self._cockpit_compose_group_seq += 1
+            self._cockpit_compose_groups = self._cockpit_compose_groups + (
+                (group_id, (runtime_id,)),)
+            self._compose_invalidate_preview()
+            self._cockpit_compose_message = ()
+            self._compose_refresh()
+
+        def _compose_group_ring(self) -> None:
+            """space（MODE）：成员资格环循环 ungrouped→g1→…→gk→
+            ungrouped（环序 = 创建序；r-closure 同构先例）。末成员
+            移出（含移组）→ 组自动解散 + 披露行（显式非静默）；
+            0 组 = 环单元素 no-op。"""
+            runtime_id = self._compose_group_current()
+            if runtime_id is None or not self._cockpit_compose_groups:
+                return
+            current = self._compose_group_owner_map().get(runtime_id)
+            ring = [None] + [group_id for group_id, _member_ids
+                             in self._cockpit_compose_groups]
+            target = ring[(ring.index(current) + 1) % len(ring)]
+            dissolved = self._compose_group_assign(runtime_id, target)
+            self._compose_invalidate_preview()
+            if dissolved is not None:
+                self._cockpit_compose_message = (
+                    ui_label(
+                        "group {id} dissolved · {n} member(s) ungrouped",
+                        self._cockpit_locale).format(id=dissolved, n=1),)
+            else:
+                self._cockpit_compose_message = ()
+            self._compose_refresh()
+
+        def _compose_group_assign(self, runtime_id, target_group_id):
+            """环迁移统一重建（纯 draft 变更）：从原组移出 runtime
+            （末成员离组 → 组解散，返回被解散 id）；target=None =
+            出组；入组/移组后组内成员序恒 = selection 声明位序过滤。"""
+            rebuilt = []
+            dissolved = None
+            for group_id, member_ids in self._cockpit_compose_groups:
+                kept = tuple(member for member in member_ids
+                             if member != runtime_id)
+                if not kept:
+                    dissolved = group_id
+                    continue
+                rebuilt.append((group_id, kept))
+            if target_group_id is not None:
+                merged_with_target = []
+                for group_id, member_ids in rebuilt:
+                    if group_id == target_group_id:
+                        members = set(member_ids) | {runtime_id}
+                        merged_with_target.append((
+                            group_id,
+                            tuple(member for member
+                                  in self._cockpit_compose_selected
+                                  if member in members)))
+                    else:
+                        merged_with_target.append((group_id, member_ids))
+                rebuilt = merged_with_target
+            self._cockpit_compose_groups = tuple(rebuilt)
+            return dissolved
+
+        def _compose_group_dissolve(self) -> None:
+            """x（MODE）：解散当前 participant 所属组——全成员 →
+            ungrouped + 披露行；**绝不自动并入他组**（零隐式
+            regrouping）。ungrouped participant = honest no-op。"""
+            runtime_id = self._compose_group_current()
+            if runtime_id is None:
+                return
+            current = self._compose_group_owner_map().get(runtime_id)
+            if current is None:
+                self._cockpit_compose_message = (
+                    ui_label("no group to dissolve",
+                             self._cockpit_locale),)
+                self._compose_refresh()
+                return
+            member_count = 0
+            for group_id, member_ids in self._cockpit_compose_groups:
+                if group_id == current:
+                    member_count = len(member_ids)
+                    break
+            self._cockpit_compose_groups = tuple(
+                (group_id, member_ids)
+                for group_id, member_ids in self._cockpit_compose_groups
+                if group_id != current)
+            self._compose_invalidate_preview()
+            self._cockpit_compose_message = (
+                ui_label(
+                    "group {id} dissolved · {n} member(s) ungrouped",
+                    self._cockpit_locale).format(id=current,
+                                                 n=member_count),)
+            self._compose_refresh()
+
+        def _compose_group_prune(self, removed_ids):
+            """draft 剪除钩子：剔除离场 runtime（BASE 勾选剔除/重入
+            失效剪除）——从组移除、空组解散 + 披露行；维持 draft ⊆
+            selection 不变量（设计 §11）。返回披露行元组（零解散 =
+            空元组）。"""
+            if (not removed_ids
+                    or not self._cockpit_compose_groups):
+                return ()
+            rebuilt = []
+            dissolved = []
+            for group_id, member_ids in self._cockpit_compose_groups:
+                kept = tuple(member for member in member_ids
+                             if member not in removed_ids)
+                if kept:
+                    rebuilt.append((group_id, kept))
+                else:
+                    dissolved.append((group_id, len(member_ids)))
+            self._cockpit_compose_groups = tuple(rebuilt)
+            return tuple(
+                ui_label(
+                    "group {id} dissolved · {n} member(s) ungrouped",
+                    self._cockpit_locale).format(id=group_id, n=count)
+                for group_id, count in dissolved)
 
         def _compose_toggle(self) -> None:
             """space 勾选/取消（2-4 门：第 5 个诚实阻断；0/1 由 core
@@ -1546,7 +1772,10 @@ def _build_classes() -> None:
                     self._cockpit_compose_pcursor = max(
                         0, len(selected) - 1)
                 self._compose_invalidate_preview()
-                self._cockpit_compose_message = ()
+                # 2.8-C 剪除钩子：剔除已分组 runtime → 从组移除 +
+                # 空组解散 + 披露行（draft ⊆ selection 不变量）
+                self._cockpit_compose_message = (
+                    self._compose_group_prune({runtime_id}))
                 self._compose_refresh()
                 return
             if len(selected) >= 4:
@@ -1593,13 +1822,16 @@ def _build_classes() -> None:
             selection = tuple(
                 (runtime_id, self._cockpit_compose_roles.get(runtime_id))
                 for runtime_id in self._cockpit_compose_selected)
+            # 2.8-C：stamp 扩组维度（draft 变更 → 必重 preview；
+            # invalidate 主门 + stamp 辅门 belt+suspenders）
             stamp = (
                 tuple(self._cockpit_compose_selected),
-                tuple(sorted(self._cockpit_compose_roles.items())))
+                tuple(sorted(self._cockpit_compose_roles.items())),
+                tuple(self._cockpit_compose_groups))
             if (self._cockpit_compose_expected is None
                     or self._cockpit_compose_fp != stamp):
                 intent, result = self._cockpit_user_surface.preview(
-                    selection)
+                    selection, self._cockpit_compose_groups)
                 if hasattr(result, "reason"):
                     # CompositionError：原词红行，停留（无披露可启动）
                     self._compose_invalidate_preview()
@@ -1641,9 +1873,11 @@ def _build_classes() -> None:
 
         def _compose_start_success(self, composed) -> None:
             """COMPOSE 启动成功 → 同一换屏路径（_funnel_start_success
-            复用——零第二 RUNNING 实现）；q 守卫随换屏解除。"""
+            复用——零第二 RUNNING 实现）；q 守卫随换屏解除。2.8-C：
+            组模式位随换屏归零（draft 本体保留 = W6 终态后再入可续编）。"""
             self._cockpit_compose_q_armed = False
             self._cockpit_compose_active = False
+            self._cockpit_compose_group_mode = False
             self.query_one("#compose-screen").display = False
             self._funnel_start_success(composed)
 
