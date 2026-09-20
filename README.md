@@ -157,6 +157,26 @@ run. Rendering performance kept pace with the richer surface — projection
 is change-detected and zone-scoped, and typing touches only the dock line
 (zero full projections per keypress).
 
+**Conversational Collaboration Cockpit (2.8.0)** — the cockpit is now a
+multi-run conversation: when a collaboration finishes, type the next task
+and the same session starts the next run (divider lines separate runs in
+the log; each run gets fresh ids, facts, and control state — quitting
+without typing behaves exactly as before, and the exit code still maps to
+the last run's outcome). New session commands: `/again` reloads the last
+task through the same pool and fingerprint gates, `/compose` reopens
+runtime selection, `/runs` lists every run this session, and `/new`
+resets the display history (engine facts stay untouched). Compositions
+with multiple groups render side by side with the same true connection
+markers (`──→` observed vs `┄┄→` planned), `g` on the selection screen
+assigns members to groups, and `H` engages an explicit horizontal-scroll
+mode for oversized layouts. Agent focus deepened: `d` opens a bounded
+right-hand detail sidebar on wide terminals, and `x` (or Enter) on an
+expanded slot jumps into the trace pre-focused on that agent. `/runs`
+also appends a per-run detail block — composition, outcome, a result
+preview, and a usage summary that sums only reported-known tokens while
+counting unknown/unsupported honestly. The run boundary is pinned by
+tests: no text from an earlier run ever enters a later run's prompts.
+
 ## Why not CrewAI / AutoGen / LangGraph?
 
 They are strong tools for building LLM-chaining applications. This project
