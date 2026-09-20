@@ -39,6 +39,11 @@ from external_runtime import (  # noqa: E402
     InvocationTrace,
 )
 
+# CI 只装 .[test]（无 textual）：TUI 路径类经仓库自有 G3 探针类级跳过
+# （同 test_cockpit_tui_rendering/test_cockpit_compose_tui 的守卫语义，
+# 但本模块 47 测试中 27 个纯 entry 测试不依赖 textual，故类级而非模块级）。
+_TEXTUAL_AVAILABLE = cockpit_tui.textual_available()
+
 
 # ---------------------------------------------------------------- doubles
 
@@ -382,6 +387,7 @@ class EmitRunTerminalTests(unittest.TestCase):
 # ------------------------------------------------- Transition / Result（TUI）
 
 
+@unittest.skipUnless(_TEXTUAL_AVAILABLE, "textual not installed (.[test] lacks [tui])")
 class BetweenRunsTransitionTests(unittest.IsolatedAsyncioTestCase):
     """终态 → 轮间再入 → 第二轮启动：漏斗复武装/换屏/interval 收止/
     分节线/新驱动线程；首跑斜杠冻结律；PARKED ≠ terminal。"""
@@ -635,6 +641,7 @@ class BetweenRunsTransitionTests(unittest.IsolatedAsyncioTestCase):
 # ------------------------------------------------------------- Regression
 
 
+@unittest.skipUnless(_TEXTUAL_AVAILABLE, "textual not installed (.[test] lacks [tui])")
 class SingleRunRegressionTests(unittest.IsolatedAsyncioTestCase):
     """单轮路径契约等价：终态即 q——outcome 逐词、零分节线、
     首跑键律不变（呈现面换漏斗为 2.8 设计内变化，契约面零漂移）。"""
@@ -875,6 +882,7 @@ class ConversationRecordProjectionTests(unittest.TestCase):
         self.assertEqual(tuple(record), before)
 
 
+@unittest.skipUnless(_TEXTUAL_AVAILABLE, "textual not installed (.[test] lacks [tui])")
 class RunRecordCollectionTests(unittest.IsolatedAsyncioTestCase):
     """终态收录/PARKED 不铸//new 双清/第二轮追加/双镜像同步
     （TUI 呈现态三站点——builder 经注入，TUI 零 entry import）。"""
@@ -990,6 +998,7 @@ class RunRecordCollectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(app._cockpit_runs), 1)
 
 
+@unittest.skipUnless(_TEXTUAL_AVAILABLE, "textual not installed (.[test] lacks [tui])")
 class RunsDetailPilotTests(unittest.IsolatedAsyncioTestCase):
     """/runs 详情块：additive（摘要行逐字节兼容）+ 详情渲染 +
     在飞轮无详情块 + zh/窄宽形态。"""
