@@ -177,6 +177,27 @@ preview, and a usage summary that sums only reported-known tokens while
 counting unknown/unsupported honestly. The run boundary is pinned by
 tests: no text from an earlier run ever enters a later run's prompts.
 
+**Experimental foundations: Context models & deterministic routing (2.9.0)** —
+the stable product core is unchanged: runtime-neutral collaboration
+orchestration over coding-agent CLIs, the qualification chain and verified
+runtime pool, remote collaboration across a process boundary, the
+collaboration cockpit (TUI and the non-TTY contract), and the existing
+execution and control behavior all ship exactly as in 2.8.0. This version
+adds two experimental capability lines, delivered as frozen semantic
+modules with zero production wiring. The context trilogy: a scoped context
+item model (validity and provenance pinned), a collaboration memory record
+model (completed runs only, content-addressed), and a deterministic context
+compiler (character budgets, honest token tri-stating) — semantic models
+delivered; production execution wiring remains deferred. ORCH-5:
+deterministic default-composition routing, a pure routing projection that
+consumes per-runtime usage facts with a canonical tie-break, integrated
+behind an explicit default-off flag — activation remains deferred, so
+default compositions behave exactly as before. Deferred on purpose:
+ORCH-5 activation, context production wiring, memory persistence,
+query/target/capabilities surfaces, and token/cost benchmarking. No cost
+or token savings are claimed; usage telemetry stays honestly three-state
+(KNOWN / UNKNOWN / UNSUPPORTED).
+
 ## Why not CrewAI / AutoGen / LangGraph?
 
 They are strong tools for building LLM-chaining applications. This project

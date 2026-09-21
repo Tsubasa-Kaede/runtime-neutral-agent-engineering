@@ -133,6 +133,20 @@ Enter 经既有控制面提交修订（`p` 暂停 / `r` 恢复 / `a` 中止 / `t
 结局、结果预览、用量汇总（仅实报已知求和，未知/不支持如实计数）。
 轮间边界有测试钉定：早前轮次的文本绝不进入后续任何轮的提示词。
 
+**实验性基座：Context 模型与确定性路由（2.9.0）**：稳定产品核心不变——
+基于 coding-agent CLI 的 runtime-neutral 协作编排、资格链与验证过的
+runtime 池、跨进程协作、协作驾驶舱（TUI 与非 TTY 契约）以及既有执行
+与控制行为，均与 2.8.0 完全一致。本版以「冻结语义模块、零生产接线」
+形态新增两条实验性能力线。Context 三部曲：带 scope/validity/provenance
+的上下文条目模型、仅收录已完成轮次的协作记忆记录模型（内容寻址）、
+带字符预算与 token 三态诚实的确定性上下文编译器——语义模型已交付，
+生产执行接线仍为 Deferred。ORCH-5：确定性默认组合路由——消费
+per-runtime 用量事实、字典序平局钉定的纯路由投影，经显式缺省关闭的
+开关集成——激活仍为 Deferred，默认组合行为与从前完全一致。同样
+Deferred：ORCH-5 激活、Context 生产接线、记忆持久化、query/target/
+capabilities 呈现面、Token/Cost benchmark。不声称任何成本或 token
+节省；用量遥测保持三态诚实（KNOWN / UNKNOWN / UNSUPPORTED）。
+
 ## 为什么不用 CrewAI / AutoGen / LangGraph？
 
 它们是优秀的 LLM 应用编排框架；本项目解决的是另一个问题 —— 对**已存在于
