@@ -57,6 +57,13 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
       # dual_agent shim keeps flat names resolvable and the graph single)
     from candidate_validation import CandidateValidationStatus
     from cockpit_projection import DEFAULT_ROLE_TEMPLATES
+    from cockpit_route import (
+        CostDimension,
+        CostFactView,
+        DispatchSeat,
+        RoutingPolicy,
+        route_composition,
+    )
     from cockpit_session import CockpitSession
     from content_safety import REDACTED_ERROR, contains_unsafe_content
     from control_boundary import (
@@ -82,6 +89,13 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
 except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
     from .cockpit_projection import DEFAULT_ROLE_TEMPLATES
+    from .cockpit_route import (
+        CostDimension,
+        CostFactView,
+        DispatchSeat,
+        RoutingPolicy,
+        route_composition,
+    )
     from .cockpit_session import CockpitSession
     from .content_safety import REDACTED_ERROR, contains_unsafe_content
     from .control_boundary import (
@@ -377,6 +391,68 @@ def resolve_default_composition(verified_pool_snapshot):
             canonical_runtime_identity=entry.identity)
         for role, entry in zip(roles, entries))
     return DefaultComposition(roles=tuple(roles), bindings=bindings,
+                              blocked_reason=None, blocked_hint=None)
+
+
+# ORCH-5 默认路由政策（设计 §13：单一确定性代码内默认——零 UI/零
+# 配置/零环境变量/零会话可变面；政策升格=未来显式授权）。调用数维度
+# 最稳健：任何已完成 run 即 KNOWN，零 token/价格/质量语义。
+_ROUTE_DEFAULT_POLICY = RoutingPolicy(
+    cost_dimensions=(CostDimension.INVOCATION_COUNT,))
+
+
+def routed_default_composition(verified_pool_snapshot, usage_records=(),
+                               policy=None):
+    """ORCH-5 集成桥（Architecture A；设计=orch-5-integration-design.md）。
+
+    默认组合路径的唯一 Router 接线：既有默认组合（唯一 sorted+模板
+    zip 真源）经 Router 政策重排 → 现有 DefaultComposition 同形（零
+    第二组合真源）。DispatchPlan 是瞬态路由决策物：逐席位消费即弃
+    ——零持久化、零执行/调用/会话/编译/Memory/UI 接触。
+
+    转译律（实现期 ERRATUM 1 钉定，见集成设计 PART 8）：席位按模板
+    位次逐个消费 Router——每席位在剩余池上取当前最优（激活维度 cost
+    键 + canonical runtime_id 兜底），选中即移出剩余池。空证据 ⇒ 全
+    部 cost 键同居 ⇒ 逐位等价既有 sorted(runtime_id) distinct zip；
+    有 KNOWN 证据 ⇒ 按政策排序的 distinct 指派（Router 只决定
+    default member ordering / assignment，绝不触碰角色）。
+
+    角色恒模板位次（零推断/零改写/零 cost 改角）；资格/能力/健康零
+    重算（池快照即资格——本桥只消费；health 无注入源=如实缺席，属
+    Router 端注记，本层不展示）。blocked 语义与角色序列均复用
+    resolve_default_composition 唯一真源（本桥零模板引用、零
+    BLOCKED 文案重复）。usage_records = 逐调用用量记录鸭序列（消费
+    方展平喂入——零 UsageLog 修改零新 Store）。policy 缺省 =
+    _ROUTE_DEFAULT_POLICY。畸形池项 = 既有 typed error 边界（坏
+    provider 形状在 Router 构造期 RouteModelError 诚实上抛；无
+    runtime_id 项与 legacy 同型在排序处失败——同一失败面零新增
+    吞没）。
+    """
+    if policy is None:
+        policy = _ROUTE_DEFAULT_POLICY
+    entries = tuple(sorted(verified_pool_snapshot,
+                           key=lambda entry: entry.runtime_id))
+    base = resolve_default_composition(entries)
+    if base.blocked_reason is not None:
+        return base
+    usage_view = CostFactView.from_usage_records(tuple(usage_records))
+    entry_by_runtime = {entry.runtime_id: entry for entry in entries}
+    remaining = entries
+    bindings = []
+    for index, role in enumerate(base.roles):
+        seat = (DispatchSeat(member_id=f"a{index + 1}", role=role),)
+        plan = route_composition(seat, remaining, usage=usage_view,
+                                 policy=policy)
+        chosen = entry_by_runtime[plan.selections[0].runtime_id]
+        bindings.append(CompositionBinding(
+            role=role,
+            runtime_id=chosen.runtime_id,
+            provider_id=chosen.provider_id,
+            canonical_runtime_identity=chosen.identity))
+        remaining = tuple(entry for entry in remaining
+                          if entry.runtime_id != chosen.runtime_id)
+    return DefaultComposition(roles=base.roles,
+                              bindings=tuple(bindings),
                               blocked_reason=None, blocked_hint=None)
 
 
@@ -1114,7 +1190,8 @@ def _funnel_composition_closures(registry, skipped, evidence, *,
                                  timeout_seconds, boundary_hook=None,
                                  observation_sink=None,
                                  event_index=None, task_id_mint=None,
-                                 terminal_emitted=None):
+                                 terminal_emitted=None,
+                                 use_route_default=False):
     """CU-TUI-5 组合面（READ/DISPATCH 注入范式，C1 先例同构）。
 
     preview = 只读默认组合预览（零引擎对象、零副作用、零事件）；
@@ -1125,24 +1202,39 @@ def _funnel_composition_closures(registry, skipped, evidence, *,
     composed_runs 记录成功启动（2.8-A 起会话内可多次——每 run 一次）。
     2.8-A 会话注入件：task_id_mint（会话级唯一 task_id）与
     terminal_emitted（前轮 TERMINAL 补发防重集）由调用方共享供给
-    两面；缺席时本面局部默认（单 run 语义与既有逐字节一致）。"""
+    两面；缺席时本面局部默认（单 run 语义与既有逐字节一致）。
+    ORCH-5（Architecture A）：use_route_default 缺省 False = 既有
+    sorted(runtime_id) 默认路径字节不变；True = 默认组合唯一决策点
+    经 routed_default_composition 桥（会话内前轮 usage 闭包展平
+    喂入）。显式组合路径（_user_composition_surface）结构性不经
+    Router——用户权威恒直通。"""
 
     if terminal_emitted is None:
         terminal_emitted = set()
+    composed_runs = []
+
+    def _default_composition():
+        """默认组合唯一决策点：OFF（缺省）=既有 resolve_default_
+        composition；ON=ORCH-5 桥（前轮 usage 展平——零新 Store 零
+        UsageLog 修改；run 终态后才 append，preview/start 重算一致，
+        披露全等门照常执法）。"""
+        pool = _verified_pool(registry, evidence)
+        if not use_route_default:
+            return resolve_default_composition(pool)
+        return routed_default_composition(
+            pool,
+            tuple(record for run in composed_runs
+                  for record in run.usage()))
 
     def composition_preview():
-        return resolve_default_composition(
-            _verified_pool(registry, evidence))
-
-    composed_runs = []
+        return _default_composition()
 
     def start_composition(task_text, expected_composition):
         if not isinstance(task_text, str) or not task_text.strip():
             return CompositionError("INVALID_TASK",
                                     "task must be a non-empty string",
                                     None)
-        live = resolve_default_composition(
-            _verified_pool(registry, evidence))
+        live = _default_composition()
         if live.blocked_reason is not None:
             return CompositionError("RUNTIME_NOT_QUALIFIED",
                                     live.blocked_reason,

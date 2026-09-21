@@ -726,13 +726,18 @@ class ExitCodeTests(unittest.TestCase):
 
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
-    "candidate_validation", "cockpit_projection", "cockpit_session",
+    "candidate_validation", "cockpit_projection", "cockpit_route",
+    "cockpit_session",
     "cockpit_tui", "composition_core", "content_safety",
     "control_boundary",
     "control_journal", "execution_observation", "execution_slots",
     "external_runtime", "host_entry", "sequential_pipeline",
     "usage_log",
 }
+# ORCH-5 Architecture A 精确放宽（2026-09-21 集成授权）：cockpit_route
+# = stdlib-only 纯决策投影模块（零引擎/零 provider/零 IO 面，经其
+# 92 测试 + 集成测试背书），entry 仅经 routed_default_composition
+# 桥消费——默认路径专用，显式组合路径结构性不经。
 
 _BANNED_RUNTIME_NAMES = (
     "claude", "codex", "pi-cli", "gemini", "qwen", "opencode",
