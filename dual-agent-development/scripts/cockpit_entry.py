@@ -1207,7 +1207,10 @@ def _funnel_composition_closures(registry, skipped, evidence, *,
     sorted(runtime_id) 默认路径字节不变；True = 默认组合唯一决策点
     经 routed_default_composition 桥（会话内前轮 usage 闭包展平
     喂入）。显式组合路径（_user_composition_surface）结构性不经
-    Router——用户权威恒直通。"""
+    Router——用户权威恒直通。ORCH-5-ACT（Option A2）：生产路径已
+    显式激活——_run_first_run_funnel 调用点显式传 True（全仓唯一
+    激活位，静态测试钉定）；signature 缺省 False 保留为桥级保守
+    缺省（embedder/测试形态零语义变化）。"""
 
     if terminal_emitted is None:
         terminal_emitted = set()
@@ -1496,11 +1499,14 @@ def _run_first_run_funnel(intent, tui, *, factories, evidence, base_dir,
     # 全程一致。
     task_id_mint = _task_id_mint()
     terminal_emitted = set()
+    # ORCH-5-ACT（Option A2）：生产激活位全仓唯一——默认组合经 Router
+    # 桥（空证据≡legacy 字节等价；显式组合结构性 bypass；signature
+    # 缺省 False 保留为桥级保守缺省）。
     surfaces = _funnel_composition_closures(
         registry, skipped, evidence, timeout_seconds=effective_timeout,
         boundary_hook=boundary_hook, observation_sink=observation_sink,
         event_index=event_index, task_id_mint=task_id_mint,
-        terminal_emitted=terminal_emitted)
+        terminal_emitted=terminal_emitted, use_route_default=True)
     # CU-COCKPIT-1：user 面（listing/preview/start）与漏斗面共享同一
     # registry/evidence/timeout 现场件——单一池真源、同一装配真相。
     user_surface = _user_composition_surface(

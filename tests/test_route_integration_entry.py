@@ -9,7 +9,9 @@
   披露全等门）保持；桥转译；确定性重放；preview/start 一致性；
   会话二轮 usage 改变默认选择；畸形候选拒绝；无候选保持 BLOCKED。
 - 静态边界：零 provider/adapter/Compiler/Memory 新依赖；零持久化
-  词；生产零调用方传 flag（无静默激活）。
+  词；激活位全仓唯一且显式（ORCH-5-ACT Option A2：use_route_
+  default=True 恰一处、位于 _run_first_run_funnel；signature 缺省
+  False 保留为桥级保守缺省）。
 
 夹具沿 M2 池契约测试惯例：真 AdapterRegistry/AdapterDescriptor（池
 路径零 factory 调用）+ 直接构造 evidence dict（离线数据对象）。
@@ -369,6 +371,59 @@ class ClosureIntegrationTests(unittest.TestCase):
         surfaces.composed_runs.append(_fake_run())
         self.assertEqual(surfaces.preview(), expected)
 
+    def test_no_flag_construction_ignores_usage(self):
+        """A2 极性证明：不传旗标构造（embedder/测试形态）= 桥级
+        保守缺省 OFF——KNOWN 用量在场仍 canonical 序（激活仅经
+        生产调用点显式发生）。"""
+        surfaces = cockpit_entry._funnel_composition_closures(
+            _registry(THREE), None, _evidence(THREE), timeout_seconds=5)
+        surfaces.composed_runs.append(
+            _fake_run(_rec("rt-alpha"), _rec("rt-alpha"),
+                      _rec("rt-beta")))
+        self.assertEqual(
+            _runtime_ids(surfaces.preview()),
+            ("rt-alpha", "rt-beta", "rt-gamma"))
+
+
+class ActivationWiringTests(unittest.TestCase):
+    """ORCH-5-ACT 激活接线（真实生产调用路径；REAL=0 零渲染零执行）。"""
+
+    def test_funnel_passes_activation_flag(self):
+        """生产激活位真实生效：_run_first_run_funnel 构造漏斗闭包时
+        显式激活（use_route_default=True）。录制式包装真构造器证
+        kwarg 传递；fake TUI 零渲染，仅走装配路径（outcome=None ⇒
+        exit 0 前置退出——零事件零执行零交付）。"""
+        captured = {}
+        real_closures = cockpit_entry._funnel_composition_closures
+        real_host = cockpit_entry._host_entry
+
+        def _recording_closures(*args, **kwargs):
+            captured.update(kwargs)
+            return real_closures(*args, **kwargs)
+
+        def _fake_host():
+            return SimpleNamespace(
+                environment_registry=lambda factories: (
+                    _registry(THREE), ()))
+
+        tui = SimpleNamespace(
+            new_event_store=lambda: None,
+            run_cockpit_funnel=lambda **kwargs: None)
+        intent = SimpleNamespace(task_token="demo", timeout_seconds=None)
+        cockpit_entry._funnel_composition_closures = _recording_closures
+        cockpit_entry._host_entry = _fake_host
+        try:
+            exit_code = cockpit_entry._run_first_run_funnel(
+                intent, tui, factories=(), evidence=_evidence(THREE),
+                base_dir=None, timeout_seconds=5,
+                boundary_hook=None, observation_sink=None,
+                event_index=object())
+        finally:
+            cockpit_entry._funnel_composition_closures = real_closures
+            cockpit_entry._host_entry = real_host
+        self.assertEqual(exit_code, 0)
+        self.assertIs(captured.get("use_route_default"), True)
+
 
 class ExplicitBypassTests(unittest.TestCase):
     """显式用户组合结构性绕过 Router（授权 §十二）。"""
@@ -424,8 +479,11 @@ class StaticBoundaryTests(unittest.TestCase):
         for provider in ("claude", "codex", "gemini", "qwen"):
             self.assertNotIn(provider, bridge)
 
-    def test_no_production_caller_passes_flag(self):
-        """生产代码零调用方传 use_route_default（无静默激活面）。"""
+    def test_single_explicit_activation_site(self):
+        """ORCH-5-ACT（Option A2）：激活位全仓唯一且显式——
+        use_route_default=True 恰一处并位于 _run_first_run_funnel
+        的 source window 内；其他 scripts 文件零旗标（无第二激活
+        面）；signature 缺省 False 保留（桥级保守缺省不动）。"""
         repo_root = Path(__file__).resolve().parents[1]
         hits = []
         for path in repo_root.glob("dual-agent-development/scripts/*.py"):
@@ -433,8 +491,13 @@ class StaticBoundaryTests(unittest.TestCase):
             if "use_route_default" in text and path.name != "cockpit_entry.py":
                 hits.append(path.name)
         self.assertEqual(hits, [])
-        self.assertGreaterEqual(
-            ENTRY_SOURCE.count("use_route_default"), 3)
+        self.assertEqual(ENTRY_SOURCE.count("use_route_default=True"), 1)
+        window_start = ENTRY_SOURCE.index("def _run_first_run_funnel")
+        window_end = ENTRY_SOURCE.index("\ndef ", window_start)
+        self.assertIn(
+            "use_route_default=True",
+            ENTRY_SOURCE[window_start:window_end])
+        self.assertIn("use_route_default=False", ENTRY_SOURCE)
 
     def test_flag_defaults_off_in_signature(self):
         self.assertIn(
