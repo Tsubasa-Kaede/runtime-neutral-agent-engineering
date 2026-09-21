@@ -103,7 +103,9 @@ ROLE=RUNTIME_ID [--step ...]` 按序编排多 Agent 协作，所有引用的 run
 **首跑漏斗（2.6.0）**：安装 `[tui]` 扩展
 （`pip install dual-agent-development[tui]`）后，交互终端上不带参数的
 `dual-agent cockpit` 不再报错，而是进入组合漏斗：输入任务，确认默认
-协作方案（已验证 runtime 按 runtime-id 字典序绑定；2 个对应
+协作方案（首个组合按 canonical 字典序绑定已验证 runtime；同一会话的
+后续默认组合可依已观察的调用次数做确定性排序，平局仍以字典序钉定，
+且任何重排都经披露门确认——2.10.0；2 个对应
 architect + coder，3 个加 tester，4 个加 reviewer），回车启动。已验证
 runtime 不足两个时，屏幕显示 blocked 原因与 `qualify` 引导。显式
 `--step` 开发者路径语义不变，也绝不与漏斗混合：管道/重定向输出、
@@ -141,11 +143,23 @@ runtime 池、跨进程协作、协作驾驶舱（TUI 与非 TTY 契约）以及
 的上下文条目模型、仅收录已完成轮次的协作记忆记录模型（内容寻址）、
 带字符预算与 token 三态诚实的确定性上下文编译器——语义模型已交付，
 生产执行接线仍为 Deferred。ORCH-5：确定性默认组合路由——消费
-per-runtime 用量事实、字典序平局钉定的纯路由投影，经显式缺省关闭的
-开关集成——激活仍为 Deferred，默认组合行为与从前完全一致。同样
-Deferred：ORCH-5 激活、Context 生产接线、记忆持久化、query/target/
-capabilities 呈现面、Token/Cost benchmark。不声称任何成本或 token
-节省；用量遥测保持三态诚实（KNOWN / UNKNOWN / UNSUPPORTED）。
+per-runtime 用量事实、字典序平局钉定的纯路由投影，2.9.0 以显式关闭的
+开关集成，2.10.0 起默认激活。同样 Deferred：Context 生产接线、记忆
+持久化、query/target/capabilities 呈现面、Token/Cost benchmark。不声称
+任何成本或 token 节省；用量遥测保持三态诚实（KNOWN / UNKNOWN /
+UNSUPPORTED）。
+
+**确定性默认组合路由，正式启用（2.10.0）**：ORCH-5 路由投影现在默认
+驱动默认组合。它是确定性的、已验证 Runtime 感知的：候选集恒为
+VERIFIED 池（资格链不变），角色恒在模板位次，排序只消费当前会话内
+已观察到的调用事实（usage-fact-driven、invocation-aware）。会话的
+首个组合与 canonical 字典序完全一致——空证据等于 canonical 顺序；
+后续默认组合可依据已观察的调用次数重排席位，平局仍以字典序钉定。
+一切重排都经披露门：组合指纹门以诚实归因呈现任何变化，必须显式
+确认才会启动。显式组合（`--step`、选择屏）从不路由——用户权威
+直通。用量遥测保持三态诚实（KNOWN / UNKNOWN / UNSUPPORTED）；
+UNKNOWN 绝不当作零，绝不推断 token、价格或延迟。不声称任何成本或
+token 节省；这是确定性路由，不是优化器。
 
 ## 为什么不用 CrewAI / AutoGen / LangGraph？
 

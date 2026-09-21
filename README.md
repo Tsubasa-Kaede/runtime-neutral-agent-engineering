@@ -131,8 +131,12 @@ diagnostics on stderr.
 on an interactive terminal with the `[tui]` extra installed
 (`pip install dual-agent-development[tui]`), opens the composition funnel
 instead of erroring: type the task, review the default collaboration plan
-(verified runtimes bound in sorted runtime-id order; 2 runtimes map to
-architect + coder, 3 add a tester, 4 add a reviewer), press Enter to start.
+(the first composition binds verified runtimes in canonical sorted
+runtime-id order; later default compositions in the same session may order
+seats deterministically from observed invocation counts, with the canonical
+tie-break, and every reordering is disclosed for confirmation — 2.10.0;
+2 runtimes map to architect + coder, 3 add a tester, 4 add a reviewer),
+press Enter to start.
 With fewer than two verified runtimes the screen states the blocked reason
 and the `qualify` command to run. The explicit `--step` developer path
 keeps its exact semantics and never merges with the funnel: piped or
@@ -190,13 +194,30 @@ model (completed runs only, content-addressed), and a deterministic context
 compiler (character budgets, honest token tri-stating) — semantic models
 delivered; production execution wiring remains deferred. ORCH-5:
 deterministic default-composition routing, a pure routing projection that
-consumes per-runtime usage facts with a canonical tie-break, integrated
-behind an explicit default-off flag — activation remains deferred, so
-default compositions behave exactly as before. Deferred on purpose:
-ORCH-5 activation, context production wiring, memory persistence,
-query/target/capabilities surfaces, and token/cost benchmarking. No cost
-or token savings are claimed; usage telemetry stays honestly three-state
-(KNOWN / UNKNOWN / UNSUPPORTED).
+consumes per-runtime usage facts with a canonical tie-break — integrated
+behind an explicitly disabled switch in 2.9.0, activated by default in
+2.10.0. Deferred on purpose: context production wiring, memory
+persistence, query/target/capabilities surfaces, and token/cost
+benchmarking. No cost or token savings are claimed; usage telemetry stays
+honestly three-state (KNOWN / UNKNOWN / UNSUPPORTED).
+
+**Deterministic default-composition routing, active (2.10.0)** — the
+ORCH-5 routing projection now drives default compositions by default. It
+is deterministic and verified-runtime-aware: the candidate set is always
+the VERIFIED pool (qualification unchanged), roles stay on their template
+positions, and ordering consumes only invocation facts already observed
+in the current session (usage-fact-driven, invocation-aware). The first
+composition in a session is identical to the canonical sorted order —
+empty evidence equals canonical ordering — and later default compositions
+may reorder seats by observed invocation counts with the canonical
+tie-break. Every reordering is disclosure-gated: the composition
+fingerprint gate surfaces any change with honest reasons and requires
+explicit confirmation before a run starts. Explicit compositions
+(`--step`, the selection screen) never route — user authority passes
+straight through. Usage telemetry stays honestly three-state
+(KNOWN / UNKNOWN / UNSUPPORTED); UNKNOWN is never treated as zero, and no
+token, price, or latency is ever inferred. No cost or token savings are
+claimed; this is deterministic routing, not an optimizer.
 
 ## Why not CrewAI / AutoGen / LangGraph?
 
