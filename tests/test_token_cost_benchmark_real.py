@@ -65,6 +65,7 @@ _BENCH_REAL_ON = RUN_REAL_PROVIDER_TESTS and _BENCHMARK_GATE
 _TIMEOUT_SECONDS = 300.0
 _WARM_REPEATS = 5   # warm N（授权 §七：warm >= 5）
 _MAX_INVOCATIONS = 46  # 预算硬顶（§十八）：A6+B18+C18+D4
+_RUN_PREFIX = "benchreal2"  # RECOVERY 轮全新 run_id（旧轮=historical）
 
 # ---- 固定实验常量（manifest 恒定项；一次授权轮内零漂移）----
 _STEPS_MULTI = (("architect", "claude-cli"), ("coder", "pi-cli"),
@@ -77,20 +78,32 @@ _POLICY_ROUTE_ON = "route-on-invocation-count"
 
 
 def _stdout(payload):
+    import time
+    payload["t"] = round(time.time(), 3)
     print(json.dumps(payload, ensure_ascii=False, default=str),
           flush=True)
 
 
 def _runtime_versions():
-    """本地 CLI 版本（--version 本地打印，非 provider invocation）。"""
+    """本地 CLI 版本（--version 本地打印，非 provider invocation）。
+
+    shutil.which 解析 Windows npm .cmd shim（裸 argv 在 CreateProcess
+    下不可见——RECOVERY 轮实证）。
+    """
+    import shutil
     versions = {}
     for runtime_id, executable in (("claude-cli", "claude"),
                                    ("pi-cli", "pi")):
+        resolved = shutil.which(executable)
+        if resolved is None:
+            versions[runtime_id] = "executable not on PATH"
+            continue
         try:
             done = subprocess.run(
-                [executable, "--version"], capture_output=True,
+                [resolved, "--version"], capture_output=True,
                 text=True, timeout=30)
-            versions[runtime_id] = (done.stdout + done.stderr).strip()[:80]
+            versions[runtime_id] = (
+                done.stdout + done.stderr).strip()[:80]
         except Exception as error:  # noqa: BLE001 - 版本探测失败即记录
             versions[runtime_id] = f"version probe failed: {error}"
     return versions
@@ -183,7 +196,7 @@ class _RealSession:
         """
         cutoff_prefix = self.prefix()
         warm = run_index > 0
-        run_id = f"benchreal-{arm}-r{run_index}"
+        run_id = f"{_RUN_PREFIX}-{arm}-r{run_index}"
         task_id = f"{run_id}-task"
         disclosures, char_facts = [], []
         journal = ControlJournal()
@@ -214,12 +227,35 @@ class _RealSession:
 
         # ---- 完整性门（§十七：任一失败即 raise 停机）----
         if outcome.status is not RunStatus.COMPLETED or outcome.error:
+            # pipeline :236-238：非 SUCCESS 步骤 → FAILED + final_result
+            # 携带真实细节（outcome.error 恒 None）——取证必读面。
+            final = outcome.final_result
+            transcript = [
+                {"step_index": rec.step_index, "slot_id": rec.slot_id,
+                 "status": str(rec.status),
+                 "invocation_id": rec.invocation_id}
+                for rec in outcome.transcript]
             _stdout({"event": "run_failed", "run_id": run_id,
                      "status": str(outcome.status),
-                     "error": str(outcome.error)})
+                     "error": str(outcome.error),
+                     "final_result_status": (
+                         str(final.status) if final is not None
+                         else None),
+                     "final_result_error": (
+                         final.error if final is not None else None),
+                     "final_result_trace": (
+                         {"invocation_id": final.trace.invocation_id,
+                          "input_tokens": final.trace.input_tokens,
+                          "output_tokens": final.trace.output_tokens}
+                         if final is not None
+                         and final.trace is not None else None),
+                     "transcript": transcript})
             raise AssertionError(
                 f"{run_id} did not complete: status={outcome.status} "
-                f"error={outcome.error!r}")
+                f"final_status="
+                f"{final.status if final is not None else None!r} "
+                f"final_error="
+                f"{final.error if final is not None else None!r}")
         if len(records) != len(steps):
             _stdout({"event": "usage_integrity_violation",
                      "run_id": run_id, "records": len(records),
@@ -369,9 +405,53 @@ def _runtime_buckets(rows):
 class BenchRealSessionTests(unittest.TestCase):
     """一次受控 BENCH-REAL 会话：A/B/C/D 四臂 + 完整性门 + 报告。"""
 
+    def _arm_gate(self, arm):
+        """RECOVERY §八：每臂 cold 后完整性门（失败即停机）。
+
+        检查：records==plan（per-run 已断言，此处臂级复核）、
+        usage state 完整（无 UNSUPPORTED）、claude 席位 telemetry
+        存活（至少一条 KNOWN）、runtime 版本零漂移、manifest
+        fingerprint 臂内一致。
+        """
+        arm_rows = [row for row in self.session.rows
+                    if row["experiment_arm"] == arm]
+        self.assertTrue(arm_rows, f"{arm} has no rows")
+        for row in arm_rows:
+            self.assertIn(row["usage_state"], ("KNOWN", "UNKNOWN"),
+                          f"{arm} row {row['invocation_id']}")
+        known = [row for row in arm_rows
+                 if row["usage_state"] == "KNOWN"]
+        if not known:
+            _stdout({"event": "telemetry_schema_violation",
+                     "arm": arm,
+                     "detail": "zero KNOWN records — claude seat "
+                               "telemetry suspected broken"})
+            raise AssertionError(
+                f"{arm}: zero KNOWN usage records (token telemetry "
+                "schema violation suspected; STOP per authorization "
+                "section 16)")
+        fingerprints = {(row["task_fingerprint"],
+                         row["composition_fingerprint"])
+                        for row in arm_rows}
+        self.assertEqual(len(fingerprints), 1,
+                         f"{arm} manifest fingerprint drift: "
+                         f"{fingerprints}")
+        versions_now = _runtime_versions()
+        if versions_now != self.session.versions:
+            _stdout({"event": "runtime_version_drift",
+                     "arm": arm, "start": self.session.versions,
+                     "now": versions_now})
+            raise AssertionError(
+                f"{arm}: runtime version drift detected")
+        _stdout({"event": "arm_gate_passed", "arm": arm,
+                 "rows": len(arm_rows),
+                 "known_records": len(known)})
+
     def test_bench_real_full_session(self):
-        session = _RealSession()
+        self.session = _RealSession()
+        session = self.session
         _stdout({"event": "session_start",
+                 "run_prefix": _RUN_PREFIX,
                  "runtimes": list(session.identity),
                  "versions": session.versions,
                  "budget_max_invocations": _MAX_INVOCATIONS})
@@ -385,32 +465,12 @@ class BenchRealSessionTests(unittest.TestCase):
              "compiler", _POLICY_COMPILER),
         )
 
-        # ---- Phase 3：cold N=1 各臂 ----
+        # ---- RECOVERY §八：cold 逐臂执行，每臂后即完整性门 ----
         for arm, task, steps, mode, policy in arm_specs:
             session.run_arm(arm, task, steps, mode, 0, policy)
+            self._arm_gate(arm)
 
-        # ---- Phase 4：usage integrity 门 ----
-        cold_rows = list(session.rows)
-        for row in cold_rows:
-            self.assertIn(row["usage_state"], ("KNOWN", "UNKNOWN"))
-        known_cold = [row for row in cold_rows
-                      if row["usage_state"] == "KNOWN"]
-        if not known_cold:
-            _stdout({"event": "telemetry_schema_violation",
-                     "detail": "cold phase produced zero KNOWN token "
-                               "records on documented parsing adapters"})
-            raise AssertionError(
-                "zero KNOWN usage records in cold phase — token "
-                "telemetry schema violation suspected (STOP per "
-                "authorization section 17)")
-
-        # ---- Phase 5：warm N=5 各臂 ----
-        for arm, task, steps, mode, policy in arm_specs:
-            for run_index in range(1, 1 + _WARM_REPEATS):
-                session.run_arm(arm, task, steps, mode, run_index,
-                                policy)
-
-        # ---- Phase 7：D ORCH-5 OFF vs ON（各 N=1，逐值报告）----
+        # ---- D ORCH-5 OFF vs ON（各 N=1，cold 全成后才执行）----
         pool2 = tuple(sorted(
             ({"runtime_id": runtime_id,
               "provider_id": session.providers[runtime_id],
@@ -429,6 +489,7 @@ class BenchRealSessionTests(unittest.TestCase):
         session.run_arm("D-route-off", benchmark_fixtures.MULTI_TASK,
                         off_steps, "compiler", 0, _POLICY_ROUTE_OFF,
                         routing_decision="OFF canonical sorted zip")
+        self._arm_gate("D-route-off")
 
         frozen_prefix = session.prefix()  # ON 冻结前缀（cutoff）
         on = cockpit_entry.routed_default_composition(
@@ -445,8 +506,15 @@ class BenchRealSessionTests(unittest.TestCase):
                         routing_decision=(
                             f"ON warm prefix cutoff="
                             f"{len(frozen_prefix)} invocation-count"))
+        self._arm_gate("D-route-on")
 
-        # ---- Phase 8/9：分域汇总 + coverage 审计 ----
+        # ---- RECOVERY §八/§十三：全 cold 完成后才进入 warm N=5 ----
+        for arm, task, steps, mode, policy in arm_specs:
+            for run_index in range(1, 1 + _WARM_REPEATS):
+                session.run_arm(arm, task, steps, mode, run_index,
+                                policy)
+
+        # ---- 分域汇总 + coverage 审计 ----
         rows = session.rows
         self.assertEqual(session.invocation_count, _MAX_INVOCATIONS)
         arms = {arm: _arm_totals([row for row in rows
@@ -455,7 +523,8 @@ class BenchRealSessionTests(unittest.TestCase):
                             "D-route-off", "D-route-on")}
         report = {
             "event": "bench_real_final_report",
-            "baseline": "a3b9f8d",
+            "run_prefix": _RUN_PREFIX,
+            "baseline": "7b81b4c",
             "versions": session.versions,
             "runtimes": list(session.identity),
             "n_requested": {"A": 6, "B": 6, "C": 6, "D-off": 1,
