@@ -726,7 +726,8 @@ class ExitCodeTests(unittest.TestCase):
 
 _ALLOWED_IMPORT_ROOTS = {
     "__future__", "json", "sys", "typing",
-    "candidate_validation", "cockpit_projection", "cockpit_route",
+    "candidate_validation", "cockpit_context_wire", "cockpit_projection",
+    "cockpit_route",
     "cockpit_session",
     "cockpit_tui", "composition_core", "content_safety",
     "control_boundary",
@@ -738,6 +739,11 @@ _ALLOWED_IMPORT_ROOTS = {
 # = stdlib-only 纯决策投影模块（零引擎/零 provider/零 IO 面，经其
 # 92 测试 + 集成测试背书），entry 仅经 routed_default_composition
 # 桥消费——默认路径专用，显式组合路径结构性不经。
+# CU-CONTEXT W1 精确放宽（2026-09-22 接线授权）：cockpit_context_wire
+# = 接缝域铸造/编译投影纯函数层（单向依赖语义层 cockpit_context/
+# cockpit_compile，零引擎/零调用/零持久化），entry 仅经其唯一公共面
+# compile_invocation_context 消费——语义层直连 import 仍禁
+# （test_route_integration_entry 钉定）。
 
 _BANNED_RUNTIME_NAMES = (
     "claude", "codex", "pi-cli", "gemini", "qwen", "opencode",

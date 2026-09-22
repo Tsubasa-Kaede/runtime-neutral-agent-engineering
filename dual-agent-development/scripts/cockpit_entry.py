@@ -56,6 +56,7 @@ from typing import NamedTuple
 try:  # flat-import mode (source tree/tests/examples; also installed: the
       # dual_agent shim keeps flat names resolvable and the graph single)
     from candidate_validation import CandidateValidationStatus
+    from cockpit_context_wire import compile_invocation_context
     from cockpit_projection import DEFAULT_ROLE_TEMPLATES
     from cockpit_route import (
         CostDimension,
@@ -88,6 +89,7 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
     from usage_log import UsageLog, UsageObservation
 except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
+    from .cockpit_context_wire import compile_invocation_context
     from .cockpit_projection import DEFAULT_ROLE_TEMPLATES
     from .cockpit_route import (
         CostDimension,
@@ -675,7 +677,8 @@ def _human_lines(task: str, step_plan, outcome) -> list:
 
 def _make_request_builder(task_text: str, task_id: str, role: str,
                           provider, timeout_seconds: float, *,
-                          emit=None, runtime_id=None, previous_role=None):
+                          emit=None, runtime_id=None, previous_role=None,
+                          step_index):
     """Build one StepSpec request_builder closure (pure function).
 
     The prior step's output is embedded as plain text (truncated)
@@ -684,6 +687,18 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     role-derived (never runtime-derived); model is left to the
     adapter's own default (ORCH-4 REAL-proven shape).
 
+    CU-CONTEXT W1: the embedded content is now the compiled segment
+    payload of the Context production projection — at call time, via
+    cockpit_context_wire.compile_invocation_context (the wiring's
+    single public face: mint snapshot -> compile_context). TASK is
+    always segments[0] (mandatory, kind rank first); PRIOR is at most
+    one segment and comes second (the phase-one source universe has
+    exactly the TASK+PRIOR kinds) — positional extraction is pinned by
+    tests. Template, section heading and HANDOFF emission stay at this
+    seam (the compiler produces no text assembly); the 4000 truncation
+    single source of truth stays _EMBED_LIMIT (the compile policy is
+    its derived value, never a copied constant).
+
     The optional emit/runtime_id/previous_role arguments are the
     CU-TUI-1 observation seam (keyword-only, absent on the default
     path). When a prior output is actually embedded into this step's
@@ -691,12 +706,13 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     (stage) and the receiving runtime (runtime_id) — composition
     facts about the prompt, with no transport or delivery meaning.
 
-    2.8-E boundary pin (§17(1)/§30-E, FROZEN): this factory is the
-    ONE AND ONLY prompt seam — the future Context Compiler's graft
-    point. Its closure inputs are exactly the current run's
-    authorized inputs (task_text, task_id, role, provider,
-    timeout_seconds) plus the current run's previous step output
-    delivered at call time. It structurally cannot read previous-run
+    2.8-E boundary pin (§17(1)/§30-E, FROZEN; graft realized under
+    the W1 authorization): this factory is the ONE AND ONLY prompt seam —
+    the future Context Compiler's graft point, now wired. Its
+    closure inputs are exactly the current run's authorized inputs
+    (task_text, task_id, role, provider, timeout_seconds, step_index)
+    plus the current run's previous step output delivered at call
+    time. It structurally cannot read previous-run
     transcripts/prompts, ConversationRecords, historical run text,
     cross-run memory, or UI history: Context != Full History,
     Conversation Record != Conversation Context, and cross-run text
@@ -704,18 +720,18 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     three). Signature and behavior are frozen; any change requires
     an explicit roadmap revision authorization."""
     def request_builder(previous_result):
-        prompt = _PROMPT_TEMPLATE.format(role=role, task=task_text)
-        if previous_result is not None:
-            prior = getattr(previous_result, "output", None)
-            if isinstance(prior, str) and prior:
-                if len(prior) > _EMBED_LIMIT:
-                    prior = prior[:_EMBED_LIMIT]
-                prompt = prompt + _PROMPT_PREVIOUS_SECTION + prior
-                if emit is not None:
-                    emit(ExecutionEventType.HANDOFF,
-                         stage=previous_role,
-                         runtime_id=runtime_id,
-                         status="EMBEDDED", reason="EMBEDDED")
+        compiled = compile_invocation_context(
+            task_text, task_id, step_index, previous_result,
+            previous_role, prior_char_limit=_EMBED_LIMIT)
+        segments = compiled.segments
+        prompt = _PROMPT_TEMPLATE.format(role=role, task=segments[0].payload)
+        if len(segments) > 1:
+            prompt = prompt + _PROMPT_PREVIOUS_SECTION + segments[1].payload
+            if emit is not None:
+                emit(ExecutionEventType.HANDOFF,
+                     stage=previous_role,
+                     runtime_id=runtime_id,
+                     status="EMBEDDED", reason="EMBEDDED")
         return ExternalAgentRequest(
             task_id=task_id,
             prompt=prompt,
@@ -1108,7 +1124,8 @@ def _assemble_execution(resolved, task, steps, timeout_seconds, *,
                     resolved[runtime_id].provider_id, timeout_seconds,
                     emit=emit, runtime_id=runtime_id,
                     previous_role=(steps[index - 1][0]
-                                   if index > 0 else None)))
+                                   if index > 0 else None),
+                    step_index=index))
             for index, (role, runtime_id) in enumerate(steps))
 
     session = CockpitSession(

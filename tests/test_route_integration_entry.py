@@ -460,11 +460,16 @@ class StaticBoundaryTests(unittest.TestCase):
     """静态边界（授权 §二十一）。"""
 
     def test_no_new_domain_imports(self):
-        """entry 新增 import 恰 cockpit_route 双分支各一；零 Compiler/
-        Memory/语义层新依赖。"""
+        """entry 新增 import 恰 cockpit_route 双分支各一 + W1 wire
+        单面（context 家族生产依赖仅经 wire 双形态 import；语义层
+        直连 import 仍禁——wire 是唯一合法通道）。"""
         self.assertEqual(ENTRY_SOURCE.count("from cockpit_route import"), 1)
         self.assertEqual(
             ENTRY_SOURCE.count("from .cockpit_route import"), 1)
+        self.assertEqual(
+            ENTRY_SOURCE.count("from cockpit_context_wire import"), 1)
+        self.assertEqual(
+            ENTRY_SOURCE.count("from .cockpit_context_wire import"), 1)
         for banned in ("cockpit_compile", "cockpit_memory",
                        "cockpit_context"):
             self.assertNotIn(f"import {banned}", ENTRY_SOURCE)
@@ -478,6 +483,10 @@ class StaticBoundaryTests(unittest.TestCase):
             self.assertNotIn(banned, bridge)
         for provider in ("claude", "codex", "gemini", "qwen"):
             self.assertNotIn(provider, bridge)
+        # W1：路由桥段零 context 家族（Router 与 Compiler 互不调用）
+        for context_literal in ("cockpit_compile", "cockpit_memory",
+                                "cockpit_context", "compile_context"):
+            self.assertNotIn(context_literal, bridge)
 
     def test_single_explicit_activation_site(self):
         """ORCH-5-ACT（Option A2）：激活位全仓唯一且显式——

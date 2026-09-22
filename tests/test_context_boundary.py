@@ -23,7 +23,8 @@ protection，非运行时策略）：
   run3 prompts 不含任何 run1/run2 文本与 record 派生物（老 run →
   record → prompt 与 老 run → /runs → 隐性 context → 下一
   request 两条走私路径同钉）；
-- 接缝钉定：_make_request_builder 签名九参数精确冻结、模板占位符
+- 接缝钉定：_make_request_builder 签名九参数精确冻结（W1 增必填
+  keyword-only step_index——零缺省即零双路径）、模板占位符
   恰 {role}{task}、EMBED_LIMIT 截断与 HANDOFF 发射行为不变、边界
   声明段落在库；
 - usage 诚实：混合三态真 UsageRecord 聚合（仅 KNOWN 求和）、
@@ -243,16 +244,19 @@ class SeamPinTests(unittest.TestCase):
     """_make_request_builder 签名/模板/嵌入行为逐项钉定（AC-02）。"""
 
     def test_signature_is_frozen(self):
-        # 8 参数（5 位置 + 3 keyword-only 观察接缝）——逐名逐序钉定
+        # 9 参数（5 位置 + 4 keyword-only：观察接缝三参 + W1 必填
+        # step_index）——逐名逐序钉定；step_index 无缺省（零双路径）
         signature = inspect.signature(
             cockpit_entry._make_request_builder)
         parameters = list(signature.parameters.values())
         self.assertEqual(
             [parameter.name for parameter in parameters],
             ["task_text", "task_id", "role", "provider",
-             "timeout_seconds", "emit", "runtime_id", "previous_role"])
+             "timeout_seconds", "emit", "runtime_id", "previous_role",
+             "step_index"])
         for parameter in parameters[5:]:
             self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(parameters[8].default, inspect.Parameter.empty)
 
     def test_prompt_template_placeholders_exactly_role_and_task(self):
         fields = {
@@ -279,7 +283,8 @@ class SeamPinTests(unittest.TestCase):
 
         builder = cockpit_entry._make_request_builder(
             "seam task", "tid-seam", "coder", "prov-x", 30.0,
-            emit=emit, runtime_id="rt-x", previous_role="architect")
+            emit=emit, runtime_id="rt-x", previous_role="architect",
+            step_index=1)
         request = builder(None)
         self.assertIn("seam task", request.prompt)
         self.assertNotIn("PREVIOUS STEP OUTPUT", request.prompt)
@@ -293,10 +298,13 @@ class SeamPinTests(unittest.TestCase):
 
         builder = cockpit_entry._make_request_builder(
             "seam task", "tid-seam", "coder", "prov-x", 30.0,
-            emit=emit, runtime_id="rt-x", previous_role="architect")
+            emit=emit, runtime_id="rt-x", previous_role="architect",
+            step_index=1)
         long_output = "A" * (cockpit_entry._EMBED_LIMIT + 500)
         request = builder(
-            SimpleNamespace(output=long_output))
+            SimpleNamespace(
+                output=long_output,
+                trace=SimpleNamespace(invocation_id="inv-seam-prior")))
         self.assertIn(cockpit_entry._PROMPT_PREVIOUS_SECTION, request.prompt)
         # verbatim 截断：恰 _EMBED_LIMIT 字符嵌入、尾部 500 字不在场
         self.assertIn("A" * cockpit_entry._EMBED_LIMIT, request.prompt)
