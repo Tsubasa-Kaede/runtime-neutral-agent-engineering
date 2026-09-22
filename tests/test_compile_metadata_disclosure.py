@@ -6,11 +6,13 @@
 
 钉定链（当前结构）：
 
-    cockpit_entry（接缝，只消费 segments）
+    cockpit_entry（接缝，prompt 只消费 segments；W3-P 起另作
+    只读披露转录——元数据唯一呈现消费者）
       → cockpit_context_wire（唯一公共面）
         → cockpit_context.compile_context（元数据唯一起源）
            metadata（selection_notes / budget / truncations /
-           token_measure=UNKNOWN / policy_fingerprint）→ 生产消费者零
+           token_measure=UNKNOWN / policy_fingerprint）→ 唯一
+           呈现消费者 = entry 披露映射（W3-P，只读、零 prompt 影响）
 
 边界律：Compiler ≠ Observation Truth；Metadata ≠ Usage Truth；
 Projection ≠ Source of Truth；UNKNOWN ≠ 0；Context ≠ Prompt Text；
@@ -88,17 +90,26 @@ def _prior_result(output="prior output text", invocation_id="w3-inv-prior"):
 
 
 class MetadataProvenanceTests(unittest.TestCase):
-    """事实 1/3：元数据唯一起源于 compile_context；生产消费者为零。"""
+    """事实 1/3：元数据唯一起源于 compile_context；类型符号不出
+    编译域；W3-P 后属性词的额外出现处 = entry 披露转录（唯一）。"""
 
-    def test_metadata_symbols_live_solely_in_compiler_module(self):
+    def test_metadata_type_symbols_live_solely_in_compiler_module(self):
         for token in ("BudgetReport", "SelectionNote", "TruncationFact",
-                      "selection_notes", "token_measure"):
+                      "CompiledInvocationContext("):
             self.assertEqual(_files_containing(token),
                              {"cockpit_compile.py"}, msg=token)
 
-    def test_compiled_product_constructed_only_in_compiler(self):
-        self.assertEqual(_files_containing("CompiledInvocationContext("),
-                         {"cockpit_compile.py"})
+    def test_metadata_attribute_reads_only_in_compiler_and_entry_disclosure(
+            self):
+        # W3-P 迁移：entry 成为元数据的唯一呈现消费者——属性词
+        # 只额外出现在 cockpit_entry.py 的 _compile_disclosure_record
+        # 只读转录处；selection_notes 同时是呈现域 CompileDisclosure
+        # 的字段名（忠实转录记录，cockpit_projection.py）。
+        self.assertEqual(_files_containing("selection_notes"),
+                         {"cockpit_compile.py", "cockpit_entry.py",
+                          "cockpit_projection.py"})
+        self.assertEqual(_files_containing("token_measure"),
+                         {"cockpit_compile.py", "cockpit_entry.py"})
 
     def test_production_call_chain_is_exactly_two_nodes(self):
         # compile_context：定义 + wire 唯一调用
@@ -110,15 +121,22 @@ class MetadataProvenanceTests(unittest.TestCase):
 
 
 class SeamConsumptionTests(unittest.TestCase):
-    """事实 2/4/5：接缝只消费 segments；元数据不进 prompt/request。"""
+    """事实 2/4/5：prompt 组装只消费 segments；元数据不进 prompt/
+    request（元数据读 = 披露转录专用，字节 oracle 仍 segments-only）。"""
 
-    def test_entry_attribute_access_on_compiled_is_segments_only(self):
+    def test_entry_reads_on_compiled_are_prompt_and_disclosure_only(self):
+        # W3-P 迁移：entry 对编译产物的全部属性读 = prompt 组装
+        # （segments）+ 披露只读转录（六元数据面，唯一去向 =
+        # CompileDisclosure）；prompt 仍只用 segments 组装由下一
+        # 字节 oracle 测试单独钉定。
         tree = ast.parse(_ENTRY_SOURCE)
-        attrs = [node.attr for node in ast.walk(tree)
+        attrs = {node.attr for node in ast.walk(tree)
                  if isinstance(node, ast.Attribute)
                  and isinstance(node.value, ast.Name)
-                 and node.value.id == "compiled"]
-        self.assertEqual(attrs, ["segments"])
+                 and node.value.id == "compiled"}
+        self.assertEqual(attrs, {
+            "segments", "task_id", "step_index", "policy_fingerprint",
+            "budget", "selection_notes", "token_measure"})
 
     def test_prompt_byte_equal_to_segments_assembly_without_metadata(self):
         task = "w3 qualification task"
@@ -305,7 +323,8 @@ class DomainIsolationTests(unittest.TestCase):
 
 
 class PresentationSeamTests(unittest.TestCase):
-    """事实 14/15：TUI/投影零 compiler 依赖；披露缝 dormant。"""
+    """事实 14/15：TUI/投影零 compiler 依赖；披露缝 W3-P 已激活
+    （compile_metadata additive 位，缺省 None = 逐字节一致）。"""
 
     def test_tui_import_graph_free_of_compile_domain(self):
         roots = _imported_roots("cockpit_tui.py")
@@ -317,16 +336,17 @@ class PresentationSeamTests(unittest.TestCase):
         self.assertFalse(set(_COMPILE_DOMAIN_ROOTS) & roots,
                          msg=f"cockpit_projection imports: {sorted(roots)}")
 
-    def test_projection_inputs_disclosure_slot_is_dormant(self):
+    def test_projection_inputs_disclosure_slot_is_w3p_active(self):
         slots = set(ProjectionInputs.__slots__)
-        # additive-optional 先例存在（capabilities：字段在、缺省 None、
-        # 投影诚实渲染占位）——未来披露字段的同构形态
-        self.assertIn("capabilities", slots)
+        # W3-P 激活的 additive 位：字段在、缺省 None、投影缺省
+        # 渲染逐字节一致（capabilities 先例同构）
+        self.assertIn("compile_metadata", slots)
         default = inspect.signature(
-            ProjectionInputs.__init__).parameters["capabilities"].default
+            ProjectionInputs.__init__).parameters[
+                "compile_metadata"].default
         self.assertIsNone(default)
-        # 当前未实现披露：零 compile 形字段
-        for slot in slots:
+        # 其余 slot 仍零 compile 形词根（不扩散）
+        for slot in slots - {"compile_metadata"}:
             for banned in ("compile", "truncation", "selection",
                            "fingerprint"):
                 self.assertNotIn(banned, slot)

@@ -57,7 +57,7 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
       # dual_agent shim keeps flat names resolvable and the graph single)
     from candidate_validation import CandidateValidationStatus
     from cockpit_context_wire import compile_invocation_context
-    from cockpit_projection import DEFAULT_ROLE_TEMPLATES
+    from cockpit_projection import CompileDisclosure, DEFAULT_ROLE_TEMPLATES
     from cockpit_route import (
         CostDimension,
         CostFactView,
@@ -90,7 +90,7 @@ try:  # flat-import mode (source tree/tests/examples; also installed: the
 except ImportError:  # embedded package context without the flat shim
     from .candidate_validation import CandidateValidationStatus
     from .cockpit_context_wire import compile_invocation_context
-    from .cockpit_projection import DEFAULT_ROLE_TEMPLATES
+    from .cockpit_projection import CompileDisclosure, DEFAULT_ROLE_TEMPLATES
     from .cockpit_route import (
         CostDimension,
         CostFactView,
@@ -678,7 +678,7 @@ def _human_lines(task: str, step_plan, outcome) -> list:
 def _make_request_builder(task_text: str, task_id: str, role: str,
                           provider, timeout_seconds: float, *,
                           emit=None, runtime_id=None, previous_role=None,
-                          step_index):
+                          step_index, disclosure_sink=None):
     """Build one StepSpec request_builder closure (pure function).
 
     The prior step's output is embedded as plain text (truncated)
@@ -706,6 +706,13 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     (stage) and the receiving runtime (runtime_id) — composition
     facts about the prompt, with no transport or delivery meaning.
 
+    CU-CONTEXT W3-P: the optional disclosure_sink (keyword-only,
+    default None) receives a read-only CompileDisclosure transcript
+    of the already-completed compile (no recompile, no event, no
+    journal fact) for presentation projection only. Metadata never
+    reaches the prompt, the request, or any execution/control/routing
+    truth; absence of the sink leaves every observable byte unchanged.
+
     2.8-E boundary pin (§17(1)/§30-E, FROZEN; graft realized under
     the W1 authorization): this factory is the ONE AND ONLY prompt seam —
     the future Context Compiler's graft point, now wired. Its
@@ -718,7 +725,9 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
     Conversation Record != Conversation Context, and cross-run text
     never enters any prompt (test_context_boundary.py pins all
     three). Signature and behavior are frozen; any change requires
-    an explicit roadmap revision authorization."""
+    an explicit roadmap revision authorization (the W3-P additive
+    disclosure_sink keyword above was added under exactly such an
+    authorization)."""
     def request_builder(previous_result):
         compiled = compile_invocation_context(
             task_text, task_id, step_index, previous_result,
@@ -732,6 +741,8 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
                      stage=previous_role,
                      runtime_id=runtime_id,
                      status="EMBEDDED", reason="EMBEDDED")
+        if disclosure_sink is not None:
+            disclosure_sink(_compile_disclosure_record(compiled))
         return ExternalAgentRequest(
             task_id=task_id,
             prompt=prompt,
@@ -742,6 +753,34 @@ def _make_request_builder(task_text: str, task_id: str, role: str,
             timeout_seconds=timeout_seconds,
         )
     return request_builder
+
+
+def _compile_disclosure_record(compiled):
+    """W3-P 只读映射：已完成编译产物 → 呈现域 CompileDisclosure。
+
+    纯读取转录（零重编译、零事件、零 journal fact、零 prompt/
+    request 影响——segments 在本函数不可见）；条目 kind 取封闭
+    词值，选择记账条目原样携带（身份 + 封闭原因词），计量状态
+    词照实转录（现阶段恒 UNKNOWN）。唯一调用方 = 上述 builder
+    的 disclosure_sink 分支。"""
+    return CompileDisclosure(
+        task_id=compiled.task_id,
+        step_index=compiled.step_index,
+        policy_fingerprint=compiled.policy_fingerprint,
+        item_counts_by_kind=tuple(
+            (kind.value, count)
+            for kind, count in compiled.budget.item_counts_by_kind),
+        embedded_chars_by_kind=tuple(
+            (kind.value, chars)
+            for kind, chars in compiled.budget.embedded_chars_by_kind),
+        total_embedded_chars=compiled.budget.total_embedded_chars,
+        truncations=tuple(
+            (fact.kind.value, fact.original_chars, fact.embedded_chars)
+            for fact in compiled.budget.truncations),
+        selection_notes=tuple(
+            (note.item_identity, note.reason)
+            for note in compiled.selection_notes),
+        token_status=compiled.token_measure.status.value)
 
 
 # ---------------------------------------------------------- observation
@@ -910,6 +949,11 @@ class ComposedRun(NamedTuple):
     # 对齐（成员声明序 = steps 序 = plan 序，装配事实）是投影层
     # slot 分区派生的唯一依据。
     member_ids: tuple = ()
+    # CU-CONTEXT W3-P 编译披露只读投影闭包：返回最近一次已完成
+    # 编译的 CompileDisclosure 转录（或 None——首次编译前）。
+    # 纯呈现供给（TUI → ProjectionInputs.compile_metadata）；
+    # 零执行真值、零第二元数据来源；缺省 None 下既有路径零变化。
+    compile_disclosure: object = None
 
 
 # ---------------------------------- 2.8-E Conversation Record（呈现视图）
@@ -1105,6 +1149,20 @@ def _assemble_execution(resolved, task, steps, timeout_seconds, *,
     slots = build_execution_slots(journal, tuple(slot_specs),
                                   execution_id=execution_id)
 
+    # W3-P 编译披露呈现镜像：builder 时点把已完成编译产物的只读
+    # 转录经 sink 写入本 cell；_compile_disclosure 为 TUI 只读投影
+    # 闭包（与 _revision_pending 同一注入范式）。零事件、零 journal
+    # fact、零 prompt/request 影响；metadata 永不流向执行/控制/路由
+    # 真值。PARKED/RESUME/修订不存在第二元数据来源——重建经同一
+    # 编译点（确定性编译，同值覆写）。
+    disclosure_cell = []
+
+    def _disclosure_sink(record):
+        disclosure_cell[:] = [record]
+
+    def _compile_disclosure():
+        return disclosure_cell[0] if disclosure_cell else None
+
     def _steps(submission):
         """CU-TUI-2 submission 缝：submission 值 → 受影响 StepSpecs。
 
@@ -1125,7 +1183,8 @@ def _assemble_execution(resolved, task, steps, timeout_seconds, *,
                     emit=emit, runtime_id=runtime_id,
                     previous_role=(steps[index - 1][0]
                                    if index > 0 else None),
-                    step_index=index))
+                    step_index=index,
+                    disclosure_sink=_disclosure_sink))
             for index, (role, runtime_id) in enumerate(steps))
 
     session = CockpitSession(
@@ -1190,6 +1249,7 @@ def _assemble_execution(resolved, task, steps, timeout_seconds, *,
         drive=_drive, session=session,
         dispatch_control=_dispatch_control,
         revision_pending=_revision_pending,
+        compile_disclosure=_compile_disclosure,
         events=lambda: (event_index.snapshot(task_id)
                         if event_index is not None else ()),
         facts=journal.snapshot, usage=usage_log.snapshot)
@@ -1665,7 +1725,8 @@ def cockpit_main(argv, *, factories=None, evidence=None, base_dir=None,
             usage=composed.usage,
             session=composed.session,
             control=composed.dispatch_control,
-            revision_pending=composed.revision_pending)
+            revision_pending=composed.revision_pending,
+            compile_disclosure=composed.compile_disclosure)
     else:
         outcome = composed.drive()
     if composed.emit is not None:

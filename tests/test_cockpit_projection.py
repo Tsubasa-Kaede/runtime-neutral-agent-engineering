@@ -1231,9 +1231,16 @@ class FunnelRendererGuardTests(unittest.TestCase):
             self.source = handle.read()
 
     def test_no_identity_computation_tokens(self):
+        # W3-P 迁移：投影层仍零 identity 计算（词表 + 计算原语双禁）；
+        # 唯一放行 = CompileDisclosure.policy_fingerprint 纯转录展示
+        # 字段（编译域已铸造值的原样呈现，本层零计算）——源内
+        # "fingerprint" 每次出现都必须是 "policy_fingerprint" 的一部分。
         for token in ("canonical_runtime_identity", "config_fingerprint",
-                      "fingerprint"):
+                      "hashlib", "sha256", "sha1", "hexdigest",
+                      "digest("):
             self.assertNotIn(token, self.source)
+        self.assertEqual(self.source.count("fingerprint"),
+                         self.source.count("policy_fingerprint"))
 
     def test_no_binding_composition_logic(self):
         # sorted+zip 默认指派只许存在于 entry 的

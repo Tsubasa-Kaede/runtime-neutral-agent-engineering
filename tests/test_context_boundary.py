@@ -23,10 +23,11 @@ protection，非运行时策略）：
   run3 prompts 不含任何 run1/run2 文本与 record 派生物（老 run →
   record → prompt 与 老 run → /runs → 隐性 context → 下一
   request 两条走私路径同钉）；
-- 接缝钉定：_make_request_builder 签名九参数精确冻结（W1 增必填
-  keyword-only step_index——零缺省即零双路径）、模板占位符
-  恰 {role}{task}、EMBED_LIMIT 截断与 HANDOFF 发射行为不变、边界
-  声明段落在库；
+- 接缝钉定：_make_request_builder 签名十参数精确冻结（W1 增必填
+  keyword-only step_index——零缺省即零双路径；W3-P 增可选
+  keyword-only disclosure_sink 缺省 None——缺席即零观察变化）、
+  模板占位符恰 {role}{task}、EMBED_LIMIT 截断与 HANDOFF 发射行为
+  不变、边界声明段落在库；
 - usage 诚实：混合三态真 UsageRecord 聚合（仅 KNOWN 求和）、
   结构耦合（UNKNOWN 带数字被构造期拒绝）；
 - 纪律静态扫描：TUI/projection 零 entry import、UI 零 prompt 接缝
@@ -244,8 +245,10 @@ class SeamPinTests(unittest.TestCase):
     """_make_request_builder 签名/模板/嵌入行为逐项钉定（AC-02）。"""
 
     def test_signature_is_frozen(self):
-        # 9 参数（5 位置 + 4 keyword-only：观察接缝三参 + W1 必填
-        # step_index）——逐名逐序钉定；step_index 无缺省（零双路径）
+        # 10 参数（5 位置 + 5 keyword-only：观察接缝三参 + W1 必填
+        # step_index + W3-P 可选 disclosure_sink）——逐名逐序钉定；
+        # step_index 无缺省（零双路径）；disclosure_sink 缺省
+        # None（W3-P 呈现披露缝——缺席 = 一切可观察字节不变）
         signature = inspect.signature(
             cockpit_entry._make_request_builder)
         parameters = list(signature.parameters.values())
@@ -253,10 +256,11 @@ class SeamPinTests(unittest.TestCase):
             [parameter.name for parameter in parameters],
             ["task_text", "task_id", "role", "provider",
              "timeout_seconds", "emit", "runtime_id", "previous_role",
-             "step_index"])
+             "step_index", "disclosure_sink"])
         for parameter in parameters[5:]:
             self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
         self.assertIs(parameters[8].default, inspect.Parameter.empty)
+        self.assertIsNone(parameters[9].default)
 
     def test_prompt_template_placeholders_exactly_role_and_task(self):
         fields = {

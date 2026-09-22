@@ -472,24 +472,31 @@ class ComposedRunGroupsCompatTests(unittest.TestCase):
         self.assertEqual(composed.member_ids, ())
 
     def test_field_order_and_constructor_compatibility(self):
+        # W3-P 起尾随 additive 位两个变三个：groups / member_ids /
+        # compile_disclosure（缺省 None——呈现披露闭包，零执行真值）
         self.assertEqual(
-            cockpit_entry.ComposedRun._fields[:-2],
+            cockpit_entry.ComposedRun._fields[:-3],
             ("task", "steps", "plan", "task_id", "execution_id",
              "emit", "drive", "session", "dispatch_control",
              "revision_pending", "events", "facts", "usage"))
-        self.assertEqual(cockpit_entry.ComposedRun._fields[-2], "groups")
-        self.assertEqual(cockpit_entry.ComposedRun._fields[-1], "member_ids")
+        self.assertEqual(cockpit_entry.ComposedRun._fields[-3], "groups")
+        self.assertEqual(cockpit_entry.ComposedRun._fields[-2],
+                         "member_ids")
+        self.assertEqual(cockpit_entry.ComposedRun._fields[-1],
+                         "compile_disclosure")
         keyword = cockpit_entry.ComposedRun(
             task="t", steps=(), plan=(), task_id="t", execution_id="e",
             emit=None, drive=None, session=None, dispatch_control=None,
             revision_pending=None, events=None, facts=None, usage=None)
         self.assertEqual(keyword.groups, ())
         self.assertEqual(keyword.member_ids, ())
+        self.assertIsNone(keyword.compile_disclosure)
         positional = cockpit_entry.ComposedRun(
             "t", (), (), "t", "e", None, None, None, None, None,
             None, None, None)
         self.assertEqual(positional.groups, ())
         self.assertEqual(positional.member_ids, ())
+        self.assertIsNone(positional.compile_disclosure)
         with_ids = cockpit_entry.ComposedRun(
             task="t", steps=(), plan=(), task_id="t", execution_id="e",
             emit=None, drive=None, session=None, dispatch_control=None,

@@ -431,7 +431,8 @@ def _build_classes() -> None:
 
         def __init__(self, *, driver=None, task="", plan=(), events=None,
                      facts=None, usage=None, session=None, control=None,
-                     revision_pending=None, composition_preview=None,
+                     revision_pending=None, compile_disclosure=None,
+                     composition_preview=None,
                      start_composition=None, task_token=None,
                      timeout_seconds=None,
                      user_composition_surface=None,
@@ -447,6 +448,11 @@ def _build_classes() -> None:
             # CU-TUI-4 注入面（DISPATCH / READ 两径，均零引擎知识）
             self._cockpit_control = control
             self._cockpit_revision_pending = revision_pending
+            # CU-CONTEXT W3-P 注入面（READ 径，零编译域知识）：
+            # 组装层只读闭包 → 最近一次编译的披露记录（或 None）。
+            # 只喂 ProjectionInputs.compile_metadata——本层绝不直读
+            # 编译产物/编译域模块（UI ≠ Source of Truth）。
+            self._cockpit_compile_disclosure = compile_disclosure
             # 呈现态（绝不入投影输入、绝不持久、绝不写回事实源）。
             # UX2-R1：composer 常驻——_cockpit_revise_text 缓冲真源
             # 移入 #composer widget（单一真相），此处只余 mode
@@ -748,6 +754,12 @@ def _build_classes() -> None:
                 groups=self._cockpit_groups,
                 member_ids=self._cockpit_member_ids,
                 scroll_mode=self._cockpit_scroll_mode,
+                # CU-CONTEXT W3-P 编译披露输入：组装层只读闭包的
+                # 当前值（None = 首次编译前/缺省路径，投影 COMPILE
+                # 段缺席 = 既有渲染逐字节一致）
+                compile_metadata=(
+                    None if self._cockpit_compile_disclosure is None
+                    else self._cockpit_compile_disclosure()),
                 # CU-PERF-1 W2：主屏不显示 trace（唯一消费方是
                 # TraceScreen，改经 trace_*_lines 三函数直取）——
                 # 免除每 tick 的全事件格式化白算。
@@ -1430,6 +1442,10 @@ def _build_classes() -> None:
             self._cockpit_session = composed.session
             self._cockpit_control = composed.dispatch_control
             self._cockpit_revision_pending = composed.revision_pending
+            # W3-P 编译披露只读闭包（getattr 鸭取——本层零 entry
+            # import 先例，同 groups/member_ids 注入法）
+            self._cockpit_compile_disclosure = getattr(
+                composed, "compile_disclosure", None)
             # 2.8-B run-local 快照只读缓存（getattr 鸭取——本层零
             # entry import 先例；新 run = 新呈现：横滚开关与 viewport
             # 偏移一并归零）
@@ -2548,12 +2564,14 @@ def __getattr__(name):
 
 
 def run_cockpit_tui(*, driver, task, plan, events, facts, usage,
-                    session, control=None, revision_pending=None):
+                    session, control=None, revision_pending=None,
+                    compile_disclosure=None):
     """同步外壳：驱动 App、收尾 worker、诚实返回/上抛（G16）。"""
     _build_classes()
     app = CockpitApp(driver=driver, task=task, plan=plan, events=events,
                      facts=facts, usage=usage, session=session,
-                     control=control, revision_pending=revision_pending)
+                     control=control, revision_pending=revision_pending,
+                     compile_disclosure=compile_disclosure)
     app.run()
     app.wait_for_driver()
     if app.failure is not None:

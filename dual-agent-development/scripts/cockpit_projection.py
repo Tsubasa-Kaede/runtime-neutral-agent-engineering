@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import textwrap
 from bisect import bisect_right
+from dataclasses import dataclass
 
 from console_observation import format_event_line
 from content_safety import contains_unsafe_content
 
 __all__ = (
     "AgentSlotView", "ProjectionInputs", "ProjectedState",
+    "CompileDisclosure",
     "build_projection", "derive_lifecycle", "display_width",
     "format_tokens", "truncate_to_width", "ui_label",
     "agent_detail", "pipeline_lines", "activity_tail_lines",
@@ -322,6 +324,42 @@ class AgentSlotView:
         self.provider = provider
 
 
+@dataclass(frozen=True)
+class CompileDisclosure:
+    """CU-CONTEXT W3-P：一次编译的呈现域披露记录（纯值对象）。
+
+    由组装层（cockpit_entry）对已完成编译产物做只读映射铸造——
+    本模块与编译域零 import（Compiler 词汇/类型不进呈现层；
+    TUI 只见本记录，绝不见 CompiledInvocationContext）。字段为
+    字符/条目记账的忠实转录：chars 词根恒在、条数恒条数；
+    token_status 是编译期计量状态词的转录（现阶段恒 UNKNOWN——
+    字符数绝不被表述、折算或暗示为 token 数；UNKNOWN 绝不折算
+    为 0）。缺省情况下（compile_metadata=None）投影输出与既有
+    渲染逐字节一致。"""
+
+    task_id: str
+    step_index: int
+    policy_fingerprint: str
+    item_counts_by_kind: tuple      # ((kind 词, 条数), ...) 按 kind 秩
+    embedded_chars_by_kind: tuple   # ((kind 词, 嵌入字符数), ...)
+    total_embedded_chars: int
+    truncations: tuple              # ((kind 词, 原字符, 嵌入字符), ...)
+    selection_notes: tuple          # ((条目身份 tuple, 封闭原因词), ...)
+    token_status: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("item_counts_by_kind", "embedded_chars_by_kind",
+                           "truncations", "selection_notes"):
+            if not isinstance(getattr(self, field_name), tuple):
+                raise ValueError(f"{field_name} must be a tuple")
+        for value in (self.step_index, self.total_embedded_chars):
+            if isinstance(value, bool) or not isinstance(value, int) \
+                    or value < 0:
+                raise ValueError(
+                    "step_index/total_embedded_chars must be "
+                    "non-negative ints")
+
+
 class ProjectionInputs:
     """一次投影的全部输入（调用方按只读约定供应事实源）。"""
 
@@ -331,7 +369,7 @@ class ProjectionInputs:
                  "pulse", "reveal_seqs", "result_reveal",
                  "selected_index", "expanded_stage", "locale",
                  "detail_max_lines", "result_max_lines", "include_trace",
-                 "groups", "member_ids", "scroll_mode")
+                 "groups", "member_ids", "scroll_mode", "compile_metadata")
 
     def __init__(self, *, task="", slots=(), events=(), facts=(),
                  usage_records=(), terminal=None, run_state=None,
@@ -341,7 +379,7 @@ class ProjectionInputs:
                  expanded_stage=None, locale="en",
                  detail_max_lines=None, result_max_lines=None,
                  include_trace=True, groups=(), member_ids=(),
-                 scroll_mode=False):
+                 scroll_mode=False, compile_metadata=None):
         self.task = task
         self.slots = tuple(slots)
         self.events = tuple(events)
@@ -388,6 +426,13 @@ class ProjectionInputs:
         self.groups = tuple(groups)
         self.member_ids = tuple(member_ids)
         self.scroll_mode = bool(scroll_mode)
+        # CU-CONTEXT W3-P 纯呈现输入（additive——缺省 None 下全部输出
+        # 与既有投影逐字节一致，capabilities 同构先例）：
+        # compile_metadata = CompileDisclosure 只读记录或 None——
+        # 编译期字符/条目记账经组装层只读映射供给，Context panel
+        # 的 COMPILE 段忠实转录（chars 词根恒在、token 状态词照实、
+        # 绝不折算绝不推测）。本层绝不回写、绝不成为第二真相源。
+        self.compile_metadata = compile_metadata
 
 
 class ProjectedState:
@@ -635,6 +680,30 @@ def _context_lines(values, lifecycle):
         lines.append(f"  {slot_view.runtime_id}  {shown}")
     lines.append("SESSION")
     lines.append(f"  tokens  {format_tokens(_known_token_total(values.usage_records))}")
+    # CU-CONTEXT W3-P：编译期记账披露段（COMPILE ≠ SESSION——
+    # 编译事实与 runtime 用量分节呈现；两者唯一同屏、绝不混算）。
+    # 仅在组装层供给披露记录时追加；缺省 None 下本函数输出与
+    # 既有渲染逐字节一致。行文只用 chars 词根与条数词——
+    # token 行只呈现编译期计量状态词（现阶段恒 UNKNOWN），
+    # 绝无 estimated/input 折算、绝无 cost 词根。
+    if values.compile_metadata is not None:
+        record = values.compile_metadata
+        lines.append("COMPILE")
+        lines.append(f"  task-id  {record.task_id}")
+        lines.append(f"  step  {record.step_index}")
+        lines.append(f"  policy  {record.policy_fingerprint}")
+        for kind_name, count in record.item_counts_by_kind:
+            lines.append(f"  items  {kind_name} {count}")
+        for kind_name, chars in record.embedded_chars_by_kind:
+            lines.append(f"  chars  {kind_name} {chars}")
+        lines.append(f"  total-chars  {record.total_embedded_chars}")
+        for kind_name, original_chars, embedded_chars in record.truncations:
+            lines.append(
+                f"  truncated  {kind_name} "
+                f"{original_chars}->{embedded_chars}")
+        for note_identity, reason in record.selection_notes:
+            lines.append(f"  excluded  {reason} {note_identity}")
+        lines.append(f"  token  {record.token_status}")
     return tuple(
         truncate_to_width(line, 28) for line in lines)
 
